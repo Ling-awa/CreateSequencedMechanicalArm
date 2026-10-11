@@ -73,13 +73,13 @@ public class ArmProgramTask {
 		for (int i = 0; i < list.size(); i++)
 			task.entries.add(ArmProgramEntry.load(list.getCompound(i), registries));
 
-		// ——— v3 → v4：任务的频率门控搬成任务开头的「等待信号」条目 ———
+		// ——— v3 → v4：任务的频率门控搬成任务开头的「收发信号（收）」条目 ———
 		// 老卡片的意思是"这个任务要通电（或断电）才跑"，直接丢掉会让它从"门控"变成"常驻"，
-		// 静默改变行为；写成第一条等待信号就完全等价。
+		// 静默改变行为；写成第一条等待信号就完全等价（signalMode 缺省 = RECEIVE，行为不变）。
 		Couple<Frequency> legacy = readLegacyFrequency(tag, registries);
 		if (legacy != null) {
 			ArmProgramEntry gate = new ArmProgramEntry();
-			gate.op = OperationType.WAIT_SIGNAL;
+			gate.op = OperationType.SIGNAL;
 			gate.frequency = legacy;
 			gate.waitForPowered = !tag.getBoolean("inv");
 			task.entries.add(0, gate);

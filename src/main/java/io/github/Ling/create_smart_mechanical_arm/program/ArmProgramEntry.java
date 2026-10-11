@@ -147,10 +147,20 @@ public class ArmProgramEntry {
 	 */
 	public int waitAmount = 20;
 	public WaitUnit waitUnit = WaitUnit.TICK;
-	/** WAIT_REDSTONE / WAIT_SIGNAL：等待通电（true）还是断电（false）。 */
+	/**
+	 * WAIT_REDSTONE / SIGNAL：极性（"通电"那一侧）。收：等通电（true）/ 等断电（false）；
+	 * 发：发通电 15（true）/ 发断电 0（false）—— 同一字段、同一含义方向（§7.16b 三）。
+	 */
 	public boolean waitForPowered = true;
 	/**
-	 * WAIT_SIGNAL（等待信号）：要等的红石链接频率（两个物品，与 Create 的链接频率一致）。
+	 * SIGNAL（收发信号）：模式 —— 收 / 发通电 / 发断电（§7.16b 一.2）。
+	 *
+	 * <p>{@code ordinal} 就是三选一选择框的下标（{@link #isSignalSend()} = {@code mode != RECEIVE}）。
+	 * 老卡没有 {@code sigmode} 键 ⇒ 缺省 {@code RECEIVE} ⇒ 行为与改造前完全一致。
+	 */
+	public SignalMode signalMode = SignalMode.RECEIVE;
+	/**
+	 * SIGNAL（收 / 发）要用的红石链接频率（两个物品，与 Create 的链接频率一致）。
 	 *
 	 * <p>从 {@link ArmProgramTask} 搬过来 —— 用户要求"把频率功能单独拆出来"，于是
 	 * "这个任务要通电才跑"变成任务开头的第一条等待信号条目，而任务只剩循环设置。
@@ -191,6 +201,85 @@ public class ArmProgramEntry {
 		return waitAmount * waitUnit.ticks;
 	}
 
+	/**
+	 * 发送脉冲的最长时长（ticks）；与 WAIT 的时长范围一致（§7.16b 三）。
+	 *
+	 * <p>{@code 0} = 一直保持（"占用 / 解除占用"就是这个），{@code >0} = 到点自动恢复。
+	 */
+	public static final int SIGNAL_MAX_TICKS = 120;
+
+	/**
+	 * SIGNAL 的模式（§7.16b 一.2）：收 / 发通电 / 发断电。
+	 *
+	 * <p>{@code ordinal} 直接当三选一选择框的下标用。
+	 */
+	public enum SignalMode {
+		RECEIVE, SEND_ON, SEND_OFF
+	}
+
+	/** 发信号（= 不是"收"）：{@code SEND_ON} 与 {@code SEND_OFF} 只差 {@link #waitForPowered}。 */
+	public boolean isSignalSend() {
+		return signalMode != SignalMode.RECEIVE;
+	}
+
+	public boolean isSignalReceive() {
+		return signalMode == SignalMode.RECEIVE;
+	}
+
+	/**
+	 * 发送的**持续**时长（ticks）：{@code 0} = 一直保持，否则 {@code clamp(waitAmount, 0, 120)}。
+	 *
+	 * <p>⚠️ <b>刻意不走 {@link #waitTicks()}</b>：{@code waitUnit} 是「等待」操作的单位字段，
+	 * 发送若读它，"在等待那条上切一下单位"就会把脉冲时长悄悄 ×20（§7.16b 三「复用 waitAmount 的陷阱」）。
+	 * 收信号（{@code RECEIVE}）没有"持续"这个概念，返回 0。
+	 */
+	public int signalTicks() {
+		if (isSignalReceive())
+			return 0;
+		return Math.max(0, Math.min(SIGNAL_MAX_TICKS, waitAmount));
+	}
+
+	/**
+	 * 这条操作失败时是"<b>重试到时限</b>"吗 —— 即它有没有一个**重试窗口**
+	 * （从 {@code OperationType} 的类型级谓词搬来，按**条目**判定：§7.16b 一.2、决策 73）。
+	 *
+	 * <p>取 / 放 / 卸 / 组装 / 等红石：不成功就是"还没成功"，会原地重试到「失败后」的时限，
+	 * 时限到了才走去向。没有重试窗口、但有失败出口的（攻击 / 调用）失败是**立刻有结论**的 ——
+	 * 挖不动、被领地保护、子任务抛错，等下去不会有任何变化。
+	 *
+	 * <p><b>为什么这条判定必须按条目、也只能有一处</b>：它同时决定三件事 —— 编辑器要不要给
+	 * "时限/单位"控件、{@code failAmount} 是不是有效字段、以及卡片上「失败后」该怎么写。
+	 * 三者写在两处就会不一致：曾经的 bug 正是"编辑器不给时限控件（所以 {@code failAmount} 一直是 -1），
+	 * 而文案却拿 -1 报『一直重试（没设时限）』" —— 玩家选了「失败后 跳转 2」，卡片上看到的却是"一直重试"，
+	 * 显示与实际行为刚好相反。
+	 *
+	 * <p>⚠️ {@code SIGNAL} 是**同一条操作，收有窗口、发没有**（发送不会失败）：
+	 * 收信号 {@code signalMode == RECEIVE} → 有；发信号 → 没有。
+	 * 这里**永不看 {@code waitForPowered}** —— 那是极性（等通电/等断电），与有没有失败出口无关。
+	 */
+	public boolean hasRetryWindow() {
+		return switch (op) {
+			case TAKE, DEPOSIT, UNLOAD, DEPLOY, WAIT_REDSTONE -> true;
+			case SIGNAL -> signalMode == SignalMode.RECEIVE;
+			default -> false;
+		};
+	}
+
+	/** 这条操作有"失败"这个出口吗（= 编辑器里要显示「失败后」）；条目级版本（§7.16b 一.2）。 */
+	public boolean hasFailureExit() {
+		return hasRetryWindow() || op == OperationType.MINE || op == OperationType.CALL;
+	}
+
+	/**
+	 * 只有**硬失败**（做不成，等也没用）的条目 —— 挖掘 / 调用：能设「失败后」但**没有时限**。
+	 *
+	 * <p>攻击**没有**失败出口：挥一击就是挥一击（不筛选、不判断有没有东西），永远返回"完成"。
+	 * 给它一个永远不会触发的「失败后」正是上一次修掉的那类误导（决策 73）。
+	 */
+	public boolean hasHardFailureExit() {
+		return hasFailureExit() && !hasRetryWindow();
+	}
+
 	/** 失败重试的窗口（ticks）；{@code -1} = 一直重试（运行时唯一使用的值）。 */
 	public int timeoutTicks() {
 		return failAmount < 0 ? -1 : failAmount * failUnit.ticks;
@@ -226,6 +315,9 @@ public class ArmProgramEntry {
 		tag.putInt("waitt", waitAmount);
 		tag.putString("wunit", waitUnit.name());
 		tag.putBoolean("redpow", waitForPowered);
+		// 收信号（缺省）**不写**这个键：只含收信号的卡存取前后 NBT 逐字节相同（老卡零扰动，§7.16a 第 10 条）
+		if (signalMode != SignalMode.RECEIVE)
+			tag.putString("sigmode", signalMode.name());
 		if (frequency != null)
 			tag.put("freq", frequency.serializeEach(f -> (CompoundTag) f.getStack()
 				.saveOptional(registries)));
@@ -259,6 +351,12 @@ public class ArmProgramEntry {
 		entry.waitAmount = Math.max(0, tag.getInt("waitt"));
 		entry.waitUnit = enumOf(WaitUnit.class, tag.getString("wunit"), WaitUnit.TICK);
 		entry.waitForPowered = !tag.contains("redpow") || tag.getBoolean("redpow");
+		// sigmode 缺键（老卡）= RECEIVE ⇒ 行为不变（兼容清单 2）；写的是**字符串**而不是 ordinal，
+		// 以后枚举增删项不会把老卡的"发"变成"收"（与 op/onok/timeout/urep 同一惯例）
+		entry.signalMode = enumOf(SignalMode.class, tag.getString("sigmode"), SignalMode.RECEIVE);
+		// 发信号的持续一律按 tick 读（signalTicks() 不走 waitTicks()）：夹进与 WAIT 相同的 0..120
+		if (entry.isSignalSend())
+			entry.waitAmount = Math.max(0, Math.min(SIGNAL_MAX_TICKS, entry.waitAmount));
 		entry.frequency = readFrequency(tag, registries);
 		entry.callTarget = tag.getString("call");
 		// 缺 calln（老卡）→ 1 轮；夹到合法区间，坏数据不许把循环次数搞成 0 或天文数字
@@ -331,11 +429,15 @@ public class ArmProgramEntry {
 			sb.append(" wait=")
 				.append(waitAmount)
 				.append(waitUnit);
-		if (op == OperationType.WAIT_REDSTONE || op == OperationType.WAIT_SIGNAL)
+		if (op == OperationType.WAIT_REDSTONE || op == OperationType.SIGNAL)
 			sb.append(" redstone=")
 				.append(waitForPowered ? "on" : "off");
-		if (op == OperationType.WAIT_SIGNAL)
-			sb.append(" freq=")
+		if (op == OperationType.SIGNAL)
+			sb.append(" mode=")
+				.append(signalMode)
+				.append(" ticks=")
+				.append(signalTicks())
+				.append(" freq=")
 				.append(frequency == null ? "未设置"
 					: frequency.getFirst()
 						.getStack()

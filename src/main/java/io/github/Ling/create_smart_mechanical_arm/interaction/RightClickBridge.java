@@ -109,7 +109,7 @@ public class RightClickBridge {
 	 * 挥空也是挥了一击，这一条算完成 —— 想等怪物走进来，就在前面加一条「等待」。
 	 *
 	 * <p>注意它**永远返回完成**（除了世界/假玩家还没就绪那种基础设施重试）：所以编辑器不给它「失败后」
-	 * （见 `OperationType.canFail()`）。
+	 * （见 `ArmProgramEntry.hasFailureExit()`）。
 	 */
 	public Result attack(BlockPos pos, Direction face) {
 		if (!(arm.getLevel() instanceof ServerLevel level))

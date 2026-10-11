@@ -44,6 +44,7 @@ public final class DevPresets {
 		map.put("use_sneak", DevPresets::useSneak);
 		map.put("subtasks", DevPresets::mainWithSubTasks); // 主任务 + 子任务 + 调用/退出/抛错
 		map.put("freq", DevPresets::frequency);
+		map.put("signal_send", DevPresets::signalSend); // 收发信号：占用 / 解除（用户给的炒锅用法）
 		map.put("hold", DevPresets::holdOnly);
 		return map;
 	}
@@ -176,7 +177,7 @@ public final class DevPresets {
 
 		ArmProgramTask main = task("主任务", LoopType.FOREVER);
 		ArmProgramEntry gate = new ArmProgramEntry();
-		gate.op = OperationType.WAIT_SIGNAL;
+		gate.op = OperationType.SIGNAL;
 		gate.frequency = demoFrequency();
 		gate.waitForPowered = true;
 		gate.note = "通电才跑这一轮";
@@ -219,17 +220,58 @@ public final class DevPresets {
 		return program;
 	}
 
-	/** 频率门控演示（§7.6 v4）：门控现在是任务开头的「等待信号」条目。 */
+	/** 频率门控演示（§7.6 v4）：门控现在是任务开头的「收发信号（收）」条目。 */
 	public static ArmProgram frequency() {
 		ArmProgramTask task = task("freq", LoopType.UNTIL_FAIL);
 		ArmProgramEntry gate = new ArmProgramEntry();
-		gate.op = OperationType.WAIT_SIGNAL;
+		gate.op = OperationType.SIGNAL;
 		gate.frequency = demoFrequency();
 		gate.waitForPowered = true;
 		gate.note = "红石链接通电才开始";
 		task.entries.add(gate);
 		task.entries.add(entry(OperationType.TAKE, 2, 0, 0));
 		task.entries.add(entry(OperationType.DEPOSIT, 0, 0, 2));
+		return single(task);
+	}
+
+	/**
+	 * 「收发信号（发）」的演示（§7.16b 一.9）：<b>发通电（一直保持）→ 等 1 秒 → 发断电</b>。
+	 *
+	 * <p>这正是用户给的炒锅用法：开始用一个锅时把那个频率**按下去**（占用），取完东西再**松开**
+	 * （解除占用）。三条锅就是三对频率 —— 复制这张卡、只改频率即可。
+	 *
+	 * <p>第一条 {@code waitAmount = 0} = 一直保持（不是脉冲）；第三条的持续同样是 0，
+	 * 但它发的是**电平 0**（{@code waitForPowered = false}）—— 0 是合法的发送值，那正是"发断电"。
+	 */
+	public static ArmProgram signalSend() {
+		ArmProgramTask task = task("signal_send", LoopType.COUNT);
+		task.loopCount = 1;
+
+		ArmProgramEntry occupy = new ArmProgramEntry();
+		occupy.op = OperationType.SIGNAL;
+		occupy.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		occupy.frequency = demoFrequency();
+		occupy.waitForPowered = true;
+		occupy.waitAmount = 0; // 一直保持 = 占用
+		occupy.note = "占用这个频率（一直保持）";
+		task.entries.add(occupy);
+
+		ArmProgramEntry hold = new ArmProgramEntry();
+		hold.op = OperationType.WAIT;
+		hold.waitAmount = 1;
+		hold.waitUnit = ArmProgramEntry.WaitUnit.SECOND;
+		hold.note = "锅在这 1 秒里干活";
+		task.entries.add(hold);
+
+		ArmProgramEntry release = new ArmProgramEntry();
+		release.op = OperationType.SIGNAL;
+		release.signalMode = ArmProgramEntry.SignalMode.SEND_OFF;
+		release.frequency = demoFrequency();
+		release.waitForPowered = false; // 电平 0 = 发断电
+		release.waitAmount = 0; // 也是"保持"：断了就一直断着
+		release.note = "解除占用";
+		task.entries.add(release);
+
 		return single(task);
 	}
 

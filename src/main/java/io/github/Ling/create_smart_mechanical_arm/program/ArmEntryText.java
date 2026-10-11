@@ -68,9 +68,11 @@ public final class ArmEntryText {
 				.append(unitSuffix(entry.waitUnit));
 			case WAIT_REDSTONE -> suffix.append("  ")
 				.append(tr(entry.waitForPowered ? "on" : "off").getString());
-			case WAIT_SIGNAL -> {
+			case SIGNAL -> {
+				// 收：等通电 / 等断电（老卡 redpow=false **仍然显示"等断电"** —— 兼容清单 3：界面不给开关，
+				//     但绝不能静默隐瞒它仍然在等断电）；发：发通电 / 发断电。
 				suffix.append("  ")
-					.append(tr(entry.waitForPowered ? "on" : "off").getString());
+					.append(signalStateText(entry).getString());
 				// 频率物品是"等哪一对物品"的必需信息：卡片上它是两个图标，而工具提示里没有图标，
 				// 所以那里只能把名字写出来（空槽位不写，免得出现 "Air + Air"）。
 				if (withFrequencyItems) {
@@ -113,16 +115,29 @@ public final class ArmEntryText {
 	}
 
 	/**
-	 * 「等待信号」的极性文字（通 / 断）。
+	 * 「收发信号」的**状态文字** —— <b>卡片标题芯片与护目镜唯一的来源</b>（§11 决策 43）。
 	 *
-	 * <p>卡片上它排在**两个信号物品槽之后**（用户定的读法：图标 · 等信号 · 物品 · 物品 · 开/关），
-	 * 所以单独取出来用，而不是拼进 {@link #base} 的字符串里；护目镜那边没有物品槽，仍旧拼在行内。
+	 * <p>三态（§7.16b 一.7）：
+	 * <ul>
+	 *   <li>收 + {@code waitForPowered=true} → {@code 等通电}；</li>
+	 *   <li>收 + {@code waitForPowered=false} → {@code 等断电}（<b>老卡照旧</b>：界面上不再给这个开关，
+	 *       但卡片与护目镜必须照样把它写出来 —— 静默改行为不行，静默隐瞒更不行）；</li>
+	 *   <li>发 + 持续 0 → {@code chip.signal_hold}（{@code 发通电 保持}）；持续 &gt;0 →
+	 *       {@code chip.signal_pulse}（{@code 发断电 1t}）。</li>
+	 * </ul>
 	 */
-	public static Component signalPolarity(ArmProgramEntry entry) {
-		return tr(entry.waitForPowered ? "on" : "off");
+	public static Component signalStateText(ArmProgramEntry entry) {
+		Component polarity = tr(entry.waitForPowered ? "on" : "off");
+		if (entry.isSignalReceive())
+			return tr(entry.waitForPowered ? "entry.signal_wait_on" : "entry.signal_wait_off");
+		int ticks = entry.signalTicks();
+		// 0 = 一直保持（"占用 / 解除占用"就是这个）；>0 = 到点自动恢复的脉冲
+		if (ticks <= 0)
+			return tr("chip.signal_hold", polarity);
+		return tr("chip.signal_pulse", polarity, ticks + unitSuffix(WaitUnit.TICK));
 	}
 
-	/** 「等待信号」绑定的那对频率物品名（形如 {@code 铁锭 + 红石}）；没绑或空槽返回空串。 */
+	/** 「收发信号」绑定的那对频率物品名（形如 {@code 铁锭 + 红石}）；没绑或空槽返回空串。 */
 	private static String frequencyText(ArmProgramEntry entry) {
 		if (entry.frequency == null)
 			return "";
@@ -198,12 +213,13 @@ public final class ArmEntryText {
 	 * 也解释了为什么玩家看到的是重试。所以那种情况只报"一直重试"。
 	 *
 	 * <p>⚠️⚠️ 但那句话**只对"有重试窗口"的操作成立**（第二十七轮用户实测的 bug）：攻击 / 调用属于"硬失败"
-	 * —— 编辑器根本不给他们时限控件（{@link OperationType#hasRetryWindow()} 为假），所以 {@code failAmount}
+	 * —— 编辑器根本不给他们时限控件（{@link ArmProgramEntry#hasRetryWindow()} 为假），所以 {@code failAmount}
 	 * 恒为 -1，而失败是**立刻**发生、去向**马上生效**的。拿 -1 去报"一直重试"就与实际行为刚好相反：
 	 * 玩家选了「失败后 跳转 2」，卡片上却写着"一直重试（没设时限）"。这类操作直接报去向。
 	 */
 	public static Component failureText(ArmProgramEntry entry) {
-		if (!entry.op.hasRetryWindow())
+		// 按**条目**判（不是按类型）：同一条 SIGNAL，收有失败出口、发没有（§7.16b 一.7）
+		if (!entry.hasRetryWindow())
 			return switch (entry.onTimeout) {
 				case CONTINUE -> tr("chip.fail_skip");
 				case SKIP_TO -> tr("chip.fail_jump", entry.timeoutTarget);

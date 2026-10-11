@@ -8,6 +8,7 @@ import java.util.function.Supplier;
 
 import com.mojang.logging.LogUtils;
 import com.simibubi.create.AllDataComponents;
+import com.simibubi.create.Create;
 import com.simibubi.create.content.contraptions.StructureTransform;
 import com.simibubi.create.content.equipment.clipboard.ClipboardContent;
 import com.simibubi.create.content.equipment.clipboard.ClipboardEntry;
@@ -125,6 +126,9 @@ public class SmartArmSelfTest {
 		checkArmRangeGate();
 		checkWaitSemantics();
 		checkUsePlacesOnAir(server);
+		checkSignalSendReceive(server);
+		checkEntryPredicates();
+		checkSignalSendPreset();
 		checkArmPointClassification(server);
 		checkFunnelTransferNotice(server);
 		checkTakeGateEndToEnd(server);
@@ -205,8 +209,8 @@ public class SmartArmSelfTest {
 						.noneMatch(t -> t.name.equals(entry.callTarget)))
 						LOGGER.error("[selftest] preset {} 的调用目标不存在：{}", preset.getKey(), entry.callTarget);
 					// 等待信号必须真的绑了频率，否则永远等不到
-					if (entry.op == OperationType.WAIT_SIGNAL && entry.frequency == null)
-						LOGGER.error("[selftest] preset {} 有一条「等待信号」没绑频率", preset.getKey());
+					if (entry.op.usesSignalPair() && entry.frequency == null)
+						LOGGER.error("[selftest] preset {} 有一条「收发信号」没绑频率", preset.getKey());
 				}
 			}
 		}
@@ -607,7 +611,7 @@ public class SmartArmSelfTest {
 		// 等待类必须**只有**三种原地等待：运行时靠这个标志决定"等待前先收回手臂"，
 		// 把控制类（调用/退出/抛错）算进去就会在连续两条目标之间多绕一趟（§7.6 v4）。
 		boolean waitSplit = OperationType.WAIT.isWait() && OperationType.WAIT_REDSTONE.isWait()
-			&& OperationType.WAIT_SIGNAL.isWait() && !OperationType.CALL.isWait() && !OperationType.BREAK.isWait()
+			&& OperationType.SIGNAL.isWait() && !OperationType.CALL.isWait() && !OperationType.BREAK.isWait()
 			&& !OperationType.THROW.isWait() && !OperationType.TAKE.isWait() && !OperationType.MINE.isWait();
 
 		ServerLevel level = server.overworld();
@@ -809,7 +813,7 @@ public class SmartArmSelfTest {
 			&& !ProgramRuntime.isPaced(ProgramRuntime.EntryState.HALTED);
 
 		// 两种操作的"等待"必须都在 paced 里：WAIT/等红石/等信号 进 WAITING，阻塞重试（等玩家补货）进 RETRY
-		boolean waitsCovered = OperationType.WAIT.isWait() && OperationType.WAIT_SIGNAL.isWait()
+		boolean waitsCovered = OperationType.WAIT.isWait() && OperationType.SIGNAL.isWait()
 			&& ProgramRuntime.isPaced(ProgramRuntime.EntryState.WAITING)
 			&& ProgramRuntime.isPaced(ProgramRuntime.EntryState.RETRY);
 
@@ -916,7 +920,7 @@ public class SmartArmSelfTest {
 			&& ProgramRuntime.waitSatisfied(false, false) && !ProgramRuntime.waitSatisfied(true, false);
 
 		ArmProgramEntry signal = new ArmProgramEntry();
-		signal.op = OperationType.WAIT_SIGNAL;
+		signal.op = OperationType.SIGNAL;
 		Couple<Frequency> pair = Couple.create(() -> Frequency.EMPTY);
 		pair.set(true, Frequency.of(new ItemStack(Items.REDSTONE_TORCH)));
 		pair.set(false, Frequency.of(ItemStack.EMPTY)); // 频率允许有一格留空（用户明确要求）
@@ -927,20 +931,34 @@ public class SmartArmSelfTest {
 		boolean firstKept = slots[0].getItem() == Items.REDSTONE_TORCH && slots[1].isEmpty();
 
 		ArmProgramEntry unbound = new ArmProgramEntry();
-		unbound.op = OperationType.WAIT_SIGNAL;
+		unbound.op = OperationType.SIGNAL;
 		ItemStack[] empty = ArmIcons.signalPair(unbound);
 		boolean unboundReserves = empty.length == 2 && empty[0].isEmpty() && empty[1].isEmpty();
 
 		// 图标槽与频率槽是分开的：自定义图标只进图标槽，两个频率槽照样显示频率
 		ArmProgramEntry custom = new ArmProgramEntry();
-		custom.op = OperationType.WAIT_SIGNAL;
+		custom.op = OperationType.SIGNAL;
 		custom.frequency = pair;
 		custom.icon = new ItemStack(Items.DIAMOND);
 		boolean iconSeparate = ArmIcons.iconFor(custom)
 			.getItem() == Items.DIAMOND && ArmIcons.signalPair(custom)[0].getItem() == Items.REDSTONE_TORCH;
 
-		LOGGER.info("[selftest] 等信号: 极性真值表={} 频率两槽占位={} 空格保留={} 未绑也占位={} 图标与频率分开={}", polarity,
-			twoSlots, firstKept, unboundReserves, iconSeparate);
+		// ★ §7.16b 四 断言 2 的第六项：**缺 sigmode 的条目 = RECEIVE**（老卡没有这个键 ⇒ 行为一字不变）。
+		// 这里用"只含注册表"的 Provider，纯模型、不需要世界（与客户端的做法一致）。
+		HolderLookup.Provider bare = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+		ArmProgramEntry legacySignal = new ArmProgramEntry();
+		legacySignal.op = OperationType.SIGNAL;
+		legacySignal.frequency = pair;
+		legacySignal.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		CompoundTag legacySignalTag = legacySignal.save(bare);
+		legacySignalTag.remove("sigmode");
+		boolean legacyDefaultReceive = ArmProgramEntry.load(legacySignalTag, bare).signalMode
+			== ArmProgramEntry.SignalMode.RECEIVE;
+		if (!legacyDefaultReceive)
+			LOGGER.error("[selftest] 缺 sigmode 的条目没有落在 RECEIVE（老卡里那条「收」会变成「发」）");
+
+		LOGGER.info("[selftest] 等信号: 极性真值表={} 频率两槽占位={} 空格保留={} 未绑也占位={} 图标与频率分开={} 缺sigmode=收={}",
+			polarity, twoSlots, firstKept, unboundReserves, iconSeparate, legacyDefaultReceive);
 		if (!polarity)
 			LOGGER.error("[selftest] 「等信号」极性错了（又出现取反两次）：收到信号应当通过");
 		if (!twoSlots || !firstKept || !unboundReserves)
@@ -992,6 +1010,241 @@ public class SmartArmSelfTest {
 		LOGGER.info("[selftest] 使用→空气格放方块: 放上了={} （{}）", placed, detail);
 		if (!placed)
 			LOGGER.error("[selftest] 「使用」对着空气格没有放下方块（{}）—— 用户要的「使用也可以是放置方块」没成立", detail);
+	}
+
+	// ——————————————— §7.16b 四「服务端」的 8 条新断言（收发信号，3e-C） ———————————————
+
+	/**
+	 * 断言 1–6：收发信号的**行为**（§7.16b 四）。
+	 *
+	 * <p>为什么必须要（用户点名的那条边界）：发送是"臂在世界里按住一个红石链接频率"，
+	 * 而 {@code hasAnyLoadedPower} **只读强度、完全不看 isAlive()** —— 停机 / 拆卡 / 区块卸载时
+	 * 只要少调一次 {@code clearTransmissions()}，世界里就留下一个**永远通电**的频率，
+	 * 而任何界面都看不出异常。位置与钩子照 {@link #checkUsePlacesOnAir}：真放一块臂、真驱动、finally 复原。
+	 */
+	private static void checkSignalSendReceive(MinecraftServer server) {
+		HolderLookup.Provider registries = server.registryAccess();
+
+		// ——— 断言 1：老名迁移 + 缺省模式 ———
+		boolean migrated = OperationType.byName("WAIT_SIGNAL", null) == OperationType.SIGNAL;
+		boolean defaultReceive = new ArmProgramEntry().signalMode == ArmProgramEntry.SignalMode.RECEIVE;
+		LOGGER.info("[selftest] 收发信号: 老名迁移={} 缺省模式={}", migrated, defaultReceive ? "收" : "发");
+		if (!migrated)
+			LOGGER.error("[selftest] 旧名字 WAIT_SIGNAL 没有迁到 SIGNAL（老卡里那条会变成 TAKE）");
+		if (!defaultReceive)
+			LOGGER.error("[selftest] 缺 sigmode 的条目没有落在 RECEIVE");
+
+		// ——— 断言 2：NBT 往返 / 收信号零扰动 / 发信号时长 ———
+		boolean modeRoundTrip = true;
+		for (ArmProgramEntry.SignalMode mode : ArmProgramEntry.SignalMode.values()) {
+			ArmProgramEntry e = new ArmProgramEntry();
+			e.op = OperationType.SIGNAL;
+			e.signalMode = mode;
+			ArmProgramEntry back = ArmProgramEntry.load(e.save(registries), registries);
+			if (back.signalMode != mode)
+				modeRoundTrip = false;
+		}
+		ArmProgramEntry recvEntry = new ArmProgramEntry();
+		recvEntry.op = OperationType.SIGNAL;
+		recvEntry.waitForPowered = false;
+		recvEntry.note = "老卡";
+		CompoundTag recvTag = recvEntry.save(registries);
+		boolean receiveClean = !recvTag.contains("sigmode");
+		ArmProgramEntry sendEntry = new ArmProgramEntry();
+		sendEntry.op = OperationType.SIGNAL;
+		sendEntry.signalMode = ArmProgramEntry.SignalMode.SEND_OFF;
+		sendEntry.waitAmount = 3;
+		boolean sendTicksRoundTrip = ArmProgramEntry.load(sendEntry.save(registries), registries)
+			.signalTicks() == 3;
+		// 缺 sigmode 的条目 = RECEIVE（老卡零扰动的前提）
+		CompoundTag legacyTag = recvTag.copy();
+		legacyTag.remove("sigmode");
+		boolean legacyReceive = ArmProgramEntry.load(legacyTag, registries).signalMode
+			== ArmProgramEntry.SignalMode.RECEIVE;
+
+		LOGGER.info("[selftest] 收发信号 NBT: sigmode往返={} 收信号零扰动={} 发信号时长往返={}", modeRoundTrip,
+			receiveClean, sendTicksRoundTrip);
+		if (!modeRoundTrip)
+			LOGGER.error("[selftest] sigmode 的 NBT 往返不稳定");
+		if (!receiveClean)
+			LOGGER.error("[selftest] 收信号条目被写进了 sigmode（老卡不再逐字节不变）");
+		if (!sendTicksRoundTrip)
+			LOGGER.error("[selftest] 发信号的持续时长没有往返稳定（waitAmount=3）");
+		if (!legacyReceive)
+			LOGGER.error("[selftest] 缺 sigmode 的条目没有落在 RECEIVE");
+
+		// ——— 断言 3：接收回归（老卡的 redpow=false 照样等断电） ———
+		boolean receiveRegression = ProgramRuntime.waitSatisfied(true, true)
+			&& !ProgramRuntime.waitSatisfied(false, true) && ProgramRuntime.waitSatisfied(false, false)
+			&& !ProgramRuntime.waitSatisfied(true, false);
+		LOGGER.info("[selftest] 收发信号 接收回归: 老卡等断电仍生效={}", receiveRegression);
+		if (!receiveRegression)
+			LOGGER.error("[selftest] 「等断电」的老卡极性错了（接收也吃成了发送的语义）");
+
+		// ——— 断言 4–6：行为（真放一块臂） ———
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 52, 201, spawn.getZ() + 52);
+		BlockState oldArm = level.getBlockState(armPos);
+		Couple<Frequency> f1 = testFrequency(Items.REDSTONE_TORCH, Items.IRON_INGOT);
+		Couple<Frequency> f2 = testFrequency(Items.LEVER, Items.REDSTONE);
+		String error = null;
+		boolean powered = false;
+		boolean offAfterHalt = false;
+		boolean removedFromNetwork = false;
+		boolean pulseRestored = false;
+		boolean noPulseAfterClear = false;
+		boolean oldFrequencyClean = false;
+		boolean f2Clean = false;
+		try {
+			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
+				error = "臂的方块实体没建出来";
+			} else {
+				// ④ 发通电 → 网络里有电；停机 → 断电；已退网
+				arm.emitSignal(f1, 15, 0);
+				powered = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				arm.runtime.halt(arm, "自检");
+				offAfterHalt = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				removedFromNetwork = arm.getArmLinkLevel() == 0 && !arm.isTransmittingTo(f1);
+				// ⑤ 脉冲：发 1t → 通电 → 推一次计时器 → 断电（并且撤网）
+				arm.emitSignal(f1, 15, 1);
+				boolean poweredDuringPulse = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				boolean fired = arm.runtime.tickArmLinkTimers(arm);
+				pulseRestored = poweredDuringPulse && fired
+					&& !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				// ⑥ 换频率：老频率不能残留（7.16a 第 6 条那个坑）。
+				// 判据用**当前的网络 key**：getNetworkKey() 是活的，忘了"先按旧 key 退网"的话
+				// 老那一格里还留着我们（只是强度 0）—— 只看"有没有电"抓不到。
+				arm.emitSignal(f1, 15, 0);
+				arm.emitSignal(f2, 15, 0);
+				boolean movedKey = f2.equals(arm.currentArmLinkKey());
+				arm.clearTransmissions();
+				oldFrequencyClean = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
+					&& !arm.isTransmittingTo(f1);
+				f2Clean = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2)
+					&& !arm.isTransmittingTo(f2);
+				boolean keyReleased = arm.currentArmLinkKey() == null;
+				noPulseAfterClear = !arm.runtime.tickArmLinkTimers(arm);
+				if (!movedKey)
+					LOGGER.error("[selftest] 换频率后 ArmLink 的网络 key 没有切到新频率（老那格会永远留着）");
+				if (!keyReleased)
+					LOGGER.error("[selftest] 收干净之后网络 key 还留着（应当一起清掉）");
+			}
+		} catch (Throwable t) {
+			error = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+		if (error != null)
+			LOGGER.error("[selftest] 收发信号 行为自检异常：{}", error);
+
+		LOGGER.info("[selftest] 收发信号 发送: 发通电→通电={} 停机→断电={} 已退网={}", powered, offAfterHalt,
+			removedFromNetwork);
+		if (!powered)
+			LOGGER.error("[selftest] 发出去的频率在网络里没有电（emitSignal 没接上红石链接网络）");
+		if (!offAfterHalt)
+			LOGGER.error("[selftest] 停机后那个频率仍然通电（世界里留了一个永远通电的频率）");
+		if (!removedFromNetwork)
+			LOGGER.error("[selftest] 停机后没有把发送端撤出网络（或者电平没关到 0）");
+
+		LOGGER.info("[selftest] 收发信号 脉冲: 到点自动恢复={}", pulseRestored && noPulseAfterClear);
+		if (!pulseRestored)
+			LOGGER.error("[selftest] 发出去的脉冲没有到点自动恢复（计时器没推进 / 恢复值不对）");
+		if (!noPulseAfterClear)
+			LOGGER.error("[selftest] 收干净之后脉冲计时器还在跑（应当被清成 -1）");
+
+		LOGGER.info("[selftest] 收发信号 换频率: 老频率不残留={}", oldFrequencyClean && f2Clean);
+		if (!oldFrequencyClean)
+			LOGGER.error("[selftest] 换频率时老频率仍然通电（emitSignal 少了 removeFromNetwork(旧key)）");
+		if (!f2Clean)
+			LOGGER.error("[selftest] 清干净之后新频率仍然通电（clearTransmissions 少了一步）");
+	}
+
+	/** 自检用的频率对（两个物品 = Create 红石链接的一对频率）。 */
+	private static Couple<Frequency> testFrequency(Item first, Item second) {
+		Couple<Frequency> freq = Couple.create(() -> Frequency.EMPTY);
+		freq.set(true, Frequency.of(new ItemStack(first)));
+		freq.set(false, Frequency.of(new ItemStack(second)));
+		return freq;
+	}
+
+	/**
+	 * 断言 7：失败出口谓词**按条目**判（§7.16b 四 断言 7 / 决策 73）。
+	 *
+	 * <p>同一条 {@code SIGNAL}：收 = 有重试窗口（等一下条件就变）；发 = **没有失败出口**
+	 * （发送永远成功、也不阻塞）—— 写成"按类型"就会在发的卡片上冒出一个**永不触发**的「失败后」。
+	 */
+	private static void checkEntryPredicates() {
+		ArmProgramEntry recv = new ArmProgramEntry();
+		recv.op = OperationType.SIGNAL;
+		ArmProgramEntry send = new ArmProgramEntry();
+		send.op = OperationType.SIGNAL;
+		send.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+
+		boolean recvHasFailure = recv.hasRetryWindow() && recv.hasFailureExit();
+		boolean sendHasNone = !send.hasRetryWindow() && !send.hasFailureExit() && !send.hasHardFailureExit()
+			&& !send.isSignalReceive();
+		// 挖 / 调用属于"有失败出口、没有重试窗口"（§7.7：失败是立刻有结论的）
+		ArmProgramEntry mine = new ArmProgramEntry();
+		mine.op = OperationType.MINE;
+		ArmProgramEntry call = new ArmProgramEntry();
+		call.op = OperationType.CALL;
+		boolean hardOnly = !mine.hasRetryWindow() && mine.hasHardFailureExit() && !call.hasRetryWindow()
+			&& call.hasHardFailureExit();
+
+		LOGGER.info("[selftest] 失败出口谓词: 收有失败={} 发无失败={}", recvHasFailure, !sendHasNone);
+		if (!recvHasFailure)
+			LOGGER.error("[selftest] 收信号说自己没有重试窗口（编辑器不会给时限控件）");
+		if (!sendHasNone)
+			LOGGER.error("[selftest] 发信号也说自己有重试窗口（卡片上会冒出永不触发的「失败后」）");
+		if (!hardOnly)
+			LOGGER.error("[selftest] 挖 / 调用的硬失败谓词错了（应当有失败出口、没有重试窗口）");
+	}
+
+	/**
+	 * 断言 8：新增的预设 {@code signal_send} —— 两条发信号都**必须绑频率**、模式一收零发（这里是两发）。
+	 *
+	 * <p>预设是自检的输入，也是"用户给的用法"的文档化：发通电（保持）→ 等 1 秒 → 发断电。
+	 */
+	private static void checkSignalSendPreset() {
+		ArmProgram program = DevPresets.signalSend();
+		int receives = 0;
+		int sends = 0;
+		int entries = 0;
+		boolean bound = true;
+		boolean hold = false;
+		boolean releaseOff = false;
+		for (ArmProgramTask task : program.tasks) {
+			for (ArmProgramEntry entry : task.entries) {
+				entries++;
+				if (entry.op != OperationType.SIGNAL)
+					continue;
+				if (entry.frequency == null)
+					bound = false;
+				if (entry.isSignalReceive())
+					receives++;
+				else {
+					sends++;
+					if (entry.signalMode == ArmProgramEntry.SignalMode.SEND_ON && entry.waitForPowered
+						&& entry.signalTicks() == 0)
+						hold = true;
+					if (entry.signalMode == ArmProgramEntry.SignalMode.SEND_OFF && !entry.waitForPowered)
+						releaseOff = true;
+				}
+			}
+		}
+		LOGGER.info("[selftest] 预设 signal_send tasks={} entries={} 发={} 收={} 绑频率={} 持段={} 断电={}",
+			program.tasks.size(), entries, sends, receives, bound, hold, releaseOff);
+		if (program.tasks.size() != 1 || entries != 3 || sends != 2 || receives != 0)
+			LOGGER.error("[selftest] 预设 signal_send 的结构不对（期望 1 任务 3 条、两发零收）");
+		if (!bound)
+			LOGGER.error("[selftest] 预设 signal_send 的发信号没有绑频率（永远发不出去）");
+		if (!hold)
+			LOGGER.error("[selftest] 预设 signal_send 的第一条不是「发通电 + 一直保持」");
+		if (!releaseOff)
+			LOGGER.error("[selftest] 预设 signal_send 的最后一条不是「发断电」（电平 0 是合法的发送值）");
 	}
 
 	/**
@@ -1505,7 +1758,7 @@ public class SmartArmSelfTest {
 
 		ArmProgramTask loaded = ArmProgramTask.load(legacyTask, RegistryAccess.EMPTY);
 		boolean gateInserted = loaded.entries.size() == 5
-			&& loaded.entries.get(0).op == OperationType.WAIT_SIGNAL
+			&& loaded.entries.get(0).op == OperationType.SIGNAL
 			&& loaded.entries.get(0).frequency != null;
 		boolean shifted = "3".equals(loaded.entries.get(1).successTarget)
 			&& "".equals(loaded.entries.get(2).successTarget)

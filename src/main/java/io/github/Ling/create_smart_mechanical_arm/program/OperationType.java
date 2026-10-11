@@ -7,7 +7,7 @@ package io.github.Ling.create_smart_mechanical_arm.program;
  * 左右键（ATTACK/MINE）与 USE 的成败无法客观判定 —— 它们"发起即算完成"，
  * 因此也不需要为它们设超时（§7.7 v2 里超时只是"重试到点"的出口）。
  *
- * <p><b>控制类操作</b>（不碰世界，只改程序的走向）：{@link #WAIT_SIGNAL}（等红石链接频率）、
+ * <p><b>控制类操作</b>（不碰世界，只改程序的走向）：{@link #SIGNAL}（收发红石链接频率信号）、
  * {@link #CALL}（调用子任务）、{@link #BREAK}（退出当前任务）、{@link #THROW}（抛错并失败结束）。
  * 它们的文档见 §7.6「单线程 + 调用栈」。
  */
@@ -40,8 +40,14 @@ public enum OperationType {
 	USE_SNEAK(true),
 	WAIT(false),
 	WAIT_REDSTONE(false),
-	/** 等到绑定的红石链接频率通电（或断电）为止 —— 频率从任务搬到了这里。 */
-	WAIT_SIGNAL(false),
+	/**
+	 * 收发信号：等到绑定的红石链接频率通电（或断电）为止 —— 频率从任务搬到了这里。
+	 *
+	 * <p>第二十七轮续十六起**收发合一**（§7.16）：模式见 {@code ArmProgramEntry.SignalMode}
+	 * —— 收（默认，老卡行为不变）/ 发通电 / 发断电。发送不阻塞、也**没有失败出口**，
+	 * 所以"有没有重试窗口"这件事只能按**条目**判（见 {@code ArmProgramEntry.hasRetryWindow()}）。
+	 */
+	SIGNAL(false, true),
 	/** 调用另一个任务；被调任务跑完（或退出）后回到下一条。 */
 	CALL(false),
 	/** 立即结束当前任务：跳出循环、跳过剩余条目，回到调用方（主任务则是收工）。 */
@@ -50,13 +56,36 @@ public enum OperationType {
 	THROW(false);
 
 	private final boolean requiresTarget;
+	/**
+	 * 这个操作有没有"收 / 发"这类**模式**（§7.16b 一.1）—— 决定菜单该激活几个幽灵槽、
+	 * 编辑器要不要建模式控件、客户端自检期望几个槽位。
+	 *
+	 * <p>收在这里一处，是因为这三处原来各自写了一遍 {@code == WAIT_SIGNAL}：
+	 * 改名字会漏改、加模式会不一致（"判据必须只有一处"）。
+	 */
+	private final boolean hasSignalMode;
 
 	OperationType(boolean requiresTarget) {
+		this(requiresTarget, false);
+	}
+
+	OperationType(boolean requiresTarget, boolean hasSignalMode) {
 		this.requiresTarget = requiresTarget;
+		this.hasSignalMode = hasSignalMode;
 	}
 
 	public boolean requiresTarget() {
 		return requiresTarget;
+	}
+
+	/** 这个操作有没有收发模式的区分（目前只有 {@link #SIGNAL}）。 */
+	public boolean hasSignalMode() {
+		return hasSignalMode;
+	}
+
+	/** 这个操作是否**收发共用同一对频率**（目前只有 {@link #SIGNAL}）。 */
+	public boolean usesSignalPair() {
+		return this == SIGNAL;
 	}
 
 	/**
@@ -87,35 +116,14 @@ public enum OperationType {
 		return this == TAKE || this == DEPOSIT || this == UNLOAD || this == DEPLOY;
 	}
 
-	/** 控制类操作：不碰世界、没有"做完"的语义（除了 CALL/WAIT_SIGNAL 有成败）。 */
+	/** 控制类操作：不碰世界、没有"做完"的语义（除了 CALL/SIGNAL 有成败）。 */
 	public boolean isControl() {
-		return this == CALL || this == BREAK || this == THROW || this == WAIT_SIGNAL;
+		return this == CALL || this == BREAK || this == THROW || this == SIGNAL;
 	}
 
-	/**
-	 * 这类操作失败时是"<b>重试到时限</b>"吗 —— 即它有没有一个**重试窗口**。
-	 *
-	 * <p>取 / 放 / 卸 / 组装 / 等红石（含等信号）：不成功就是"还没成功"，会原地重试到「失败后」的时限，
-	 * 时限到了才走去向。{@link #canFail()} 为真但没有重试窗口的（攻击 / 调用）失败是**立刻有结论**的 ——
-	 * 挖不动、被领地保护、子任务抛错，等下去不会有任何变化。
-	 *
-	 * <p><b>为什么这条判定要收在模型里</b>：它同时决定三件事 —— 编辑器要不要给"时限/单位"控件、
-	 * {@code failAmount} 是不是有效字段、以及卡片上「失败后」该怎么写。三者写在两处就会不一致：
-	 * 曾经的 bug 正是"编辑器不给时限控件（所以 {@code failAmount} 一直是 -1），
-	 * 而文案却拿 -1 报『一直重试（没设时限）』" —— 玩家选了「失败后 跳转 2」，卡片上看到的却是"一直重试"，
-	 * 显示与实际行为刚好相反。
-	 */
-	public boolean hasRetryWindow() {
-		return this == TAKE || this == DEPOSIT || this == UNLOAD || this == DEPLOY || this == WAIT_REDSTONE
-			|| this == WAIT_SIGNAL;
-	}
-
-	/** 这类操作有"失败"这个出口吗（= 编辑器里要显示「失败后」）。 */
-	public boolean canFail() {
-		// 攻击**没有**失败出口：挥一击就是挥一击（不筛选、不判断有没有东西），
-		// 永远返回"完成"。给它一个永远不会触发的「失败后」正是上一次修掉的那类误导（决策 73）。
-		return hasRetryWindow() || this == MINE;
-	}
+	// ⚠️ 「有没有重试窗口 / 有没有失败出口」**不再按类型判**：同一条 SIGNAL，收有、发没有。
+	// 类型级谓词已搬到 ArmProgramEntry.hasRetryWindow() / hasFailureExit() / hasHardFailureExit()
+	//（§7.16b 一.2：判据必须只有一处 —— 写在两处就会不一致）。
 
 	/**
 	 * 等待类操作：原地耗时间，**不碰目标**。
@@ -128,7 +136,7 @@ public enum OperationType {
 	 * 中间插一次"收回"反而会在连续两条目标之间多绕一趟。
 	 */
 	public boolean isWait() {
-		return this == WAIT || this == WAIT_REDSTONE || this == WAIT_SIGNAL;
+		return this == WAIT || this == WAIT_REDSTONE || this == SIGNAL;
 	}
 
 	/** 宽松解析：未知名字回落到 {@code fallback}，不让坏数据把存档读崩。 */
@@ -138,6 +146,10 @@ public enum OperationType {
 			// 老卡继续只挖方块 —— 反过来映射的话，所有老卡里的这一条会突然开始打实体/打人。
 			if (name.equalsIgnoreCase("PUNCH"))
 				return MINE;
+			// ★ 旧名字 "WAIT_SIGNAL"（第二十七轮续十六之前）是"只等信号"。改名成收发合一的 SIGNAL 后
+			// 老名照旧解析到 SIGNAL，而老卡没有 sigmode 键 ⇒ 模式 = RECEIVE ⇒ 行为一字不变（兼容清单 1/2）。
+			if (name.equalsIgnoreCase("WAIT_SIGNAL"))
+				return SIGNAL;
 			for (OperationType type : values()) {
 				if (type.name()
 					.equalsIgnoreCase(name))

@@ -45,7 +45,7 @@ public final class ArmIcons {
 			case WAIT -> of("minecraft:clock", Items.CLOCK);
 			case WAIT_REDSTONE -> of("minecraft:redstone_torch", Items.REDSTONE_TORCH);
 			// 控制类（§7.6 v4）
-			case WAIT_SIGNAL -> of("create:redstone_link", Items.REDSTONE);
+			case SIGNAL -> of("create:redstone_link", Items.REDSTONE);
 			case CALL -> of("create:schematic_and_quill", Items.WRITTEN_BOOK);
 			case BREAK -> of("minecraft:comparator", Items.COMPARATOR);
 			case THROW -> of("minecraft:barrier", Items.BARRIER);

@@ -139,6 +139,18 @@ public class ProgramRuntime {
 		return state == EntryState.HALTED;
 	}
 
+	/**
+	 * 推进臂上那枚脉冲计时器（§7.16b 一.3）。
+	 *
+	 * <p>独立成一个公开方法是因为自检要**直接**推它一次 —— 断言"发出去的脉冲到点自动恢复"
+	 * 不能靠 {@code tick()}（那要世界、转速、程序一应俱全）。
+	 *
+	 * @return 本轮是否发生了"到点恢复"
+	 */
+	public boolean tickArmLinkTimers(SmartArmBlockEntity arm) {
+		return arm.tickArmLink();
+	}
+
 	/** 调用深度（0 = 正在跑主任务）。护目镜用它显示面包屑。 */
 	public int callDepth() {
 		return callStack.size();
@@ -170,6 +182,9 @@ public class ProgramRuntime {
 		if (arm.getLevel() == null || arm.getLevel()
 			.isClientSide())
 			return;
+		// ★ 脉冲计时器必须在**任何早退之前**推进（§7.16b 一.3）：脉冲是臂的物理状态 ——
+		// 程序停机 / 无转速 / 红石锁定时它照样要收尾，否则就正好踩中"世界里留一个永远通电的频率"。
+		tickArmLinkTimers(arm);
 		ArmProgram program = arm.getProgram();
 		if (program.isEmpty() || isHalted())
 			return;
@@ -321,6 +336,8 @@ public class ProgramRuntime {
 			return;
 		}
 		arm.cancelMove(); // 收工：手臂折回待机位，别举在最后一个目标前面（与「等待」同一条理由）
+		// 主任务正常结束 = 程序不再拥有它发出的频率：必须把强度关到 0 再退网（§7.16b 一.3）
+		arm.clearTransmissions();
 		resetEntryCounters();
 		entryIndex = 0;
 		state = EntryState.IDLE;
@@ -529,7 +546,18 @@ public class ProgramRuntime {
 				timer = entry.waitTicks();
 				state = EntryState.WAITING;
 			}
-			case WAIT_REDSTONE, WAIT_SIGNAL -> state = EntryState.WAITING;
+			case WAIT_REDSTONE -> state = EntryState.WAITING;
+			// 收发信号（§7.16b 一.3）：**收** = 阻塞等待（走 tickWait 那张极性真值表）；
+			// **发** = 发出一段电平就算完成 —— 不阻塞、**没有失败出口**（发送不会失败），
+			// 脉冲的收尾交给臂 BE 上那枚计时器（tickArmLinkTimers）。
+			case SIGNAL -> {
+				if (entry.isSignalReceive())
+					state = EntryState.WAITING;
+				else {
+					arm.emitSignal(entry.frequency, entry.waitForPowered ? 15 : 0, entry.signalTicks());
+					succeed(arm, task, entry);
+				}
+			}
 			// 控制类：调用（压栈跳过去）、退出（正常收任务）、抛错（失败收任务）
 			case CALL -> callTask(arm, task, entry);
 			case BREAK -> endTask(arm, false, null);
@@ -562,7 +590,7 @@ public class ProgramRuntime {
 		}
 		// 等红石 = 相邻方块信号；等信号 = 红石链接频率（§7.6 v4：频率从任务搬到了这里）
 		// 两者都返回**原始通电状态**，极性只在这下面比一次（曾经等信号那条自己被取反过，见 isSignalPowered）
-		boolean powered = entry.op == OperationType.WAIT_SIGNAL ? isSignalPowered(entry)
+		boolean powered = entry.op.usesSignalPair() ? isSignalPowered(entry)
 			: arm.hasNeighborSignal();
 		if (waitSatisfied(powered, entry.waitForPowered)) {
 			succeed(arm, task, entry);
@@ -572,7 +600,7 @@ public class ProgramRuntime {
 		// 等待类操作把「时限」当作"最多等多久"：到点走「失败后」（§7.7 与其它操作一致）
 		if (entry.timeoutTicks() >= 0 && waitElapsed > entry.timeoutTicks())
 			applySkip(arm, task, entry, entry.onTimeout,
-				entry.op == OperationType.WAIT_SIGNAL ? "等待信号超时" : "等待红石超时");
+				entry.op.usesSignalPair() ? "等待信号超时" : "等待红石超时");
 	}
 
 	// ————————————————————————— 各操作 —————————————————————————
@@ -1012,6 +1040,8 @@ public class ProgramRuntime {
 		error = reason;
 		errorEntryIndex = entryIndex;
 		arm.cancelMove(); // 停机也收回：出错时把手臂留在目标前面既难看又挡视线
+		// 停机 = 程序不再拥有它发出的频率（§7.16b 一.3：这条缺了就会在世界里留一个永远通电的频率）
+		arm.clearTransmissions();
 		arm.markProgramDirty();
 	}
 
@@ -1034,11 +1064,15 @@ public class ProgramRuntime {
 		resetEntryCounters();
 		clearError();
 		arm.cancelMove();
+		// 回到开头 = 这一轮的"占用"作废：发出去的频率要一起收干净（§7.16b 一.3）
+		arm.clearTransmissions();
 		arm.markProgramDirty();
 	}
 
 	/** 程序被替换时调用：调用栈与缓存都要重来。 */
 	public void onProgramReplaced(SmartArmBlockEntity arm) {
+		// 卡被拆 / 被换：上一份程序发出的频率必须现在就关到 0 并退网（§7.16b 一.3 的第四个收尾点）
+		arm.clearTransmissions();
 		callStack.clear();
 		cachedPowerVersion = -1;
 		resetToStart(arm);
