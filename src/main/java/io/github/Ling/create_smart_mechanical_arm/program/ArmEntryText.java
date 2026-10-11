@@ -69,10 +69,13 @@ public final class ArmEntryText {
 			case WAIT_REDSTONE -> suffix.append("  ")
 				.append(tr(entry.waitForPowered ? "on" : "off").getString());
 			case SIGNAL -> {
-				// 收：等通电 / 等断电（老卡 redpow=false **仍然显示"等断电"** —— 兼容清单 3：界面不给开关，
-				//     但绝不能静默隐瞒它仍然在等断电）；发：发通电 / 发断电。
-				suffix.append("  ")
-					.append(signalStateText(entry).getString());
+				// 短语本身随模式变（接收信号 / 发送信号 / 中断信号，见 signalHeadText），所以这里只补**尾巴**：
+				// 发 + 持续 > 0 → 时长（1s）；收 + 老卡 redpow=false → 等断电（界面不给开关，
+				// 但绝不能静默隐瞒它仍然在等断电）；其余（发 + 0 = 一直保持）什么都不写。
+				String tail = signalTailText(entry).getString();
+				if (!tail.isEmpty())
+					suffix.append("  ")
+						.append(tail);
 				// 频率物品是"等哪一对物品"的必需信息：卡片上它是两个图标，而工具提示里没有图标，
 				// 所以那里只能把名字写出来（空槽位不写，免得出现 "Air + Air"）。
 				if (withFrequencyItems) {
@@ -105,7 +108,10 @@ public final class ArmEntryText {
 		if (needsFace(entry.op))
 			suffix.append("  ")
 				.append(tr("opt." + entry.face.getName()).getString());
-		return tr("chip.entry", opName(entry.op), suffix.toString());
+		// 「收发信号」的**操作名**就是随模式变的短语（接收信号 / 发送信号 / 中断信号）——
+		// 与卡片标题芯片同一个方法（决策 43），别写成两份。
+		Component name = entry.op == OperationType.SIGNAL ? signalHeadText(entry) : opName(entry.op);
+		return tr("chip.entry", name, suffix.toString());
 	}
 
 	/** 需要"交互面"的操作（左键/右键语义）—— 与编辑器里的判定同一处依据。 */
@@ -115,26 +121,42 @@ public final class ArmEntryText {
 	}
 
 	/**
-	 * 「收发信号」的**状态文字** —— <b>卡片标题芯片与护目镜唯一的来源</b>（§11 决策 43）。
+	 * 「收发信号」的**标题短语**（随模式变）—— <b>卡片标题芯片与护目镜唯一的来源</b>（§11 决策 43）。
 	 *
-	 * <p>三态（§7.16b 一.7）：
+	 * <p>用户反馈第二轮定稿：极性不再单独写"开/关"，而是**含进词里** ——
 	 * <ul>
-	 *   <li>收 + {@code waitForPowered=true} → {@code 等通电}；</li>
-	 *   <li>收 + {@code waitForPowered=false} → {@code 等断电}（<b>老卡照旧</b>：界面上不再给这个开关，
-	 *       但卡片与护目镜必须照样把它写出来 —— 静默改行为不行，静默隐瞒更不行）；</li>
-	 *   <li>发 + 持续 0 → {@code chip.signal_hold}（{@code 发通电 保持}）；持续 &gt;0 →
-	 *       {@code chip.signal_pulse}（{@code 发断电 1t}）。</li>
+	 *   <li>{@code RECEIVE} → {@code 接收信号}（等到该频率通电）；</li>
+	 *   <li>{@code SEND_ON} → {@code 发送信号}（把该频率置为通电）；</li>
+	 *   <li>{@code SEND_OFF} → {@code 中断信号}（把该频率置为断电）。</li>
+	 * </ul>
+	 * 于是标题读法 = <b>短语 · 两个频率物品 · （有才写）时间</b>，见 {@link #signalTailText}。
+	 */
+	public static Component signalHeadText(ArmProgramEntry entry) {
+		return tr(switch (entry.signalMode) {
+			case RECEIVE -> "chip.signal_recv";
+			case SEND_ON -> "chip.signal_send";
+			case SEND_OFF -> "chip.signal_cut";
+		});
+	}
+
+	/**
+	 * 短语**之后还要写出来的**补充（没有就返回空组件，调用方一个字都不画）。
+	 *
+	 * <p>用户反馈第二轮定稿两条：
+	 * <ul>
+	 *   <li>发信号：持续 {@code > 0} 才写时间（{@code 1s}，数值 + {@link #unitSuffix}）；
+	 *       {@code 0} = 一直保持 ⇒ <b>不写</b>（"保持"是默认状态，不是信息）；</li>
+	 *   <li>接收信号：只有老卡（{@code redpow = false}，界面上已经没有这个开关了）才写
+	 *       {@code 等断电} —— 兼容清单 3："静默改行为不行，静默隐瞒更不行"。</li>
 	 * </ul>
 	 */
-	public static Component signalStateText(ArmProgramEntry entry) {
-		Component polarity = tr(entry.waitForPowered ? "on" : "off");
+	public static Component signalTailText(ArmProgramEntry entry) {
 		if (entry.isSignalReceive())
-			return tr(entry.waitForPowered ? "entry.signal_wait_on" : "entry.signal_wait_off");
+			return entry.waitForPowered ? Component.empty() : tr("entry.signal_wait_off");
 		int ticks = entry.signalTicks();
-		// 0 = 一直保持（"占用 / 解除占用"就是这个）；>0 = 到点自动恢复的脉冲
 		if (ticks <= 0)
-			return tr("chip.signal_hold", polarity);
-		return tr("chip.signal_pulse", polarity, ticks + unitSuffix(WaitUnit.TICK));
+			return Component.empty();
+		return Component.literal(entry.waitAmount + unitSuffix(entry.waitUnit));
 	}
 
 	/** 「收发信号」绑定的那对频率物品名（形如 {@code 铁锭 + 红石}）；没绑或空槽返回空串。 */

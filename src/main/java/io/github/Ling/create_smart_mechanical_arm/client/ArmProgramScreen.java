@@ -204,19 +204,37 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private static final int FIELD_X_SIGNAL = 115;
 	/**
-	 * 「收发信号」第二行的**模式**控件（收信号 / 发通电 / 发断电）：起点同 {@link #FIELD_X_SIGNAL}，宽 40。
+	 * 「收发信号」第二行的**模式**控件（接收 / 发送 / 中断）：起点同 {@link #FIELD_X_SIGNAL}，宽 30。
 	 *
-	 * <p>算式（§7.16b 二）：115..155 **40** ＋ 2 间隔 ＋ 157..197 **40** = 82 = {@code FIELD_W - 38}
-	 * —— 正好用满，没有余量。每个控件里放得下的文字 ≤ {@code width - 10} = 30（≈ 2 个汉字 18px /
-	 * 4 个数字 24px），所以选项**一律短标签**，"三选一的语义靠悬停提示兜"。
+	 * <p>算式（用户反馈第二轮重新算的账）：115..145 **30** ＋ 2 ＋ 147..177 **30**（数值）
+	 * ＋ 2 ＋ 179..197 **18**（单位）＝ **82** ＝ {@code FIELD_W - 38} —— 右沿仍是 197。
+	 * 每个控件里放得下的文字 ≤ {@code width - 10}：模式 20（汉字 2 字 18 ✔ / 英文 3 字母 18 ✔）、
+	 * 数值 20（{@code "120"} = 18 ✔）、单位 8（{@code t/s/m} = 6 ✔）—— 三个控件各留 ≥2px 余量
+	 * （模式名改短之后把省下的宽度让给了数值与单位框，见 §7.16b 二）。Create 的 {@code Label}
+	 * **不裁剪、画超出盒子**，所以这些余量必须由 {@code signalRowProblem()} 自动验。
 	 */
 	private static final int SIGNAL_MODE_X = FIELD_X_SIGNAL;
-	private static final int SIGNAL_MODE_W = 40;
-	/** 模式框 + 2px 间隔之后 = 持续（脉冲时长）控件。 */
+	private static final int SIGNAL_MODE_W = 30;
+	/** 模式框 + 2px 间隔之后 = 持续（脉冲时长）的**数值**框（0 = 一直保持）。 */
 	private static final int SIGNAL_TICKS_X = SIGNAL_MODE_X + SIGNAL_MODE_W + 2;
-	private static final int SIGNAL_TICKS_W = 40;
+	private static final int SIGNAL_TICKS_W = 30;
+	/** 数值框 + 2px 间隔之后 = 持续的单位框（t / s / m，与等待/时限同一个枚举）。 */
+	private static final int SIGNAL_UNIT_X = SIGNAL_TICKS_X + SIGNAL_TICKS_W + 2;
+	private static final int SIGNAL_UNIT_W = 18;
 	/** 第二行右沿（= {@code FIELD_X + FIELD_W}）：所有控件都必须 ≤ 它。 */
 	private static final int SIGNAL_ROW_END = FIELD_X + FIELD_W;
+	/** 第二行的**可用宽度**（左侧三个幽灵槽压到 GUI 111 ⇒ 115..197 只有 82px）。 */
+	private static final int SIGNAL_ROW_W = FIELD_W - 38;
+	/**
+	 * 信号标题芯片的宽度上限 = {@code ROW_CLIP_RIGHT - 25 - 26} = <b>153</b>。
+	 *
+	 * <p>为什么不复用 {@link #CHIP_MAX}（133）：那个上限是"行尾还有一枚 ＋ 贴图"推出来的
+	 * （★ 见 {@code addPropReachable}），而标题芯片在**标题栏**、右边什么都没有。
+	 * 但它仍必须留在卡片内：芯片画在卡片局部 x=26，裁剪区右沿局部 179（卡片内区到 193）
+	 * ⇒ 最宽 179 - 26 = 153。英文短语天生比中文长（{@code Recv + Wait off}），
+	 * 卡在 133 会把文字挤出胶囊 —— 而 {@code renderSignalChip} 的文字**不裁剪**。
+	 */
+	private static final int SIGNAL_CHIP_MAX = ROW_CLIP_RIGHT - 25 - 26;
 	/**
 	 * 横向箭头在**卡片局部坐标**里的 x（= 上游的窗口坐标 {@code leftPos+40} / {@code leftPos+203} 减 25）。
 	 * 热区用的也是同一对数（见 {@code action()}）。
@@ -732,7 +750,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		graphics.drawString(font, String.valueOf(index + 1), 14, 8,
 			card.task && index == 0 ? 0xFFD966 : 0xFFFFFF, true);
 
-		// 标题芯片（带虚拟物品图标）。「收发信号」是专用画法：图标 · 收发信号 · 物品 · 物品 · 状态
+		// 标题芯片（带虚拟物品图标）。「收发信号」是专用画法：图标 · 短语 · 物品 · 物品 · 时长（有才写）
 		ArmProgramEntry headerEntry = card.task ? null : entry(card);
 		if (headerEntry != null && headerEntry.op.hasSignalMode())
 			renderSignalChip(graphics, headerEntry, 26, 5, headerWidth(card, index));
@@ -932,13 +950,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 「等待信号」的头芯片：<b>图标 · 等待信号 · 信号物品 · 信号物品 · 开/关</b>
-	 * —— 用户第二十二轮指定的读法："在胶囊内这样显示：图标 等待信号 信号物品 信号物品 开/关，
-	 * 如果是空的话空的位置也要留出来。"
+	 * 「收发信号」的标题芯片：<b>图标 · 短语（接收信号/发送信号/中断信号）· 频率物品 · 频率物品 · 时间（有才写）</b>。
 	 *
-	 * <p>和别的位置类芯片的区别：那两个频率物品**单独占两个物品槽**（不是塞在文字里），
-	 * 而且**空槽也照画空框** —— 这样"频率有一格留空"看得出来（用户："频率本身是可以填空的，不是必须两个物品"），
-	 * 极性（开/关）排在两个槽之后，整句读下来就是"等信号（铁锭 + 空）开"。
+	 * <p>用户反馈第二轮的读法（图二那张）：操作名这一处随模式变成短语，极性**不再单独写"开/关"**
+	 * （已含在词里）；只有"发 + 持续 &gt; 0"才在后面加时间（{@code 发送信号 ⚙⚙ 1s}；{@code 0} = 保持 ⇒ 不写）；
+	 * 老卡 {@code redpow=false} 仍然写成 {@code 接收信号 ⚙⚙ 等断电}。
+	 * 短语与尾巴**都从 {@link ArmEntryText} 取**（与胶囊 / 护目镜同一个来源：§11 决策 43），这里不另写一份。
+	 *
+	 * <p>两个频率物品**单独占两个物品槽**（不是塞在文字里），**空槽也照画空框**
+	 * —— 这样"频率有一格留空"看得出来（用户："频率本身是可以填空的，不是必须两个物品"）。
 	 */
 	private void renderSignalChip(GuiGraphics graphics, ArmProgramEntry entry, int x, int y, int width) {
 		ItemStack entryIcon = entry.icon.isEmpty() ? ArmIcons.defaultIcon(OperationType.SIGNAL) : entry.icon;
@@ -946,8 +966,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			.getStack();
 		ItemStack second = entry.frequency == null ? ItemStack.EMPTY : entry.frequency.getSecond()
 			.getStack();
-		Component label = ArmEntryText.opName(OperationType.SIGNAL);
-		Component state = ArmEntryText.signalStateText(entry);
+		Component label = ArmEntryText.signalHeadText(entry);
+		Component tail = ArmEntryText.signalTailText(entry);
 
 		graphics.pose()
 			.pushPose();
@@ -963,7 +983,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			.at(4, 0)
 			.render(graphics);
 
-		// ② 操作名
+		// ② 短语（接收信号 / 发送信号 / 中断信号）
 		int textX = 26;
 		graphics.drawString(font, label.getString(), textX, 4, 0xff_f2f2ee);
 		textX += font.width(label) + 4;
@@ -978,17 +998,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			textX += 19;
 		}
 
-		// ④ 状态（收：等通电/等断电；发：发通电 保持 / 发断电 1t）—— 与护目镜同一份文案
-		graphics.drawString(font, state.getString(), textX + 2, 4, 0xff_f2f2ee);
+		// ④ 尾巴：发的时长（1s）/ 老卡的"等断电"；**空就一个字都不画**（0 = 一直保持 ⇒ 不写）
+		String tailText = tail.getString();
+		if (!tailText.isEmpty())
+			graphics.drawString(font, tailText, textX + 2, 4, 0xff_f2f2ee);
 		graphics.pose()
 			.popPose();
 	}
 
-	/** 与 {@link #renderSignalChip} 配套的宽度（图标槽 26 + 操作名 + 两个物品槽 38 + 状态 + 余量）。 */
+	/**
+	 * 信号芯片里**文字实际画到哪**（相对芯片左沿）= 图标槽 26 + 短语 + 4 + 两个物品槽 38 + 2 + 尾巴。
+	 *
+	 * <p>单独抽出来是为了让"宽度"与"绘制"用**同一个算式**：{@link #renderSignalChip} 里的
+	 * {@code textX} 推进就是这条式子，两边各写一份必然会分家（表现成"文字糊出胶囊"）。
+	 */
+	private int signalChipTextEnd(ArmProgramEntry entry) {
+		return 26 + font.width(ArmEntryText.signalHeadText(entry)) + 4 + 19 + 19 + 2
+			+ font.width(ArmEntryText.signalTailText(entry));
+	}
+
+	/**
+	 * 与 {@link #renderSignalChip} 配套的宽度：**按文字实际宽度**给（+2 收边），封顶
+	 * {@link #SIGNAL_CHIP_MAX}（= 153，卡片内区；不是行内胶囊那个 133 —— 标题栏右边没有 ＋）。
+	 */
 	private int signalChipWidth(ArmProgramEntry entry) {
-		int width = 26 + font.width(ArmEntryText.opName(OperationType.SIGNAL)) + 4 + 19 + 19
-			+ font.width(ArmEntryText.signalStateText(entry)) + 12;
-		return Mth.clamp(Math.max(width, 32), 32, CHIP_MAX);
+		return Mth.clamp(Math.max(signalChipTextEnd(entry) + 2, 32), 32, SIGNAL_CHIP_MAX);
 	}
 
 	private Component headerChip(Card card, int index) {
@@ -2195,11 +2229,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			// 它们是真菜单槽，拖物品进来即绑定），所以第二行必须让开**两个**槽 ——
 			// 用户实测："滚动选择框的左边把幽灵物品槽位占用了"（第二个槽在 GUI 73..91，而这一行原来从 77 起）。
 			//
-			// 方案 A（§7.16b 二）：40 + 2 + 40 = 82，第二行**一个控件最多放 2 个汉字**
-			// （文字上限 width-10 = 30px，汉字约 9px/字；Create 的 Label **不裁剪**、画超出盒子，
-			// 所以标签必须事先就放得下 —— 三选一的语义靠悬停提示 hint.entry_signal_mode 兜）。
+			// 方案 A（用户反馈第二轮重新算账）：模式 30 + 2 + 数值 30 + 2 + 单位 18 = 82。
+			// 第二行**每个控件**的文字上限 = width - 10（汉字约 9px/字；Create 的 Label **不裁剪**、
+			// 画超出盒子），所以标签必须事先就放得下 —— 三选一的语义靠悬停提示 hint.entry_signal_mode 兜。
 			case SIGNAL -> {
-				// ① 模式（收信号 / 发通电 / 发断电）：**恒建** —— 宽度必须是同一个数，
+				// ① 模式（接收 / 发送 / 中断）：**恒建** —— 宽度必须是同一个数，
 				//    否则同一个操作切模式时控件会跳位（§7.16b 二 的 A 补丁）。
 				inlinePicker(SIGNAL_MODE_X, SIGNAL_MODE_W, tr("entry.signal_mode"), tr("hint.entry_signal_mode"),
 					signalModeLabels(), entry.signalMode.ordinal(), i -> {
@@ -2212,33 +2246,41 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 						entry.signalMode = picked;
 						// ★ 电平与模式是**两个字段**（电平沿用老字段 waitForPowered，老卡才不会丢语义）：
 						//   运行时读的是 waitForPowered，所以这里必须把它们钉在一起 —— 否则
-						//   "发断电"这条在默认 redpow=true 下会发 15（发的是"通电"）。收那支不动这个字段：
+						//   "中断"这条在默认 redpow=true 下会发 15（发的是"通电"）。接收那支不动这个字段：
 						//   老卡的 redpow=false 必须原样留着（§7.16b 三 兼容清单 3）。
 						if (picked == ArmProgramEntry.SignalMode.SEND_ON)
 							entry.waitForPowered = true;
 						else if (picked == ArmProgramEntry.SignalMode.SEND_OFF)
 							entry.waitForPowered = false;
 						// ⚠️ 复用 waitAmount 的陷阱（§7.16b 三）：waitt 的老默认是 **20**，而用户要的是
-						// "1gt 足够"。所以**从收切到发**、且它还是那个从没被改过的老默认（20 tick）时改写 1。
+						// "1gt 足够"。所以**从接收切到发送**、且它还是那个从没被人改过的老默认（20 tick）时改写成 1。
 						// 走 (b) 编辑器做法（不动 signalMode 的 setter）：玩家真的想发 20t 脉冲的条目
-						// 在切模式时不会被改掉（他改过的话 waitUnit/waitAmount 已经不是这个组合了）。
+						// 在切模式时不会被改掉（他改过的话 waitAmount/waitUnit 已经不是这个组合了）。
 						if (oldMode == ArmProgramEntry.SignalMode.RECEIVE
 							&& entry.waitAmount == 20 && entry.waitUnit == WaitUnit.TICK)
 							entry.waitAmount = 1;
 						dirty = true;
 						rebuildPending = true;
 					});
-				// ② 持续（0–120 tick；**0 = 一直保持**）：只有"发"才建 —— 收信号没有"持续"这个概念，
-				//    给它留一个空槽只是浪费（§7.16b 二「A 的补丁」）。
-				if (entry.isSignalSend())
+				// ② 持续 = **数值 + 单位**（用户反馈第二轮：和等待/时限一样带 t/s/m 单位框）：
+				//    只有"发"才建 —— 接收信号没有"持续"这个概念，给它留空槽只是浪费（§7.16b 二 A 的补丁）。
+				if (entry.isSignalSend()) {
 					inlineInt(SIGNAL_TICKS_X, SIGNAL_TICKS_W, tr("entry.wait_amount"),
-						tr("hint.entry_signal_ticks"), 0, ArmProgramEntry.SIGNAL_MAX_TICKS, entry.signalTicks(), v -> {
+						tr("hint.entry_signal_ticks"), 0, ArmProgramEntry.SIGNAL_MAX_AMOUNT,
+						// ⚠️ 框里回显的是**数值**（0–120），不是换算后的 ticks：
+						//    signalTicks() 会 × 单位（1 s = 20），拿它当回显值会出现"选 5 s 显示 100"。
+						Mth.clamp(entry.waitAmount, 0, ArmProgramEntry.SIGNAL_MAX_AMOUNT), v -> {
 							pushUndo();
 							entry.waitAmount = v;
-							// SEND 一律按 **tick** 读（signalTicks() 不走 waitTicks()）：把单位钉成 TICK，
-							// 免得"在等待那条上切过单位"的条目让脉冲时长悄悄 ×20（§7.16b 三）。
-							entry.waitUnit = WaitUnit.TICK;
 						});
+					// 单位框与「等待」/「失败后」共用同一个枚举（opt.tick/second/minute = t/s/m）：
+					// 运行时按 signalTicks() 换算（t=1 / s=20 / m=1200），0 = 一直保持（不与单位相乘）
+					inlinePicker(SIGNAL_UNIT_X, SIGNAL_UNIT_W, tr("entry.wait_unit"), tr("hint.entry_wait_unit"),
+						labels(WaitUnit.values()), entry.waitUnit.ordinal(), i -> {
+							entry.waitUnit = WaitUnit.values()[i];
+							dirty = true;
+						});
+				}
 			}
 			case CALL -> inlinePicker(FIELD_X, FIELD_W, tr("entry.call_target"), tr("hint.entry_call_target"),
 				callTargetOptions(), callTargetIndex(entry.callTarget), i -> {
@@ -2471,17 +2513,21 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 「收发信号」模式选择框的三个选项（收信号 / 发通电 / 发断电）。
+	 * 「收发信号」模式选择框的三个选项（接收 / 发送 / 中断）。
 	 *
 	 * <p>⚠️ <b>不能走通用的 {@link #labels(Enum[])}</b>：它按枚举名派生成
-	 * {@code opt.receive} / {@code opt.send_on} / {@code opt.send_off}，而本轮 lang 里的键是
+	 * {@code opt.receive} / {@code opt.send_on} / {@code opt.send_off}，而 lang 里的键是
 	 * {@code opt.signal_receive} / {@code opt.signal_send_on} / {@code opt.signal_send_off}
-	 * （§7.16b 六；{@code langKeyProblem} 查的也是这三个键）。派生的键查不到译文 ⇒ 选择框里
-	 * 画的是**原始 key**（实测 "create_smart_mechanical_arm.gui.editor.opt.receive" = 257px，
-	 * 远超 40-10=30），而且**中英两语都一样**（键不存在，与语言无关）。
+	 * （{@code langKeyProblem} 查的也是这三个键）。派生的键查不到译文 ⇒ 选择框里
+	 * 画的是**原始 key**（实测 "…opt.receive" = 257px，远超 30-10=20），而且**中英两语都一样**。
+	 *
+	 * <p>标签是**短名**（接收 / 发送 / 中断；en 三字母 Rcv/Snd/Cut）：模式框只有 30 宽，
+	 * 文字上限 {@code 30-10=20}（汉字 2 字 = 18 ✔ / 4 个字母 ≈ 24 ✗）。卡片标题上那句
+	 * 「接收信号 / 发送信号 / 中断信号」是**另一组键**（{@code chip.signal_*}，见
+	 * {@link ArmEntryText#signalHeadText}）—— 那里没有 20px 的上限，但也不能用长英文（见 SIGNAL_CHIP_MAX）。
 	 *
 	 * <p>顺序**按枚举 ordinal 走**（下标 i ↔ {@code SignalMode.values()[i]}）：这样枚举增删项时
-	 * 选项与值不会错位（PLAN §7.16b 一.2 就是靠 ordinal 当三选一的下标）。
+	 * 选项与值不会错位。
 	 */
 	private static List<Component> signalModeLabels() {
 		List<Component> list = new ArrayList<>(ArmProgramEntry.SignalMode.values().length);
@@ -3036,10 +3082,22 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 			if (problem != null)
 				return "FAIL " + problem;
+			// ★ 把**实测像素宽**也打进日志（本轮用户反馈：英文短名 Rcv/Snd/Cut 必须真的放进 30px 框）。
+			//   为什么必须是"真实字体量"：Create 的 Label 不裁剪、画超出盒子，排版一旦算错在游戏里
+			//   只表现为"文字糊出框"，没有任何报错 —— 只有把数字打出来才能与上限（width - 10）逐条对照。
+			int modeLabelW = 0;
+			for (Component option : signalModeLabels())
+				modeLabelW = Math.max(modeLabelW, screen.font.width(option));
+			int numLabelW = screen.font.width(String.valueOf(ArmProgramEntry.SIGNAL_MAX_AMOUNT));
+			int unitLabelW = 0;
+			for (Component unit : screen.labels(WaitUnit.values()))
+				unitLabelW = Math.max(unitLabelW, screen.font.width(unit));
 			return "OK 任务卡=" + taskCards + " 操作卡=" + entryCards + " 编辑器=" + editors + " 控件=" + widgets
 				+ " 槽位=" + screen.menu.slots.size() + " 最宽行=" + rowWidth + " 最大胶囊宽=" + screen.maxChipWidth()
-				+ " 第二行=" + (signalRow == null ? "82=40+2+40" : "FAIL") + " 文案="
-				+ (signalWording == null ? "收发+默认" : "FAIL") + " 语言键=" + (langKeys == null ? "缺=0" : "FAIL")
+				+ " 第二行=" + (signalRow == null ? "82=30+2+30+2+18" : "FAIL") + " 文案="
+				+ (signalWording == null ? "收发+单位" : "FAIL") + " 语言键=" + (langKeys == null ? "缺=0" : "FAIL")
+				+ " 实测宽=模式" + modeLabelW + "/" + (SIGNAL_MODE_W - 10) + ",数值" + numLabelW + "/"
+				+ (SIGNAL_TICKS_W - 10) + ",单位" + unitLabelW + "/" + (SIGNAL_UNIT_W - 10)
 				+ " 会话落点=" + (sessionSeeded ? 1 : 0) + " 空卡进任务页=" + (emptyOnTasks ? 1 : 0) + " 任务上限="
 				+ screen.probedTaskLimit + " 备注框=" + (noteFieldOk ? "OK" : "FAIL") + " 滚动="
 				+ (scrollIndep == null && scrollBar == null ? "独立+可拖" : "FAIL") + " 热区=" + screen.hits;
@@ -3546,7 +3604,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				sawFace = true;
 			// 第二行的 DATA_AREA 盒子数（§7.6 v4 之后的实际布局）：
 			// 位置类 = 空间 + 坐标 = 2；左键/右键 +朝向 = 3；等待 = 时长 + 单位 = 2；
-			// 收发信号 = 模式 +（只有发才有）持续 ⇒ **收 1 / 发 2**（两个频率格是**菜单幽灵槽**，不算盒子）；
+			// 收发信号 = 模式 +（只有发才有）数值 + 单位 ⇒ **接收 1 / 发送 3**（两个频率格是**菜单幽灵槽**，不算盒子）；
 			// 调用 = 目标 = 1；抛错 = 信息 = 1；退出 = 0（终结操作，第二行不需要任何东西）
 			editingProp = null;
 			editing = new EditTarget(false, 0, e, null);
@@ -3555,8 +3613,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			editing = null;
 			int expected = switch (entry.op) {
 				case WAIT -> 2;
-				// 收发信号：第二行是"模式 +（只有发才有）持续" ⇒ 收 1 / 发 2（§7.16b 二 的 A 补丁）
-				case SIGNAL -> entry.isSignalSend() ? 2 : 1;
+				// 收发信号：模式 +（只有发才有）数值 + 单位 ⇒ 接收 1 / 发送 3（用户反馈第二轮加了单位框）
+				case SIGNAL -> entry.isSignalSend() ? 3 : 1;
 				case WAIT_REDSTONE, CALL, THROW -> 1;
 				case BREAK -> 0;
 				default -> needsFace(entry.op) ? 3 : 2;
@@ -3586,19 +3644,36 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	// ——— §7.16b 四「客户端」的三条新断言 ———
 
 	/**
-	 * 自检 9：收发信号第二行那 **82px** 的算术（§7.16b 二）。
+	 * 自检 9：收发信号第二行那 **82px** 的算术（用户反馈第二轮：模式 30 + 2 + 数值 30 + 2 + 单位 18）。
 	 *
 	 * <p>为什么必须自动验：第二行可用宽度只有 {@code FIELD_W - 38 = 82}（左侧三个幽灵槽压到 GUI 111），
 	 * 而每个控件里的文字上限是 {@code width - 10}（汉字约 9px/字），**Create 的 Label 不裁剪、画超出盒子**
 	 * —— 排版一旦算错，游戏里只表现为"文字糊出框"，没有任何报错。
 	 *
-	 * <p>断言四件事：① 每个控件右沿 ≤ 197；② 模式框的**每个选项**都放得下；③ 持续框的最大值放得下；
-	 * ④ 发模式恰好 2 个 DATA_AREA 盒子、收模式 1 个。
+	 * <p>断言五件事：① 三段的宽度**加起来 ≤ 82** 且右沿 ≤ 197；② 每个控件右沿 ≤ 197；
+	 * ③ 模式框的**每个选项**都放得下；④ 数值框的最大值与单位框的 t/s/m 都放得下；
+	 * ⑤ 发模式恰好 3 个 DATA_AREA 盒子（模式 + 数值 + 单位）、接收模式 1 个。
 	 */
 	@Nullable
 	private String signalRowProblem() {
 		if (program.tasks.isEmpty())
 			return "自检前提不成立：烟雾程序里没有任务";
+		// ① 三个常量本身的账（这条不看控件，所以把常量改错的立刻就能抓到）
+		int span = SIGNAL_MODE_W + 2 + SIGNAL_TICKS_W + 2 + SIGNAL_UNIT_W;
+		if (span > SIGNAL_ROW_W)
+			return "第二行的常量加起来超宽（" + SIGNAL_MODE_W + "+2+" + SIGNAL_TICKS_W + "+2+" + SIGNAL_UNIT_W
+				+ "=" + span + " > " + SIGNAL_ROW_W + "）";
+		if (SIGNAL_UNIT_X + SIGNAL_UNIT_W > SIGNAL_ROW_END)
+			return "第二行的右沿越界（" + (SIGNAL_UNIT_X + SIGNAL_UNIT_W) + " > " + SIGNAL_ROW_END + "）";
+		int numWidth = font.width(String.valueOf(ArmProgramEntry.SIGNAL_MAX_AMOUNT));
+		if (numWidth > SIGNAL_TICKS_W - 10)
+			return "数值框的最大值放不下（" + numWidth + " > " + (SIGNAL_TICKS_W - 10) + "）";
+		List<Component> unitLabels = labels(WaitUnit.values());
+		for (Component unit : unitLabels) {
+			int w = font.width(unit);
+			if (w > SIGNAL_UNIT_W - 10)
+				return "单位选项放不下（" + unit.getString() + " " + w + " > " + (SIGNAL_UNIT_W - 10) + "）";
+		}
 		ArmProgramTask task = program.tasks.get(0);
 		ArmProgramEntry probe = new ArmProgramEntry();
 		probe.op = OperationType.SIGNAL;
@@ -3610,13 +3685,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				editingProp = null;
 				editing = new EditTarget(false, 0, index, null);
 				init(minecraft, 427, 240);
-				// ① 第二行的盒子右沿必须 ≤ 197（SIGNAL_ROW_END）—— 82 = 40 + 2 + 40 就是这条断言
+				// ② 第二行的盒子右沿必须 ≤ 197（SIGNAL_ROW_END）= 82 = 30 + 2 + 30 + 2 + 18
 				for (int[] box : editorBoxes) {
 					int right = box[0] - leftPos + box[2];
 					if (right > SIGNAL_ROW_END)
 						return "控件越界（右沿 " + right + " > " + SIGNAL_ROW_END + "，模式=" + mode + "）";
 				}
-				// ② 第二行的**值控件**都不许出面板（≥200 就会盖到右边的"+"列上）。
+				// ③ 第二行的**值控件**都不许出面板（≥200 就会盖到右边的"+"列上）。
 				// ⚠️ 必须只过滤"值控件"（滚动框 / 输入框）：编辑器左下那颗垃圾桶（卡局部 11..29）与
 				//   右下那颗确认键（卡局部 224..242）**本来就在面板外**（上游排版就是这样），
 				//   第一版拿 editorWidgets 全表去量 ⇒ 这条断言在任何语言、任何模式下都报
@@ -3637,12 +3712,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					if (w > SIGNAL_MODE_W - 10)
 						return "模式选项放不下（" + option.getString() + " " + w + " > " + (SIGNAL_MODE_W - 10) + "）";
 				}
-				if (mode != ArmProgramEntry.SignalMode.RECEIVE) {
-					int w = font.width(String.valueOf(ArmProgramEntry.SIGNAL_MAX_TICKS));
-					if (w > SIGNAL_TICKS_W - 10)
-						return "持续控件的数值放不下（" + w + " > " + (SIGNAL_TICKS_W - 10) + "）";
-				}
-				int want = mode == ArmProgramEntry.SignalMode.RECEIVE ? 1 : 2;
+				// ⑤ 接收 = 1 个盒子（只有模式）；发送 = 3 个（模式 + 数值 + 单位）
+				int want = mode == ArmProgramEntry.SignalMode.RECEIVE ? 1 : 3;
 				if (editorBoxes.size() != want)
 					return "模式 " + mode + " 的第二行应当是 " + want + " 个盒子，实际 " + editorBoxes.size();
 			}
@@ -3677,40 +3748,87 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 自检 10：收 / 发两套文案 + 「切到发送时默认 1gt」那条陷阱（§7.16b 三 / 四 断言 10）。
+	 * 自检 10：三态短语 + 尾巴（时间 / 老卡的"等断电"）+ 单位换算 +「切到发送时默认 1t」。
+	 *
+	 * <p>用户反馈第二轮的三条定稿：① 短语随模式变（接收信号 / 发送信号 / 中断信号），极性不再单独写；
+	 * ② 持续带单位，{@code t=1 / s=20 / m=1200}（**真的换算**，不是只显示）；③ 发 + 持续 0 = 一直保持
+	 * ⇒ 一个字都不写；接收 + 老卡 {@code redpow=false} ⇒ 仍然写"等断电"（不能静默隐瞒）。
 	 *
 	 * <p>文案只有一个来源（{@link ArmEntryText}），所以这条同时钉住了卡片标题芯片与护目镜 ——
-	 * 复制粘贴漏改（把发那支写成收那支）在游戏里表现为"发信号的卡片上写着等通电"。
+	 * 复制粘贴漏改（把发送那支写成接收那支）在游戏里表现为"发送信号的卡片上写着接收信号"。
 	 */
 	@Nullable
 	private String signalWordingProblem() {
+		ArmProgramEntry recv = new ArmProgramEntry();
+		recv.op = OperationType.SIGNAL;
 		ArmProgramEntry send = new ArmProgramEntry();
 		send.op = OperationType.SIGNAL;
 		send.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
-		send.waitAmount = 0; // 一直保持
+		ArmProgramEntry cut = new ArmProgramEntry();
+		cut.op = OperationType.SIGNAL;
+		cut.signalMode = ArmProgramEntry.SignalMode.SEND_OFF;
+		String recvHead = ArmEntryText.signalHeadText(recv).getString();
+		String sendHead = ArmEntryText.signalHeadText(send).getString();
+		String cutHead = ArmEntryText.signalHeadText(cut).getString();
+		if (recvHead.equals(sendHead) || sendHead.equals(cutHead) || recvHead.equals(cutHead))
+			return "三种模式的短语没有区分开（" + recvHead + " / " + sendHead + " / " + cutHead + "）";
+
+		// ① 发 + 持续 0 = 一直保持 ⇒ **一个字都不写**；>0 ⇒ 写"数值 + 单位"
+		send.waitAmount = 0;
+		String holdTail = ArmEntryText.signalTailText(send).getString();
+		if (!holdTail.isEmpty())
+			return "持续 0（一直保持）不该写时间，实际写了「" + holdTail + "」";
+		send.waitAmount = 1;
+		send.waitUnit = WaitUnit.TICK;
+		String tail = ArmEntryText.signalTailText(send).getString();
+		if (!"1t".equals(tail))
+			return "持续 1t 的尾巴应当是「1t」，实际「" + tail + "」";
 		String sendBase = ArmEntryText.base(send).getString();
-		String hold = ArmEntryText.signalStateText(send).getString();
-		if (!sendBase.contains(hold))
-			return "发信号的第一行里没有状态文字（" + sendBase + " vs " + hold + "）";
-		String heartbeat = tr("chip.signal_hold", tr("on")).getString();
-		if (!heartbeat.equals(hold))
-			return "「发通电 保持」的写法不对（" + hold + " ≠ " + heartbeat + "）";
-		String receiveWord = tr("entry.signal_wait_on").getString();
-		if (sendBase.contains(receiveWord))
-			return "发信号的第一行写成了「" + receiveWord + "」（复制粘贴漏改）：" + sendBase;
+		if (!sendBase.contains(sendHead) || !sendBase.contains(tail))
+			return "发送信号的第一行里缺短语或时间（" + sendBase + " vs " + sendHead + " + " + tail + "）";
+		if (sendBase.contains(recvHead) || sendBase.contains(cutHead))
+			return "发送信号的第一行写成了别的模式（复制粘贴漏改）：" + sendBase;
 		for (String failKey : new String[] { "chip.fail_stop", "chip.fail_retry_forever", "chip.fail_jump" }) {
 			String failWord = tr(failKey).getString();
 			if (sendBase.contains(failWord))
 				return "发信号的第一行里混进了失败文案（" + failKey + "）：" + sendBase;
 		}
 
+		// ② 单位**真的换算**（用户反馈第二轮："不要再无视单位"）
+		send.waitAmount = 1;
+		send.waitUnit = WaitUnit.SECOND;
+		if (send.signalTicks() != 20)
+			return "持续 1s 应当是 20 tick，实际 " + send.signalTicks() + "（单位被无视了）";
+		String oneSecond = ArmEntryText.signalTailText(send).getString();
+		if (!"1s".equals(oneSecond))
+			return "持续 1s 的尾巴应当是「1s」，实际「" + oneSecond + "」";
+		send.waitUnit = WaitUnit.MINUTE;
+		if (send.signalTicks() != 1200)
+			return "持续 1m 应当是 1200 tick，实际 " + send.signalTicks() + "（单位被无视了）";
+		send.waitAmount = 0;
+		if (send.signalTicks() != 0)
+			return "持续 0（任何单位）都该当作「保持」，实际 " + send.signalTicks() + " tick";
+		// ③ 短语与尾巴都要**装得进芯片**（renderSignalChip 的文字不裁剪，超出就是"糊出卡片"）
 		ArmProgramEntry recvOff = new ArmProgramEntry();
 		recvOff.op = OperationType.SIGNAL;
 		recvOff.waitForPowered = false; // 老卡：界面上不再给这个开关，但必须照样写成"等断电"
-		String recvText = ArmEntryText.base(recvOff).getString();
+		ArmProgramEntry sendLong = new ArmProgramEntry();
+		sendLong.op = OperationType.SIGNAL;
+		sendLong.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		sendLong.waitAmount = ArmProgramEntry.SIGNAL_MAX_AMOUNT;
+		sendLong.waitUnit = WaitUnit.MINUTE; // 最宽的尾巴（120m）
+		for (ArmProgramEntry chip : new ArmProgramEntry[] { recv, send, cut, recvOff, sendLong }) {
+			int need = signalChipTextEnd(chip) + 2;
+			if (need > SIGNAL_CHIP_MAX)
+				return "标题芯片的「" + ArmEntryText.signalHeadText(chip)
+					.getString() + "」文字会画到 " + need + " > " + SIGNAL_CHIP_MAX + "（文字不裁剪，会糊出卡片）";
+			if (signalChipWidth(chip) < need)
+				return "标题芯片宽 " + signalChipWidth(chip) + " 装不下文字 " + need;
+		}
 		String offWord = tr("entry.signal_wait_off").getString();
-		if (!recvText.contains(offWord))
-			return "老卡（redpow=false）的收信号没有写成「" + offWord + "」：" + recvText;
+		String recvText = ArmEntryText.base(recvOff).getString();
+		if (!recvText.contains(recvHead) || !recvText.contains(offWord))
+			return "老卡（redpow=false）的接收信号没有写成「" + recvHead + " … " + offWord + "」：" + recvText;
 
 		// 陷阱：waitt 的老默认是 20（不是 1）—— 从收切到发时必须是 1gt（用户："1gt 足够了"）
 		ArmProgramTask task = program.tasks.isEmpty() ? null : program.tasks.get(0);
@@ -3743,22 +3861,22 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (!scrollOnce(modePicker, true))
 				return "模式选择框滚不动（喂了真实滚轮，state 没变）";
 			if (modePicker.getState() != ArmProgramEntry.SignalMode.SEND_ON.ordinal())
-				return "模式选择框没有滚到「发通电」（state=" + modePicker.getState() + "）";
+				return "模式选择框没有滚到「发送」（state=" + modePicker.getState() + "）";
 			int ticks = probe.signalTicks();
 			if (ticks != 1)
 				return "切到发送模式后持续不是 1gt（实际 " + ticks + "）—— waitt 的默认 20 被漏改了";
 			// ★ 电平必须跟着模式走：运行时读的是 waitForPowered，而它在 RECEIVE 下的默认是 true ——
-			//   不同步的话"发断电"会发 15（发通电），而界面上写的是"发断电"。
+			//   不同步的话「中断」会发 15（发的是通电），而界面上写的是"中断信号"。
 			if (!scrollOnce(modePicker, true)
 				|| modePicker.getState() != ArmProgramEntry.SignalMode.SEND_OFF.ordinal())
-				return "模式选择框没有滚到「发断电」（state=" + modePicker.getState() + "）";
+				return "模式选择框没有滚到「中断」（state=" + modePicker.getState() + "）";
 			if (probe.waitForPowered)
-				return "选了「发断电」但电平字段还是 true（那条会发出 15 = 发通电）";
+				return "选了「中断」但电平字段还是 true（那条会发出 15 = 通电）";
 			if (!scrollOnce(modePicker, false)
 				|| modePicker.getState() != ArmProgramEntry.SignalMode.SEND_ON.ordinal())
-				return "模式选择框没有滚回「发通电」（state=" + modePicker.getState() + "）";
+				return "模式选择框没有滚回「发送」（state=" + modePicker.getState() + "）";
 			if (!probe.waitForPowered)
-				return "选了「发通电」但电平字段是 false（那条会发出 0 = 发断电）";
+				return "选了「发送」但电平字段是 false（那条会发出 0 = 断电）";
 		} finally {
 			editing = null;
 			editingProp = null;
@@ -3772,11 +3890,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/**
 	 * 本轮「收发信号」用到的**全部**键（枚举名由 {@code opt.<小写>} 派生，与
 	 * {@link ArmEntryText#opName} / {@code CardEditPacket} 同一惯例 —— 枚举一改名这些键就查不到）。
+	 *
+	 * <p>用户反馈第二轮：模式短名（{@code opt.signal_*}）、标题短语（{@code chip.signal_*}）、
+	 * 尾巴（{@code entry.signal_wait_off}）。已经不用的 {@code chip.signal_hold/pulse} 与
+	 * {@code entry.signal_wait_on} 已从两个语言文件里**删掉**（极性含进短语之后它们是死键）。
 	 */
 	private static final String[] SIGNAL_LANG_KEYS = {
 		"opt.signal", "opt.signal_receive", "opt.signal_send_on", "opt.signal_send_off",
-		"chip.signal_hold", "chip.signal_pulse", "hint.entry_signal_mode", "hint.entry_signal_ticks",
-		"entry.signal_mode", "entry.signal_wait_on", "entry.signal_wait_off"
+		"chip.signal_recv", "chip.signal_send", "chip.signal_cut",
+		"hint.entry_signal_mode", "hint.entry_signal_ticks",
+		"entry.signal_mode", "entry.signal_wait_off", "entry.wait_unit"
 	};
 
 	/**

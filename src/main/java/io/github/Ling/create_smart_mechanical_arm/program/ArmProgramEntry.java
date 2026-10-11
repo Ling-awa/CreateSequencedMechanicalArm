@@ -202,11 +202,13 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * 发送脉冲的最长时长（ticks）；与 WAIT 的时长范围一致（§7.16b 三）。
+	 * 发送持续的**数值**上限；{@code 0} = 一直保持（"占用 / 解除占用"就是这个），{@code >0} = 到点自动恢复。
 	 *
-	 * <p>{@code 0} = 一直保持（"占用 / 解除占用"就是这个），{@code >0} = 到点自动恢复。
+	 * <p>⚠️ 这是**数值**、不是 ticks：真正的 ticks = 数值 × {@link #waitUnit}（用户反馈第二轮：
+	 * 持续控件和等待一样带 t/s/m 单位框，所以 {@link #signalTicks()} **必须按单位换算**）。
+	 * 数值范围与 WAIT 一致（0–120），于是最长的脉冲 = 120 m = 144000 ticks。
 	 */
-	public static final int SIGNAL_MAX_TICKS = 120;
+	public static final int SIGNAL_MAX_AMOUNT = 120;
 
 	/**
 	 * SIGNAL 的模式（§7.16b 一.2）：收 / 发通电 / 发断电。
@@ -227,16 +229,19 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * 发送的**持续**时长（ticks）：{@code 0} = 一直保持，否则 {@code clamp(waitAmount, 0, 120)}。
+	 * 发送的**持续**时长（ticks）：{@code 0} = 一直保持，否则 {@code clamp(waitAmount,0,120) × 单位}。
 	 *
-	 * <p>⚠️ <b>刻意不走 {@link #waitTicks()}</b>：{@code waitUnit} 是「等待」操作的单位字段，
-	 * 发送若读它，"在等待那条上切一下单位"就会把脉冲时长悄悄 ×20（§7.16b 三「复用 waitAmount 的陷阱」）。
-	 * 收信号（{@code RECEIVE}）没有"持续"这个概念，返回 0。
+	 * <p>⚠️ 单位换算**必须**走这条：用户反馈第二轮给持续控件加了 t/s/m 单位框，
+	 * "选 1 s 却只发 1 tick"就是显示与实际相反。换算表与 {@link #waitTicks()} 完全一致
+	 * （{@code t=1 / s=20 / m=1200}），只是**数值**字段仍复用 {@code waitAmount}。
+	 *
+	 * <p>收信号（{@code RECEIVE}）没有"持续"这个概念，返回 0。
 	 */
 	public int signalTicks() {
 		if (isSignalReceive())
 			return 0;
-		return Math.max(0, Math.min(SIGNAL_MAX_TICKS, waitAmount));
+		int amount = Math.max(0, Math.min(SIGNAL_MAX_AMOUNT, waitAmount));
+		return amount * waitUnit.ticks;
 	}
 
 	/**
@@ -354,9 +359,9 @@ public class ArmProgramEntry {
 		// sigmode 缺键（老卡）= RECEIVE ⇒ 行为不变（兼容清单 2）；写的是**字符串**而不是 ordinal，
 		// 以后枚举增删项不会把老卡的"发"变成"收"（与 op/onok/timeout/urep 同一惯例）
 		entry.signalMode = enumOf(SignalMode.class, tag.getString("sigmode"), SignalMode.RECEIVE);
-		// 发信号的持续一律按 tick 读（signalTicks() 不走 waitTicks()）：夹进与 WAIT 相同的 0..120
+		// 发信号的持续**数值**夹进与 WAIT 相同的 0..120（真正的 ticks = 数值 × 单位，见 signalTicks()）
 		if (entry.isSignalSend())
-			entry.waitAmount = Math.max(0, Math.min(SIGNAL_MAX_TICKS, entry.waitAmount));
+			entry.waitAmount = Math.max(0, Math.min(SIGNAL_MAX_AMOUNT, entry.waitAmount));
 		entry.frequency = readFrequency(tag, registries);
 		entry.callTarget = tag.getString("call");
 		// 缺 calln（老卡）→ 1 轮；夹到合法区间，坏数据不许把循环次数搞成 0 或天文数字
