@@ -2,7 +2,9 @@ package io.github.Ling.create_smart_mechanical_arm.smartarm;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -587,6 +589,18 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			.style(ChatFormatting.DARK_GRAY)
 			.forGoggles(tooltip, 1);
 
+		// 保持中的信号（§7.16e：信号是持久变量，玩家得看得见"这条臂现在还按着几路"）。
+		// 只有真的在保持时才多画一行；**超上限被拒的那次也要看得见**（用户：不许静默丢）。
+		if (heldSignalCount() > 0 || armLinkRejectedLastTick > 0) {
+			goggleLine().text("Signals: " + heldSignalCount() + " / " + MAX_HELD_SIGNALS)
+				.style(ChatFormatting.DARK_GRAY)
+				.forGoggles(tooltip, 1);
+			if (armLinkRejectedLastTick > 0)
+				goggleLine().text("Signal rejected (limit " + MAX_HELD_SIGNALS + ")")
+					.style(ChatFormatting.RED)
+					.forGoggles(tooltip, 2);
+		}
+
 		// 潜行 + 护目镜 = 动画调试视图。
 		// "手臂卡住/瞬移"这类问题全都出在 chasedPointProgress 被重置而客户端没拿到对应的
 		// "新移动"信号（moveSeq）或相位变化 —— 这三个数摆出来就能一眼分辨是哪一种。
@@ -684,7 +698,12 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		return level != null && level.hasNeighborSignal(worldPosition);
 	}
 
-	// ————————————————————————— 收发信号：臂自己当红石链接的发射端（§7.16 / §7.16b 一.4） —————————
+	// ————————————————————————— 收发信号（§7.16e 持久变量 / 多路并存） —————————————————————————
+	//
+	// 用户定稿（§7.16e）：**一个频率 = 一个持久布尔变量**。`发` = 置位、`中断` = 复位、`收` = 读值。
+	// 信号一旦发出就**一直保持**：跨循环、跨停机、断动力、无转速、主任务正常结束都**不断**。
+	// 只有两处会断：① 主动「中断」（只断指定那一频率）；② 操作卡变化（换卡 / 改程序 / 回到开头）。
+	// 拆方块 / 区块卸载：前者清零退网，后者（onChunkUnloaded）**只退网、保留字段与 NBT**。
 	//
 	// 发射端的全部要求 = isListening() == false + getTransmittedStrength() > 0（§7.16 已核实）。
 	// 两个必须守住的不对称（§7.16a 第 5 条）：
@@ -692,40 +711,65 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	//  ② hasAnyLoadedPower 只读强度、**完全不看 isAlive()** ⇒ "把 isAlive() 弄成 false"**不能代替**
 	//     "把强度关到 0"。所以收尾一律是显式的三步：关 0 → updateNetworkOf → removeFromNetwork。
 
+	/** 同时保持的频率条数上限（§7.16e：不限制用法，只留一条"别把网络表撑爆"的常量上限）。 */
+	public static final int MAX_HELD_SIGNALS = 16;
+
 	/**
-	 * 臂的发送端（普通内部类，照着上游 {@code LinkedControllerServerHandler.ManualFrequencyEntry} 写 ——
-	 * 不必是 {@code BlockEntityBehaviour}，§7.16a 第 2 条）。
+	 * 最近一次「发」因为表满被拒之后留下的状态：{@code >0} = 有过一次被拒，{@code 0} = 干净。
+	 *
+	 * <p>存在理由（§7.16e：超了"拒绝并留可见状态"，**不静默丢**）：**日志不算可见** —— 它只能事后翻。
+	 * 护目镜与自检都读它，语义与运行时的 {@code lastFailure} 同一手法（"上次出过什么事"，
+	 * 在下一次成功发出/清零时消失）。
+	 */
+	private int armLinkRejectedLastTick;
+
+	/**
+	 * 已保持的信号表：**每个频率一份自己的电平与脉冲计时**（§7.16e）。
+	 *
+	 * <p>每个 entry 的 key 天生稳定 ⇒ §7.16a 第 6 条那个"换频率必须先按旧 key 退网"的坑**不存在**了
+	 * （见 {@link ArmLink#frequency}）。惰性建：绝大多数臂一次信号都不发。
 	 */
 	@Nullable
-	private ArmLink armLink;
-	/** 当前发射的电平（0..15）；{@code ArmLink.getTransmittedStrength()} 就读它。 */
-	private int armLinkLevel;
-	/**
-	 * 脉冲剩余 tick：{@code -1} = 没有在倒计时（一直保持）。
-	 *
-	 * <p>有意**不随 NBT 持久化**（§7.16b 七）：重启后脉冲会停在"保持"—— 比"重启后莫名断电"可预测。
-	 * 但它进 {@code write} 的客户端包 —— 数值很小，顺手让护目镜 / 调试看得见（§7.16b 一.4 ①）。
-	 */
-	private int armLinkPulse = -1;
-	/** 脉冲到点后恢复成哪个电平（发出脉冲之前的那一个）。 */
-	private int armLinkPulseRestore;
+	private Map<Couple<Frequency>, ArmLink> heldSignals;
 
+	/**
+	 * 臂的发送端：**一对频率一个实例**（普通内部类，照着上游
+	 * {@code LinkedControllerServerHandler.ManualFrequencyEntry} 写 —— 不必是 {@code BlockEntityBehaviour}，
+	 * §7.16a 第 2 条）。
+	 */
 	private final class ArmLink implements IRedstoneLinkable {
 
 		/**
-		 * 当前绑的那对频率（{@code null} = 还没发过）。
+		 * 本实例绑的那对频率 —— **构造后就不再变**（{@code final}）。
 		 *
-		 * <p>⚠️ 它同时是 {@code getNetworkKey()} 的返回值 —— 所以**只能在 {@link #emitSignal} 里**由 BE 赋值，
-		 * 而且换频率必须"先按旧 key 退网"。{@code getNetworkKey()} 是**活的**：{@code addToNetwork} 按当时的
-		 * key 入 set，{@code removeFromNetwork} 按**当前的** key 找 set —— 频率一变，老 key 那格永远删不掉
-		 * （§7.16a 第 6 条）。
+		 * <p>⚠️ 它同时是 {@code getNetworkKey()} 的返回值，而上游那个方法是**活的**：
+		 * {@code addToNetwork} 按当时的 key 入 set，{@code removeFromNetwork} 按**当前的** key 找 set ——
+		 * 频率一变，老 key 那格就永远删不掉（§7.16a 第 6 条）。改成"一频率一实例 + final key"之后，
+		 * 这个坑从根上没有了：要换频率就换一个实例（旧的先按它**自己的** key 退网）。
 		 */
-		@Nullable
-		private Couple<Frequency> frequency;
+		private final Couple<Frequency> frequency;
+		/**
+		 * 当前发射的电平（0..15）；{@code getTransmittedStrength()} 就读它。
+		 *
+		 * <p>⚠️ 字段名**不能**叫 {@code level}：内部类里的 `level` 会遮蔽（且这里的读写全部绑定到内层）
+		 * 外层 {@code BlockEntity.level}，使 {@code getNetworkOf(level, this)} 传进去的是 int 而不是世界。
+		 */
+		private int signalLevel;
+		/**
+		 * 脉冲剩余 tick：{@code -1} = 没有在倒计时（**一直保持** —— 新设计里的正常状态）。
+		 *
+		 * <p>与旧版不同：它**随 NBT 持久化**（§7.16e：频率 + 电平 + 脉冲剩余三样都存），
+		 * 否则"重进存档后脉冲停在保持"会被用户看成"信号莫名一直通电"。
+		 */
+		private int pulse = -1;
+
+		private ArmLink(Couple<Frequency> frequency) {
+			this.frequency = frequency;
+		}
 
 		@Override
 		public int getTransmittedStrength() {
-			return armLinkLevel;
+			return signalLevel;
 		}
 
 		@Override
@@ -765,140 +809,229 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			return worldPosition;
 		}
 
-		/** 当前挂的网络 key（{@code null} = 还没发过）。自检靠它断言"换频率时老 key 不能残留"。 */
-		@Nullable
-		Couple<Frequency> currentKey() {
-			return frequency;
+		/**
+		 * 从网络表里退出去 —— 先归 0（此时 key 还没变，推的正是那一格）→ {@code updateNetworkOf}
+		 * → {@code removeFromNetwork}（§7.16a 第 5 条：只退网而不归 0 会留下"永远通电"的频率，
+		 * 因为 {@code hasAnyLoadedPower} 只读强度）。
+		 *
+		 * @param unloadOnly 区块卸载专用：**保留电平与脉冲**（重新加载时会原样恢复并入网，§7.16e）；
+		 *                   true 时那三步也不是"归 0"，而是把当前强度推一遍再退网
+		 */
+		private void leaveNetwork(boolean unloadOnly) {
+			if (!unloadOnly) {
+				signalLevel = 0;
+				pulse = -1;
+			}
+			if (level != null && !level.isClientSide) {
+				// ① 先把强度推成 0（此时 key 还没变，推的正是那一格）
+				Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, this);
+				// ② 再退网（退网后 getNetworkOf 就找不到那一格了，所以顺序不能反）
+				Create.REDSTONE_LINK_NETWORK_HANDLER.removeFromNetwork(level, this);
+			}
 		}
 	}
 
-	/** 懒建发送端（只在真的发过信号之后才存在）。 */
-	private ArmLink armLink() {
-		if (armLink == null)
-			armLink = new ArmLink();
-		return armLink;
+	/** 把 {频率+电平+脉冲剩余} 重新挂回红石链接网络（读档 / 重新加载时用，§7.16e）。 */
+	private void rejoinNetwork() {
+		if (heldSignals == null || level == null || level.isClientSide)
+			return;
+		for (ArmLink link : heldSignals.values()) {
+			Create.REDSTONE_LINK_NETWORK_HANDLER.addToNetwork(level, link);
+			Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, link);
+		}
+	}
+
+	private Map<Couple<Frequency>, ArmLink> heldSignals() {
+		if (heldSignals == null)
+			heldSignals = new HashMap<>();
+		return heldSignals;
 	}
 
 	/**
-	 * 往某个红石链接频率发一次电平（§7.16b 一.4）。
+	 * 往某个红石链接频率发一次电平 —— **get-or-create**（§7.16e：多路并存，不再是"一次只能按着一个频率"）。
 	 *
-	 * @param freq  目标频率对（收/发共用 {@code entry.frequency}）；{@code null} = 没绑，直接无视
-	 * @param level 要发的电平（0..15）；<b>0 是合法的</b> —— "发断电"就是它
-	 * @param ticks 持续：{@code 0} = 一直保持（"占用 / 解除占用"），{@code >0} = 到点自动恢复
+	 * @param freq 目标频率对（收/发共用 {@code entry.frequency}）；{@code null} = 没绑，直接无视
+	 * @param strength 要发的电平（0..15）；<b>0 是合法的</b> —— "发断电"就是它
+	 * @param ticks 持续：{@code 0} = 一直保持（"置位"，新设计的默认），{@code >0} = 到点自动**归 0**
 	 */
 	public void emitSignal(@Nullable Couple<Frequency> freq, int strength, int ticks) {
 		if (freq == null)
 			return; // 没绑频率 = 不发（与"收"那边 frequency == null 直接返回 false 对称）
-		// ⚠️ 形参**不能**叫 level：它会**遮蔽** BlockEntity 的 `level` 字段，于是下面三处网络调用
+		// ⚠️ 形参**不能**叫 level：它会**遮蔽** BlockEntity 的 `level` 字段，于是下面几处网络调用
 		// 会把 int（电平）当成 LevelAccessor 传进去（编译期就报 "int cannot be converted to LevelAccessor"）。
 		if (level == null || level.isClientSide)
 			return; // getNetworkOf 把 world 当 IdentityHashMap 的键，null 会 NPE；客户端也不该碰网络表
-		ArmLink link = armLink();
-		// ★ 换频率：**必须先按旧 key 退网，再改 key，最后入网**（顺序反了老 key 永远删不掉，§7.16a 第 6 条）
-		Couple<Frequency> oldKey = link.frequency;
-		boolean changing = oldKey != null && !oldKey.equals(freq);
-		if (changing)
-			Create.REDSTONE_LINK_NETWORK_HANDLER.removeFromNetwork(level, link);
-		link.frequency = freq;
-		if (changing || oldKey == null)
-			Create.REDSTONE_LINK_NETWORK_HANDLER.addToNetwork(level, link);
-		// 脉冲：记下"发之前"的电平当恢复值；ticks <= 0 = 一直保持
-		armLinkPulseRestore = armLinkLevel;
-		armLinkPulse = ticks <= 0 ? -1 : Math.max(1, ticks);
-		armLinkLevel = Mth.clamp(strength, 0, 15);
+		ArmLink link = heldSignals().get(freq);
+		if (link == null) {
+			if (heldSignals().size() >= MAX_HELD_SIGNALS) {
+				// 超上限：**拒绝并留可见状态**（不静默丢，也不去动已经保持的那些）—— §7.16e
+				armLinkRejectedLastTick = MAX_HELD_SIGNALS;
+				markProgramDirty();
+				return;
+			}
+			link = new ArmLink(freq);
+			heldSignals().put(freq, link);
+			Create.REDSTONE_LINK_NETWORK_HANDLER.addToNetwork(level, link); // 同一实例只入网一次
+		}
+		link.pulse = ticks <= 0 ? -1 : Math.max(1, ticks); // 0 = 一直保持
+		link.signalLevel = Mth.clamp(strength, 0, 15);
+		armLinkRejectedLastTick = 0; // 成功发出 = 上一次"被拒"的提示过时了（与 lastFailure 同一纪律）
 		Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, link);
 		sendData();
 	}
 
 	/**
-	 * 推进脉冲计时器（由 {@code ProgramRuntime.tick()} 在**任何早退之前**调用 —— 脉冲是臂的物理状态，
-	 * 程序停机 / 无转速 / 红石锁定时照样要收尾，§7.16b 一.3）。
+	 * 「中断」（{@code SEND_OFF}）与收尾专用：**只断指定那一频率** —— 电平 0 + 退网 + 从表里移除，
+	 * 并取消它未到期的脉冲（§7.16e 规则 ①：别的频率不受影响）。
 	 *
-	 * @return 本轮是否发生了"到点恢复"（给自检用）
+	 * @return 这一频率原本是否在保持（给调用方与自检判断"有没有东西可断"）
 	 */
-	public boolean tickArmLink() {
-		if (armLinkPulse < 0)
+	public boolean releaseSignal(@Nullable Couple<Frequency> freq) {
+		if (freq == null || heldSignals == null)
 			return false;
-		if (--armLinkPulse > 0)
+		ArmLink link = heldSignals.get(freq);
+		if (link == null)
 			return false;
-		ArmLink link = armLink;
-		armLinkPulse = -1;
-		armLinkLevel = armLinkPulseRestore;
-		if (link != null && level != null && !level.isClientSide && link.frequency != null)
-			Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, link);
+		heldSignals.remove(freq);
+		link.leaveNetwork(false);
 		sendData();
 		return true;
 	}
 
 	/**
-	 * 把已发送的频率**强制关到 0 再退网**（停机 / 程序结束 / 卡被拆 / 区块卸载 / BE 移除都要调）。
+	 * 推进所有脉冲计时器（由 {@code ProgramRuntime.tick()} 在**任何早退之前**调用 —— 脉冲是臂的物理状态，
+	 * 程序停机 / 无转速 / 红石锁定时照样要收尾，§7.16e 施工要点 2）。
 	 *
-	 * <p>⚠️ 三步都要，不能省（§7.16a 第 5 条）：{@code null} 检查 → {@code setLevel(0)} → {@code updateNetworkOf}
-	 * → {@code removeFromNetwork}。只退网而不关到 0，世界里就会留一个**永远通电**的频率
-	 * （{@code hasAnyLoadedPower} 只读强度）。
+	 * <p>到点**只把电平归 0**，entry 留在表里（= 那个频率不再通电、也没有未到期的脉冲）。
+	 * 这与旧版"恢复成发脉冲之前的电平"不同：新设计里"保持"是常态，没有"发完脉冲要还原成什么"可言。
+	 *
+	 * @return 本轮是否至少有一路发生了"到点归 0"（给自检用）
 	 */
-	public void clearTransmissions() {
-		ArmLink link = armLink;
-		if (link != null && link.frequency != null && level != null && !level.isClientSide) {
-			armLinkLevel = 0;
-			// ① 先把强度推成 0（此时还带着旧的频率 key，所以推的正是那一格）
-			Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, link);
-			// ② 再退网（清了 key 之后 getNetworkOf 就找不到老那格了，所以顺序不能反）
-			Create.REDSTONE_LINK_NETWORK_HANDLER.removeFromNetwork(level, link);
+	public boolean tickArmLink() {
+		if (heldSignals == null || heldSignals.isEmpty())
+			return false;
+		boolean fired = false;
+		for (ArmLink link : heldSignals.values()) {
+			if (link.pulse < 0)
+				continue;
+			if (--link.pulse > 0)
+				continue;
+			link.pulse = -1;
+			link.signalLevel = 0;
+			if (level != null && !level.isClientSide)
+				Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, link);
+			fired = true;
 		}
-		armLink = null;
-		armLinkLevel = 0;
-		armLinkPulse = -1;
-		armLinkPulseRestore = 0;
-	}
-
-	/** 当前发射的电平（0 = 没在发）；给自检与调试用。 */
-	public int getArmLinkLevel() {
-		return armLinkLevel;
+		if (fired)
+			sendData();
+		return fired;
 	}
 
 	/**
-	 * 这条臂现在是不是**正按着**某一对频率 —— 即"还挂在那个网络格里（key 就是它）"，
-	 * 而且强度不为 0。
+	 * 把**所有**保持的频率强制关到 0 再退网（§7.16e 的"两处会断"之一：操作卡变化；
+	 * 另一处是 {@link #releaseSignal}。拆方块 / 移除也走这里）。
+	 *
+	 * <p>⚠️ 停机（{@code halt}）与主任务正常结束**不再**调它 —— 那是用户有意推翻的旧行为，
+	 * 见 §7.16e「反转」那一条。
+	 */
+	public void clearTransmissions() {
+		boolean removed = heldSignals != null && !heldSignals.isEmpty();
+		if (heldSignals != null) {
+			for (ArmLink link : heldSignals.values())
+				link.leaveNetwork(false);
+			heldSignals.clear();
+		}
+		armLinkRejectedLastTick = 0;
+		// 只有真的清掉了东西才推包：换卡那条路会连着调两三次（setProgram → onProgramReplaced → resetToStart），
+		// 表本来就是空的时候不该多推（护目镜看到的是同一份数据）。
+		if (removed)
+			sendData();
+	}
+
+	/** 还在表里的频率条数（**不管电平**）—— 自检用它断言上限 16 与"只断指定那一路"。 */
+	public int heldSignalCount() {
+		return heldSignals == null ? 0 : heldSignals.size();
+	}
+
+	/** 这条臂现在保持的所有频率（只读快照；自检用）。 */
+	public List<Couple<Frequency>> heldSignalFrequencies() {
+		return heldSignals == null ? List.of() : List.copyOf(heldSignals.keySet());
+	}
+
+	/** 最近一次「发」因为表满被拒的信号条数（{@code 0} = 没发生）；护目镜与自检都读它。 */
+	public int rejectedSignalCount() {
+		return armLinkRejectedLastTick;
+	}
+
+	/** 当前发射的最大电平（0 = 没在发）；给自检与调试用。 */
+	public int getArmLinkLevel() {
+		if (heldSignals == null)
+			return 0;
+		int max = 0;
+		for (ArmLink link : heldSignals.values())
+			max = Math.max(max, link.signalLevel);
+		return max;
+	}
+
+	/**
+	 * 这条臂现在是不是**正按着**某一对频率 —— 即"表里有它"而且强度不为 0。
 	 *
 	 * <p>抽出来给自检用（{@code ArmLink} 是私有的，测试类拿不到它）：只读、不碰网络表
 	 * （{@code getNetworkOf(world, actor)} 会**顺手建一个空格子**，拿它当查询用会污染网络表）。
 	 */
 	public boolean isTransmittingTo(Couple<Frequency> key) {
-		return armLink != null && armLinkLevel > 0 && armLink.currentKey() != null
-			&& armLink.currentKey()
-				.equals(key);
+		if (heldSignals == null)
+			return false;
+		ArmLink link = heldSignals.get(key);
+		return link != null && link.signalLevel > 0;
 	}
 
 	/**
-	 * 当前挂的网络 key（**不管强度**）：{@code null} = 还没发过 / 已经收干净。
-	 *
-	 * <p>自检靠它抓 §7.16a 第 6 条那个坑：{@code getNetworkKey()} 是**活的**，换频率时如果忘了
-	 * "先按旧 key 退网"，老 key 那一格里就永远留着我们（只是强度 0）—— 只看"有没有电"是抓不到的。
+	 * 这一对频率还在不在表里（**不管电平**）—— 自检用：抓"表里留着一个强度 0 的幽灵成员"
+	 * （§7.16a 第 6 条那种只看"有没有电"抓不到的残留）。
 	 */
+	public boolean holdsSignal(Couple<Frequency> key) {
+		return heldSignals != null && heldSignals.containsKey(key);
+	}
+
+	/** 当前**挂着的**网络 key 之一：{@code null} = 表空（还没发过 / 已经全退网）。 */
 	@Nullable
 	public Couple<Frequency> currentArmLinkKey() {
-		return armLink == null ? null : armLink.currentKey();
+		return heldSignals == null || heldSignals.isEmpty() ? null
+			: heldSignals.keySet()
+				.iterator()
+				.next();
 	}
 
 	/**
-	 * 区块卸载：**不走 {@code remove()}**（{@code SmartBlockEntity.setRemoved()} 里是
-	 * {@code if (!chunkUnloaded) remove();}），而且 {@code setRemoved()} 本身是 {@code final} 不能覆写 ——
-	 * 所以这条路只能挂在这里（§7.16a 第 4 条）。
+	 * 区块卸载（§7.16e）：**退网但保留字段与 NBT** —— 不清电平、不清表。
+	 *
+	 * <p>两条理由：① 不留"来自未加载的臂"的幽灵常通频率；② 重新加载时可以原样恢复
+	 * （{@code read} 的 {@code !clientPacket} 分支会 {@code rejoinNetwork()}）。
+	 *
+	 * <p>为什么这条路只能挂在这里：{@code remove()} 在区块卸载时**不会**被调
+	 * （{@code SmartBlockEntity.setRemoved()} 里是 {@code if (!chunkUnloaded) remove();}），
+	 * 而 {@code setRemoved()} 本身是 {@code final} 不能覆写（§7.16a 第 4 条）。
 	 */
 	@Override
 	public void onChunkUnloaded() {
-		clearTransmissions();
+		if (heldSignals != null)
+			for (ArmLink link : heldSignals.values())
+				link.leaveNetwork(true);
 		super.onChunkUnloaded();
 	}
 
-	/** 非区块卸载的移除（拆方块 / 被替换）—— 另一条收尾的路。 */
+	/** 非区块卸载的移除（拆方块 / 被替换）—— **清零并退网**（§7.16e 规则 ⑤）。 */
 	@Override
 	public void remove() {
 		clearTransmissions();
 		super.remove();
 	}
 
+	/**
+	 * 方块被破坏 / 被替换（`destroy()` 是上游对"方块实体随方块一起没了"的钩子）：
+	 * **清零并退网**（§7.16e 规则 ⑤ —— 不清就是幽灵常通频率）。
+	 */
 	@Override
 	public void destroy() {
 		clearTransmissions(); // 方块被破坏 / 替换：先把发出去的频率收干净
@@ -951,6 +1084,51 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 
 	// ————————————————————————— 存读盘 / 同步 —————————————————————————
 
+	/**
+	 * 把 {"频率" → 电平 + 脉冲剩余} 写进 NBT（§7.16e：存档与客户端同步包都走这里）。
+	 *
+	 * <p>键结构刻意与条目里的 {@code freq} 一模一样（`[{Item1},{Item2}]`），读的一侧因此能直接复用
+	 * {@link ArmProgramEntry#readFrequency} —— "频率怎么存"只有一份实现，不会两边写法漂移。
+	 */
+	private void writeSignalTable(CompoundTag tag, HolderLookup.Provider registries) {
+		ListTag list = new ListTag();
+		if (heldSignals != null) {
+			for (ArmLink link : heldSignals.values()) {
+				if (link.frequency == null)
+					continue;
+				CompoundTag entry = new CompoundTag();
+				entry.put("freq", link.frequency.serializeEach(f -> (CompoundTag) f.getStack()
+					.saveOptional(registries)));
+				entry.putInt("sig", link.signalLevel);
+				entry.putInt("pulse", link.pulse);
+				list.add(entry);
+			}
+		}
+		tag.put("Signals", list);
+	}
+
+	/** 读回信号表（存档与客户端包共用）。**不碰网络表** —— 入网由服务端的 {@link #rejoinNetwork()} 做。 */
+	private void readSignalTable(CompoundTag tag, HolderLookup.Provider registries) {
+		if (heldSignals != null) {
+			// 注意：这里**不做网络操作**。read() 只发生在"刚建出来的 BE 读盘"与"客户端读同步包"两条路上，
+			// 世界里的网络表本来就没有我们的成员；服务端读完之后紧接着就 rejoinNetwork()。
+			heldSignals.clear();
+		}
+		armLinkRejectedLastTick = 0;
+		ListTag list = tag.getList("Signals", Tag.TAG_COMPOUND);
+		for (int i = 0; i < list.size() && i < MAX_HELD_SIGNALS; i++) {
+			CompoundTag entry = list.getCompound(i);
+			Couple<Frequency> freq = ArmProgramEntry.readFrequency(entry, registries);
+			if (freq == null)
+				continue;
+			ArmLink link = new ArmLink(freq);
+			link.signalLevel = Mth.clamp(entry.getInt("sig"), 0, 15);
+			int pulse = entry.getInt("pulse");
+			link.pulse = pulse > 0 ? pulse : -1; // 0 / 缺键 / 负数一律当"一直保持"
+			heldSignals().put(freq, link);
+		}
+	}
+
 	@Override
 	protected void write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
 		super.write(tag, registries, clientPacket);
@@ -962,15 +1140,11 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			tag.putString("Face", movingFace.getSerializedName());
 		tag.putInt("MoveSeq", moveSeq);
 		tag.putFloat("Progress", chasedPointProgress);
-		// 发出去的电平 / 脉冲剩余（数值很小）：让护目镜与调试看得见"这条臂现在把哪个频率按着"。
-		// ⚠️ **只进客户端包**（§7.16b 一.4 ①）：存档里不写。理由不是"数值太小"，而是**正确性** ——
-		// 网络注册（world → key → set）从来不随存档持久化，所以存盘再读回一个 15 只会让
-		// {"当前电平" = 15，"网络里其实没有这个成员"} 自相矛盾；而且"世界里留下一个永远通电的频率"
-		// 恰恰就是这种状态。收尾一律走 clearTransmissions()。
-		if (clientPacket) {
-			tag.putInt("ArmLinkLevel", armLinkLevel);
-			tag.putInt("ArmLinkPulse", armLinkPulse);
-		}
+		// 保持中的信号表（频率 + 电平 + 脉冲剩余）—— **服务端存档与客户端同步包都写**（§7.16e）：
+		// ① 存档：不写就等于"重进存档信号全丢"，而用户要的是持久变量；
+		// ② 客户端包：护目镜要看得见"这条臂现在把哪几个频率按着"（读的是同步下来的数据）。
+		// 客户端那份**不参与入网**（read 里只有 !clientPacket 才 rejoinNetwork）。
+		writeSignalTable(tag, registries);
 		tag.put("HeldItem", heldItem.saveOptional(registries));
 		tag.put("Overflow", NBTHelper.writeItemList(overflow, registries));
 		if (!clientPacket) {
@@ -1000,12 +1174,9 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		movingFace = tag.contains("Face") ? Direction.byName(tag.getString("Face")) : null;
 		moveSeq = tag.getInt("MoveSeq");
 		chasedPointProgress = tag.getFloat("Progress");
-		// ⚠️ 只从**客户端包**读回显示值：armLink 本身（频率 key 与网络注册）从不持久化，
-		// 从存档读回一个非 0 电平就会造出"自我报告已通电、网络里却没有这个成员"的假象。
-		if (clientPacket) {
-			armLinkLevel = tag.getInt("ArmLinkLevel");
-			armLinkPulse = tag.contains("ArmLinkPulse") ? tag.getInt("ArmLinkPulse") : -1;
-		}
+		// 信号表：存档与客户端包都读（§7.16e）。**入网只在服务端**（下面 rejoinNetwork）——
+		// 客户端读到的那份纯粹给护目镜看，不碰网络表（getNetworkOf 把 world 当 IdentityHashMap 的键）。
+		readSignalTable(tag, registries);
 		heldItem = ItemStack.parseOptional(registries, tag.getCompound("HeldItem"));
 		overflow.clear();
 		overflow.addAll(NBTHelper.readItemList(tag.getList("Overflow", Tag.TAG_COMPOUND), registries));
@@ -1016,6 +1187,9 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			program.tasks.addAll(loaded.tasks);
 			program.absolute = loaded.absolute;
 			runtime.load(tag.getCompound("Runtime"));
+			// ★ §7.16e：**加载时自动重新入网** —— 区块卸载时只退了网，字段与 NBT 都还在，
+			// 这一步把"断电 / 脉冲"原样接回世界（否则重新加载的臂看起来"发了但没通电"）。
+			rejoinNetwork();
 			return;
 		}
 

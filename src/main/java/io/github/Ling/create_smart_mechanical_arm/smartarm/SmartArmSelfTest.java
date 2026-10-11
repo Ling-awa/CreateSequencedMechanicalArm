@@ -1088,49 +1088,161 @@ public class SmartArmSelfTest {
 		BlockState oldArm = level.getBlockState(armPos);
 		Couple<Frequency> f1 = testFrequency(Items.REDSTONE_TORCH, Items.IRON_INGOT);
 		Couple<Frequency> f2 = testFrequency(Items.LEVER, Items.REDSTONE);
+		Couple<Frequency> f3 = testFrequency(Items.STONE, Items.DIRT);
 		String error = null;
 		boolean powered = false;
 		boolean offAfterHalt = false;
 		boolean removedFromNetwork = false;
-		boolean pulseRestored = false;
 		boolean noPulseAfterClear = false;
 		boolean oldFrequencyClean = false;
-		boolean f2Clean = false;
+		boolean multiHold = false;
+		boolean releaseOne = false;
+		boolean cardChangeClears = false;
+		boolean nbtRoundTrip = false;
+		boolean capRejects17th = false;
+		boolean capVisible = false;
+		boolean haltedTickPulse = false;
+		boolean unloadUnpowered = false;
+		boolean reloadRepowered = false;
+		boolean unloadKeptFields = false;
+		boolean signalsTabCaptured = false;
+		CompoundTag signalsTab = new CompoundTag();
 		try {
+			// ★ 先补齐"脉冲计时器挂在所有早退之前"这条**没人守**的守卫（§7.16c 反证②：旧自检直接调
+			// tickArmLinkTimers，从不走主循环 ⇒ 把计时器挪到 isHalted() 之后也照样全绿）。
+			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
+				error = "臂的方块实体没建出来（早退守卫）";
+			} else {
+				// 停机态 + 真走 runtime.tick()（主循环）：脉冲必须照常走完
+				arm.runtime.halt(arm, "自检：停机态脉冲");
+				arm.emitSignal(f1, 15, 2);
+				boolean duringPulse = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				arm.runtime.tick(arm);
+				arm.runtime.tick(arm);
+				boolean wentOff = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				haltedTickPulse = duringPulse && wentOff && arm.runtime.isHalted();
+				if (!haltedTickPulse)
+					LOGGER.error("[selftest] 停机态下脉冲没有靠 runtime.tick 走完 —— 计时器不在所有早退之前");
+				arm.clearTransmissions();
+			}
+
 			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
 				.defaultBlockState());
 			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
 				error = "臂的方块实体没建出来";
 			} else {
-				// ④ 发通电 → 网络里有电；停机 → 断电；已退网
+				// ④ 发通电 → 网络里有电；停机 → **仍然通电**（§7.16e 有意的反转）；两路并存
 				arm.emitSignal(f1, 15, 0);
 				powered = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
+				arm.emitSignal(f2, 15, 0);
+				multiHold = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
+					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2)
+					&& arm.heldSignalCount() == 2;
 				arm.runtime.halt(arm, "自检");
-				offAfterHalt = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
-				removedFromNetwork = arm.getArmLinkLevel() == 0 && !arm.isTransmittingTo(f1);
-				// ⑤ 脉冲：发 1t → 通电 → 推一次计时器 → 断电（并且撤网）
-				arm.emitSignal(f1, 15, 1);
-				boolean poweredDuringPulse = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
-				boolean fired = arm.runtime.tickArmLinkTimers(arm);
-				pulseRestored = poweredDuringPulse && fired
-					&& !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
-				// ⑥ 换频率：老频率不能残留（7.16a 第 6 条那个坑）。
-				// 判据用**当前的网络 key**：getNetworkKey() 是活的，忘了"先按旧 key 退网"的话
-				// 老那一格里还留着我们（只是强度 0）—— 只看"有没有电"抓不到。
+				offAfterHalt = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
+					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2);
+				removedFromNetwork = arm.getArmLinkLevel() == 15;
+				// ④b 「中断」只断指定那一路（§7.16e 规则 ①）
+				boolean released = arm.releaseSignal(f1);
+				releaseOne = released && !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
+					&& !arm.holdsSignal(f1) && Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2)
+					&& arm.isTransmittingTo(f2);
+				if (!releaseOne)
+					LOGGER.error("[selftest] releaseSignal 没有只断指定那一路（要么 A 还通着，要么把 B 也断了）");
+
+				// ⑤ NBT 往返（频率集合 + 电平 + 脉冲剩余）：**在清干净之前**存一份
+				arm.emitSignal(f1, 15, 0); // A 回来，并且带一个未到期的脉冲
+				arm.emitSignal(f3, 7, 5);
+				signalsTab = arm.saveWithoutMetadata(registries);
+				signalsTabCaptured = true;
+				CompoundTag copy = signalsTab.copy();
+				SmartArmBlockEntity probe = new SmartArmBlockEntity(SmartArmRegistration.SMART_ARM_BE.get(),
+					armPos.offset(1, 0, 0), SmartArmRegistration.SMART_ARM.get()
+						.defaultBlockState());
+				probe.setLevel(level);
+				probe.read(copy, registries, false);
+				nbtRoundTrip = probe.heldSignalCount() == arm.heldSignalCount()
+					&& probe.heldSignalCount() == 3 && probe.isTransmittingTo(f1) && probe.isTransmittingTo(f2)
+					&& probe.isTransmittingTo(f3) && probe.getArmLinkLevel() == 15 && probe.holdsSignal(f3);
+				if (!nbtRoundTrip)
+					LOGGER.error("[selftest] 信号表的 NBT 往返不一致（频率集合/电平/脉冲剩余）");
+
+				// ⑥ 上限 16：第 17 个被拒，而且**状态可见**（不静默丢）
+				arm.clearTransmissions();
+				List<Couple<Frequency>> many = testFrequencies(17);
+				int accepted = 0;
+				for (Couple<Frequency> freq : many) {
+					arm.emitSignal(freq, 15, 0);
+					if (arm.holdsSignal(freq))
+						accepted++;
+				}
+				capRejects17th = accepted == SmartArmBlockEntity.MAX_HELD_SIGNALS
+					&& arm.heldSignalCount() == SmartArmBlockEntity.MAX_HELD_SIGNALS
+					&& !arm.holdsSignal(many.get(16));
+				capVisible = arm.rejectedSignalCount() == SmartArmBlockEntity.MAX_HELD_SIGNALS;
+				if (!capRejects17th)
+					LOGGER.error("[selftest] 上限 16 没生效（第 17 个频率也被收下了）");
+				if (!capVisible)
+					LOGGER.error("[selftest] 超上限被拒之后没有可见状态（护目镜与自检都看不见）");
+				arm.clearTransmissions();
+
+				// ⑦ 操作卡变化 ⇒ 全部清零退网（§7.16e 的另一处"会断"）
 				arm.emitSignal(f1, 15, 0);
 				arm.emitSignal(f2, 15, 0);
-				boolean movedKey = f2.equals(arm.currentArmLinkKey());
+				arm.setProgram(new ArmProgram());
+				cardChangeClears = arm.heldSignalCount() == 0
+					&& !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
+					&& !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2) && !arm.holdsSignal(f1);
+				if (!cardChangeClears)
+					LOGGER.error("[selftest] 换卡之后信号没有全断（setProgram 少了清零）");
+
+				// ⑧ 区块卸载 / 重新加载（§7.16e：卸载只退网、字段与 NBT 都留着；加载自动重新入网）
+				// 不真卸区块（那要世界重载），直接调钩子 + 真放一块**临时**臂当"重新加载"的目标。
+				// ⚠️ 必须用**世界里真实存在**的方块实体：`updateNetworkOf` 会把 `isAlive()` 为假的成员
+				// 从网络里剔掉（`isAlive` 要求 `level.getBlockEntity(pos) == this`），所以拿一个
+				// `new` 出来、从没放进世界的 BE 去断言"重新入网"是**测试骗自己**（这一版第一稿就是这么错的，
+				// 日志抓出来：`存档Signals=1 读回条数=1 含f2=true 电平=15` 但入网=false）。
+				arm.clearTransmissions();
+				arm.emitSignal(f2, 15, 0);
+				CompoundTag beforeUnload = arm.saveWithoutMetadata(registries);
+				arm.onChunkUnloaded();
+				unloadUnpowered = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2);
+				unloadKeptFields = arm.holdsSignal(f2) && arm.getArmLinkLevel() == 15;
+				BlockPos reloadPos = armPos.offset(2, 0, 0);
+				BlockState oldReload = level.getBlockState(reloadPos);
+				level.setBlockAndUpdate(reloadPos, SmartArmRegistration.SMART_ARM.get()
+					.defaultBlockState());
+				SmartArmBlockEntity reloaded = level.getBlockEntity(reloadPos) instanceof SmartArmBlockEntity be
+					? be : null;
+				if (reloaded == null)
+					LOGGER.error("[selftest] 放不下用来验证「重新加载」的临时臂");
+				else
+					reloaded.read(beforeUnload.copy(), registries, false);
+				reloadRepowered = reloaded != null && reloaded.heldSignalCount() == 1
+					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2);
+				if (!unloadUnpowered)
+					LOGGER.error("[selftest] 区块卸载之后那个频率还通着（应当退网，否则是幽灵常通频率）");
+				if (!unloadKeptFields)
+					LOGGER.error("[selftest] 区块卸载把电平/信号表清掉了（用户要求保留字段与 NBT）");
+				if (!reloadRepowered)
+					LOGGER.error("[selftest] 重新加载之后没有自动重新入网（信号恢复不了）");
+				if (reloaded != null)
+					reloaded.clearTransmissions();
+				level.setBlockAndUpdate(reloadPos, oldReload); // 清掉临时臂（它会被正常移除并退网）
+
+				// ⑨ 旧断言 ⑥ 的替代：两路 → 全清 → **两路都不残留**（表空 + 都没电）
+				arm.clearTransmissions();
+				arm.emitSignal(f1, 15, 0);
+				arm.emitSignal(f2, 15, 0);
 				arm.clearTransmissions();
 				oldFrequencyClean = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
-					&& !arm.isTransmittingTo(f1);
-				f2Clean = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2)
-					&& !arm.isTransmittingTo(f2);
+					&& !arm.isTransmittingTo(f1) && !arm.holdsSignal(f1);
 				boolean keyReleased = arm.currentArmLinkKey() == null;
-				noPulseAfterClear = !arm.runtime.tickArmLinkTimers(arm);
-				if (!movedKey)
-					LOGGER.error("[selftest] 换频率后 ArmLink 的网络 key 没有切到新频率（老那格会永远留着）");
+				noPulseAfterClear = !arm.runtime.tickArmLinkTimers(arm) && arm.getArmLinkLevel() == 0;
 				if (!keyReleased)
-					LOGGER.error("[selftest] 收干净之后网络 key 还留着（应当一起清掉）");
+					LOGGER.error("[selftest] 清干净之后表里还留着频率（应当一起清掉）");
 			}
 		} catch (Throwable t) {
 			error = "异常 " + t;
@@ -1140,26 +1252,56 @@ public class SmartArmSelfTest {
 		if (error != null)
 			LOGGER.error("[selftest] 收发信号 行为自检异常：{}", error);
 
-		LOGGER.info("[selftest] 收发信号 发送: 发通电→通电={} 停机→断电={} 已退网={}", powered, offAfterHalt,
-			removedFromNetwork);
+		// 脉冲那条旧判据（"到点自动恢复成发之前的电平"）在新设计里没有意义：到点就是**归 0**
+		//（"保持"是常态）。这里保留"停机态真走主循环"的结论当那条断言的替身。
+		LOGGER.info("[selftest] 收发信号 发送: 发通电→通电={} 停机→仍通电={} 两路并存={} 电平还在={}", powered,
+			offAfterHalt, multiHold, removedFromNetwork);
 		if (!powered)
 			LOGGER.error("[selftest] 发出去的频率在网络里没有电（emitSignal 没接上红石链接网络）");
 		if (!offAfterHalt)
-			LOGGER.error("[selftest] 停机后那个频率仍然通电（世界里留了一个永远通电的频率）");
+			LOGGER.error("[selftest] 停机后信号断了 —— §7.16e 已把这条旧行为【反转】：停机必须仍通电");
+		if (!multiHold)
+			LOGGER.error("[selftest] 两个频率不能同时通电（多路并存没成立）");
 		if (!removedFromNetwork)
-			LOGGER.error("[selftest] 停机后没有把发送端撤出网络（或者电平没关到 0）");
+			LOGGER.error("[selftest] 停机把电平也清了（停机只该不断，不该动信号）");
 
-		LOGGER.info("[selftest] 收发信号 脉冲: 到点自动恢复={}", pulseRestored && noPulseAfterClear);
-		if (!pulseRestored)
-			LOGGER.error("[selftest] 发出去的脉冲没有到点自动恢复（计时器没推进 / 恢复值不对）");
+		LOGGER.info("[selftest] 收发信号 中断: 只断指定那一路={}", releaseOne);
+		LOGGER.info("[selftest] 收发信号 脉冲: 停机态走主循环到点归零={} 清干净后无残留={}", haltedTickPulse,
+			noPulseAfterClear);
 		if (!noPulseAfterClear)
-			LOGGER.error("[selftest] 收干净之后脉冲计时器还在跑（应当被清成 -1）");
+			LOGGER.error("[selftest] 收干净之后脉冲计时器/电平还在（应当清成 -1 与 0）");
 
-		LOGGER.info("[selftest] 收发信号 换频率: 老频率不残留={}", oldFrequencyClean && f2Clean);
+		LOGGER.info("[selftest] 收发信号 换卡: 全断={} 老频率不残留={}", cardChangeClears, oldFrequencyClean);
 		if (!oldFrequencyClean)
-			LOGGER.error("[selftest] 换频率时老频率仍然通电（emitSignal 少了 removeFromNetwork(旧key)）");
-		if (!f2Clean)
-			LOGGER.error("[selftest] 清干净之后新频率仍然通电（clearTransmissions 少了一步）");
+			LOGGER.error("[selftest] 清干净之后老频率仍然通电（clearTransmissions 少了一步）");
+
+		LOGGER.info("[selftest] 收发信号 NBT: 往返={} 上限拒绝第17个={} 拒绝可见={}", nbtRoundTrip, capRejects17th,
+			capVisible);
+		LOGGER.info("[selftest] 收发信号 区块: 卸载退网={} 字段保留={} 重载自动入网={}", unloadUnpowered,
+			unloadKeptFields, reloadRepowered);
+		if (!signalsTabCaptured)
+			LOGGER.error("[selftest] 没能抓到信号表的 NBT 快照（NBT 往返这条断言等于没跑）");
+	}
+
+	/**
+	 * 自检用的 {@code count} 组互不相同的频率（两两配对物品注册表里的物品）。
+	 *
+	 * <p>用注册表而不是写死 17 组物品：物品名单会随版本变，写死迟早编译不过；也不用 {@code Items.AIR}
+	 * （它会让 {@code Frequency} 变成 EMPTY，那样就没有"不同频率"可言了）。
+	 */
+	private static List<Couple<Frequency>> testFrequencies(int count) {
+		List<Item> pool = new ArrayList<>();
+		for (Item item : BuiltInRegistries.ITEM)
+			if (item != Items.AIR)
+				pool.add(item);
+		List<Couple<Frequency>> out = new ArrayList<>();
+		// 第 i 组 = (pool[i], pool[i+count])：**间隔 count** 保证任意两组的集合都不相同
+		//（相邻取 item[i]/item[i+1] 时，(a,b) 与 (b,a) 会撞成同一个频率对 —— 那样第 17 条断言会假红）。
+		if (pool.size() < count * 2)
+			return out;
+		for (int i = 0; i < count; i++)
+			out.add(testFrequency(pool.get(i), pool.get(i + count)));
+		return out;
 	}
 
 	/** 自检用的频率对（两个物品 = Create 红石链接的一对频率）。 */

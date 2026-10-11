@@ -336,8 +336,8 @@ public class ProgramRuntime {
 			return;
 		}
 		arm.cancelMove(); // 收工：手臂折回待机位，别举在最后一个目标前面（与「等待」同一条理由）
-		// 主任务正常结束 = 程序不再拥有它发出的频率：必须把强度关到 0 再退网（§7.16b 一.3）
-		arm.clearTransmissions();
+		// ⚠️ §7.16e 有意的**反转**：主任务正常结束**不再清信号** —— 信号是持久变量，跨循环、跨停机、
+		// 跑完主任务都保持；要断只能靠「中断」或换卡（旧行为 `clearTransmissions()` 已删，见 §7.16c 反证①）。
 		resetEntryCounters();
 		entryIndex = 0;
 		state = EntryState.IDLE;
@@ -547,14 +547,18 @@ public class ProgramRuntime {
 				state = EntryState.WAITING;
 			}
 			case WAIT_REDSTONE -> state = EntryState.WAITING;
-			// 收发信号（§7.16b 一.3）：**收** = 阻塞等待（走 tickWait 那张极性真值表）；
-			// **发** = 发出一段电平就算完成 —— 不阻塞、**没有失败出口**（发送不会失败），
+			// 收发信号（§7.16e：一个频率 = 一个持久布尔变量）：**收** = 阻塞等待（走 tickWait 那张极性真值表）；
+			// **发通电** = 置位（一直保持，直到有人**中断**它或换卡）；**中断** = 复位（只断这一路，
+			// 并取消它未到期的脉冲）。两者都不阻塞、**没有失败出口**（发送不会失败），
 			// 脉冲的收尾交给臂 BE 上那枚计时器（tickArmLinkTimers）。
 			case SIGNAL -> {
 				if (entry.isSignalReceive())
 					state = EntryState.WAITING;
 				else {
-					arm.emitSignal(entry.frequency, entry.waitForPowered ? 15 : 0, entry.signalTicks());
+					if (entry.waitForPowered)
+						arm.emitSignal(entry.frequency, 15, entry.signalTicks());
+					else
+						arm.releaseSignal(entry.frequency); // 「中断」= 只断指定频率那一路
 					succeed(arm, task, entry);
 				}
 			}
@@ -1040,8 +1044,8 @@ public class ProgramRuntime {
 		error = reason;
 		errorEntryIndex = entryIndex;
 		arm.cancelMove(); // 停机也收回：出错时把手臂留在目标前面既难看又挡视线
-		// 停机 = 程序不再拥有它发出的频率（§7.16b 一.3：这条缺了就会在世界里留一个永远通电的频率）
-		arm.clearTransmissions();
+		// ⚠️ §7.16e 有意的**反转**：停机**不再清信号**（旧行为在 §7.16c 里被 D 验过，用户这轮推翻）。
+		// 理由与"主任务正常结束"一样：信号是**持久变量**，停机只是"程序停了"，不等于"变量复位"。
 		arm.markProgramDirty();
 	}
 
