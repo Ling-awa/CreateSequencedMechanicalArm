@@ -18,6 +18,7 @@ import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 
 import io.github.Ling.create_smart_mechanical_arm.Create_smart_mechanical_arm;
+import io.github.Ling.create_smart_mechanical_arm.SmartArmConfig;
 import io.github.Ling.create_smart_mechanical_arm.interaction.AnyBlockInteractionPoint;
 import io.github.Ling.create_smart_mechanical_arm.interaction.RightClickBridge;
 import io.github.Ling.create_smart_mechanical_arm.mixin.ArmInteractionPointAccessor;
@@ -592,11 +593,11 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		// 保持中的信号（§7.16e：信号是持久变量，玩家得看得见"这条臂现在还按着几路"）。
 		// 只有真的在保持时才多画一行；**超上限被拒的那次也要看得见**（用户：不许静默丢）。
 		if (heldSignalCount() > 0 || armLinkRejectedLastTick > 0) {
-			goggleLine().text("Signals: " + heldSignalCount() + " / " + MAX_HELD_SIGNALS)
+			goggleLine().text("Signals: " + heldSignalCount() + " / " + maxHeldSignals())
 				.style(ChatFormatting.DARK_GRAY)
 				.forGoggles(tooltip, 1);
 			if (armLinkRejectedLastTick > 0)
-				goggleLine().text("Signal rejected (limit " + MAX_HELD_SIGNALS + ")")
+				goggleLine().text("Signal rejected (limit " + maxHeldSignals() + ")")
 					.style(ChatFormatting.RED)
 					.forGoggles(tooltip, 2);
 		}
@@ -711,8 +712,16 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	//  ② hasAnyLoadedPower 只读强度、**完全不看 isAlive()** ⇒ "把 isAlive() 弄成 false"**不能代替**
 	//     "把强度关到 0"。所以收尾一律是显式的三步：关 0 → updateNetworkOf → removeFromNetwork。
 
-	/** 同时保持的频率条数上限（§7.16e：不限制用法，只留一条"别把网络表撑爆"的常量上限）。 */
-	public static final int MAX_HELD_SIGNALS = 16;
+	/**
+	 * 同时保持的频率条数上限（§7.16e：不限制用法，只留一条"别把网络表撑爆"的上限）。
+	 *
+	 * <p>值来自配置项 {@code maxHeldSignals}（默认 {@link SmartArmConfig#DEFAULT_MAX_HELD_SIGNALS}）；
+	 * ⚠️ 运行期读出来的数，**不是**编译期常量 —— 别拿它当数组长度/注解参数。
+	 * 配置未加载时回落默认值（见 {@link SmartArmConfig#maxHeldSignals()}）。
+	 */
+	public static int maxHeldSignals() {
+		return SmartArmConfig.maxHeldSignals();
+	}
 
 	/**
 	 * 最近一次「发」因为表满被拒之后留下的状态：{@code >0} = 有过一次被拒，{@code 0} = 干净。
@@ -863,9 +872,9 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			return; // getNetworkOf 把 world 当 IdentityHashMap 的键，null 会 NPE；客户端也不该碰网络表
 		ArmLink link = heldSignals().get(freq);
 		if (link == null) {
-			if (heldSignals().size() >= MAX_HELD_SIGNALS) {
+			if (heldSignals().size() >= maxHeldSignals()) {
 				// 超上限：**拒绝并留可见状态**（不静默丢，也不去动已经保持的那些）—— §7.16e
-				armLinkRejectedLastTick = MAX_HELD_SIGNALS;
+				armLinkRejectedLastTick = maxHeldSignals();
 				markProgramDirty();
 				return;
 			}
@@ -948,7 +957,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			sendData();
 	}
 
-	/** 还在表里的频率条数（**不管电平**）—— 自检用它断言上限 16 与"只断指定那一路"。 */
+	/** 还在表里的频率条数（**不管电平**）—— 自检用它断言"配置上限"与"只断指定那一路"。 */
 	public int heldSignalCount() {
 		return heldSignals == null ? 0 : heldSignals.size();
 	}
@@ -1116,7 +1125,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		}
 		armLinkRejectedLastTick = 0;
 		ListTag list = tag.getList("Signals", Tag.TAG_COMPOUND);
-		for (int i = 0; i < list.size() && i < MAX_HELD_SIGNALS; i++) {
+		for (int i = 0; i < list.size() && i < maxHeldSignals(); i++) {
 			CompoundTag entry = list.getCompound(i);
 			Couple<Frequency> freq = ArmProgramEntry.readFrequency(entry, registries);
 			if (freq == null)

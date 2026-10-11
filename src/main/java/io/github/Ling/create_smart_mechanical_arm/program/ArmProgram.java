@@ -3,6 +3,8 @@ package io.github.Ling.create_smart_mechanical_arm.program;
 import java.util.ArrayList;
 import java.util.List;
 
+import io.github.Ling.create_smart_mechanical_arm.SmartArmConfig;
+
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -16,8 +18,25 @@ import net.minecraft.nbt.Tag;
  */
 public class ArmProgram {
 
-	public static final int MAX_TASKS = 8;
-	public static final int MAX_ENTRIES_TOTAL = 256;
+	/**
+	 * 任务数上限（配置项 {@code maxTasks}，默认 {@link SmartArmConfig#DEFAULT_MAX_TASKS}）。
+	 *
+	 * <p>⚠️ 这是<b>运行期</b>读出来的数（配置未加载时回落默认值），**不是**编译期常量：
+	 * 不要拿它当数组长度、注解参数或 switch case。
+	 */
+	public static int maxTasks() {
+		return SmartArmConfig.maxTasks();
+	}
+
+	/**
+	 * 条目总数上限（配置项 {@code maxEntriesTotal}，默认 {@link SmartArmConfig#DEFAULT_MAX_ENTRIES_TOTAL}）。
+	 *
+	 * <p>⚠️ 同上：运行期值。条目越多整份程序序列化越大，超过 {@code ArmProgramEditPacket.MAX_TAG_BYTES}
+	 * （128KB）会在保存时被整份拒绝。
+	 */
+	public static int maxEntriesTotal() {
+		return SmartArmConfig.maxEntriesTotal();
+	}
 
 	/** {@code RELATIVE} 表示条目里的坐标是相对手臂的（臂内部表示）。 */
 	public boolean absolute = false;
@@ -47,27 +66,27 @@ public class ArmProgram {
 	 *
 	 * <p><b>为什么要有这个方法</b>：服务端是"<b>整份接受或整份拒绝</b>"（{@code ArmProgramEditPacket}
 	 * 只判 {@link #isWithinLimits()}），所以编辑器必须在"<b>加到上限的那一刻</b>"就挡住 ——
-	 * 放任玩家加到第 {@code MAX_TASKS + 1} 个，关界面时整份程序被拒，<b>这一场编辑一个字都落不了盘</b>
+	 * 放任玩家加到第 {@code maxTasks() + 1} 个，关界面时整份程序被拒，<b>这一场编辑一个字都落不了盘</b>
 	 * （只有聊天栏一行红字），而玩家看到的是"编辑全都白做了"。
 	 *
-	 * <p>上限值只在这里和 {@link #isWithinLimits()} 各出现一次，两处共用一个常量 ——
+	 * <p>上限值只在这里和 {@link #isWithinLimits()} 各出现一次，两处共读同一个配置项 ——
 	 * 界面用的守卫与服务端用的守卫必须是同一个判据，否则又会走回"能加但存不下"。
 	 */
 	public boolean canAddTask() {
-		return tasks.size() < MAX_TASKS;
+		return tasks.size() < maxTasks();
 	}
 
 	/** 服务端写入前的大小守卫（PLAN.md §4.1）。 */
 	public boolean isWithinLimits() {
-		if (tasks.size() > MAX_TASKS)
+		if (tasks.size() > maxTasks())
 			return false;
 		int total = 0;
 		for (ArmProgramTask task : tasks) {
 			total += task.entries.size();
-			if (task.entries.size() > MAX_ENTRIES_TOTAL)
+			if (task.entries.size() > maxEntriesTotal())
 				return false;
 		}
-		return total <= MAX_ENTRIES_TOTAL;
+		return total <= maxEntriesTotal();
 	}
 
 	public CompoundTag save(HolderLookup.Provider registries) {

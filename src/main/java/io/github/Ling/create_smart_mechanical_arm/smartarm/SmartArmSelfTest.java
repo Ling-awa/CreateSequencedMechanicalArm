@@ -23,6 +23,7 @@ import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlock;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlockEntity;
 
 import io.github.Ling.create_smart_mechanical_arm.Create_smart_mechanical_arm;
+import io.github.Ling.create_smart_mechanical_arm.SmartArmConfig;
 import io.github.Ling.create_smart_mechanical_arm.interaction.AnyBlockInteractionPoint;
 import io.github.Ling.create_smart_mechanical_arm.interaction.ArmEffects;
 import io.github.Ling.create_smart_mechanical_arm.interaction.RightClickBridge;
@@ -115,6 +116,11 @@ public class SmartArmSelfTest {
 			.getRoot()
 			.getChild("smartarm") != null;
 		LOGGER.info("[selftest] command /smartarm registered: {}", registered);
+
+		// 生效的规模上限（**从配置读，不读常量**）—— 服务端这一侧的现场证据。
+		// 反证方式：把 run/config/create_smart_mechanical_arm-common.toml 里的 maxTasks 改成 3，
+		// 重启后这行应当报 任务上限=3，并且下面 `任务数上限` 那条自检探到第 4 个就被挡。
+		LOGGER.info("[selftest] {}", SmartArmConfig.effectiveSummary());
 
 		checkDeployRecipes(server);
 		checkCardAndCoordinates(server);
@@ -1101,6 +1107,8 @@ public class SmartArmSelfTest {
 		boolean nbtRoundTrip = false;
 		boolean capRejects17th = false;
 		boolean capVisible = false;
+		boolean capSkipped = false;
+		int capProbedLimit = -1;
 		boolean haltedTickPulse = false;
 		boolean unloadUnpowered = false;
 		boolean reloadRepowered = false;
@@ -1169,23 +1177,35 @@ public class SmartArmSelfTest {
 				if (!nbtRoundTrip)
 					LOGGER.error("[selftest] 信号表的 NBT 往返不一致（频率集合/电平/脉冲剩余）");
 
-				// ⑥ 上限 16：第 17 个被拒，而且**状态可见**（不静默丢）
+				// ⑥ 配置上限：第 (maxHeldSignals+1) 个被拒，而且**状态可见**（不静默丢）
+				// 上限来自配置项 `maxHeldSignals`（默认 64）—— 断言要**跟着配置走**，
+				// 否则"把上限调大"会把这门自检变成假红。
 				arm.clearTransmissions();
-				List<Couple<Frequency>> many = testFrequencies(17);
-				int accepted = 0;
-				for (Couple<Frequency> freq : many) {
-					arm.emitSignal(freq, 15, 0);
-					if (arm.holdsSignal(freq))
-						accepted++;
+				int signalCap = SmartArmBlockEntity.maxHeldSignals();
+				capProbedLimit = signalCap;
+				List<Couple<Frequency>> many = testFrequencies(signalCap + 1);
+				if (many.size() <= signalCap) {
+					// 频率池太小（配置被拉得很高时才会发生）：这一条**跳过**，不假装通过也不假红。
+					capSkipped = true;
+					capRejects17th = true;
+					capVisible = true;
+					LOGGER.warn("[selftest] 频率池只凑出 {} 组 < 配置上限 {} —— 信号上限这条断言本次跳过", many.size(),
+						signalCap);
+				} else {
+					int accepted = 0;
+					for (Couple<Frequency> freq : many) {
+						arm.emitSignal(freq, 15, 0);
+						if (arm.holdsSignal(freq))
+							accepted++;
+					}
+					capRejects17th = accepted == signalCap && arm.heldSignalCount() == signalCap
+						&& !arm.holdsSignal(many.get(signalCap));
+					capVisible = arm.rejectedSignalCount() == signalCap;
+					if (!capRejects17th)
+						LOGGER.error("[selftest] 信号上限 {} 没生效（第 {} 个频率也被收下了）", signalCap, signalCap + 1);
+					if (!capVisible)
+						LOGGER.error("[selftest] 超上限被拒之后没有可见状态（护目镜与自检都看不见）");
 				}
-				capRejects17th = accepted == SmartArmBlockEntity.MAX_HELD_SIGNALS
-					&& arm.heldSignalCount() == SmartArmBlockEntity.MAX_HELD_SIGNALS
-					&& !arm.holdsSignal(many.get(16));
-				capVisible = arm.rejectedSignalCount() == SmartArmBlockEntity.MAX_HELD_SIGNALS;
-				if (!capRejects17th)
-					LOGGER.error("[selftest] 上限 16 没生效（第 17 个频率也被收下了）");
-				if (!capVisible)
-					LOGGER.error("[selftest] 超上限被拒之后没有可见状态（护目镜与自检都看不见）");
 				arm.clearTransmissions();
 
 				// ⑦ 操作卡变化 ⇒ 全部清零退网（§7.16e 的另一处"会断"）
@@ -1275,8 +1295,9 @@ public class SmartArmSelfTest {
 		if (!oldFrequencyClean)
 			LOGGER.error("[selftest] 清干净之后老频率仍然通电（clearTransmissions 少了一步）");
 
-		LOGGER.info("[selftest] 收发信号 NBT: 往返={} 上限拒绝第17个={} 拒绝可见={}", nbtRoundTrip, capRejects17th,
-			capVisible);
+		String capNote = capSkipped ? "上限断言=跳过（频率池不足）" : "上限断言=已实测";
+		LOGGER.info("[selftest] 收发信号 NBT: 往返={} 配置上限={} 拒绝第{}个={} 拒绝可见={} {}", nbtRoundTrip,
+			capProbedLimit, capProbedLimit + 1, capRejects17th, capVisible, capNote);
 		LOGGER.info("[selftest] 收发信号 区块: 卸载退网={} 字段保留={} 重载自动入网={}", unloadUnpowered,
 			unloadKeptFields, reloadRepowered);
 		if (!signalsTabCaptured)
@@ -1286,7 +1307,7 @@ public class SmartArmSelfTest {
 	/**
 	 * 自检用的 {@code count} 组互不相同的频率（两两配对物品注册表里的物品）。
 	 *
-	 * <p>用注册表而不是写死 17 组物品：物品名单会随版本变，写死迟早编译不过；也不用 {@code Items.AIR}
+	 * <p>用注册表而不是写死组数：物品名单会随版本变，写死迟早编译不过；也不用 {@code Items.AIR}
 	 * （它会让 {@code Frequency} 变成 EMPTY，那样就没有"不同频率"可言了）。
 	 */
 	private static List<Couple<Frequency>> testFrequencies(int count) {
@@ -1296,7 +1317,7 @@ public class SmartArmSelfTest {
 				pool.add(item);
 		List<Couple<Frequency>> out = new ArrayList<>();
 		// 第 i 组 = (pool[i], pool[i+count])：**间隔 count** 保证任意两组的集合都不相同
-		//（相邻取 item[i]/item[i+1] 时，(a,b) 与 (b,a) 会撞成同一个频率对 —— 那样第 17 条断言会假红）。
+		//（相邻取 item[i]/item[i+1] 时，(a,b) 与 (b,a) 会撞成同一个频率对 —— 那样信号上限那条断言会假红）。
 		if (pool.size() < count * 2)
 			return out;
 		for (int i = 0; i < count; i++)
@@ -1470,7 +1491,14 @@ public class SmartArmSelfTest {
 		probe.setItemInHand(InteractionHand.MAIN_HAND, card);
 		ArmProgramEditPacket.SaveResult first = ArmProgramEditPacket.applyTo(probe, edited.save(registries));
 		ArmProgram saved = CardProgramStorage.read(card, registries);
-		boolean applied = saved.tasks.get(0).entries.get(0).delay == 37
+		// ⚠️ 规模上限是**配置项**（`maxEntriesTotal` / `maxTasks`，见 §11 决策 69 的后续）：
+		// 玩家把它调到装不下这个预设时，`first` 就是 OVER_LIMIT、卡上**什么都没写** ⇒ `saved` 是空程序。
+		// 这一条原来直接 `.get(0)`，于是"配置值本身合法"（`defineInRange` 声明 1..4096）却把**服务端打崩**
+		// ——而且崩在**每次开服**，不是玩家编辑卡片的时候（实测：`maxEntriesTotal = 2` ⇒
+		// `IndexOutOfBoundsException` @ `SmartArmSelfTest.java:1494` + crash-report）。
+		// 所以先判"卡上到底读出了东西没有"，再谈里面的字段。
+		boolean savedReadable = !saved.tasks.isEmpty() && !saved.tasks.get(0).entries.isEmpty();
+		boolean applied = savedReadable && saved.tasks.get(0).entries.get(0).delay == 37
 			&& saved.tasks.get(0).loopCount == 7 && saved.tasks.get(0).loop == ArmProgramTask.LoopType.COUNT;
 		boolean lossless = saved.save(registries)
 			.equals(edited.save(registries));
@@ -1478,7 +1506,7 @@ public class SmartArmSelfTest {
 
 		// ② 超限必须整份拒绝，且不能把原来那张卡改坏
 		ArmProgram tooBig = new ArmProgram();
-		for (int i = 0; i <= ArmProgram.MAX_TASKS; i++) {
+		for (int i = 0; i <= ArmProgram.maxTasks(); i++) {
 			ArmProgramTask task = new ArmProgramTask();
 			task.name = "t" + i;
 			tooBig.tasks.add(task);
@@ -1590,16 +1618,20 @@ public class SmartArmSelfTest {
 	 * 「任务数上限」判据边界的自检（第二十四轮审计发现的丢数据路径）。
 	 *
 	 * <p>为什么值得钉：服务端是<b>整份接受或整份拒绝</b>（{@code ArmProgramEditPacket} 只判
-	 * {@code isWithinLimits()}），所以"编辑器能不能加到第 {@code MAX_TASKS + 1} 个"直接决定
+	 * {@code isWithinLimits()}），所以"编辑器能不能加到第 {@code maxTasks() + 1} 个"直接决定
 	 * "关界面时这一场编辑是否全丢"。编辑器侧的<b>接线</b>由客户端自检
 	 * （{@code ArmProgramScreen.taskLimitProblem}，它真的去调 {@code insertTaskAt}）实测；
 	 * 这里钉的是<b>模型侧判据</b>：到上限前都放行、到上限即停<b>且这份程序仍然合法</b>
 	 * （否则会出现"界面不让加、服务端却要拒"的双重标准）、超出即不合法。
+	 *
+	 * <p>上限从**配置**读（默认 32）：把 config 里的 {@code maxTasks} 改成 3，这条自检探到的
+	 * 上限就必须变成 3 —— 这是"配置真的接上了"的反证入口。
 	 */
 	private static void checkTaskLimit() {
+		int limit = ArmProgram.maxTasks();
 		ArmProgram program = new ArmProgram();
 		boolean grew = true;
-		for (int i = 0; i < ArmProgram.MAX_TASKS; i++) {
+		for (int i = 0; i < limit; i++) {
 			grew &= program.canAddTask();
 			ArmProgramTask task = new ArmProgramTask();
 			task.name = "t" + i;
@@ -1607,11 +1639,11 @@ public class SmartArmSelfTest {
 		}
 		// 正好到上限：编辑器不该再放行，但这份程序**仍然是合法的**（服务端应当收下）
 		boolean stopsAtLimit = !program.canAddTask() && program.isWithinLimits();
-		program.tasks.add(new ArmProgramTask()); // 第 MAX_TASKS + 1 个
+		program.tasks.add(new ArmProgramTask()); // 第 limit + 1 个
 		boolean overLimitIllegal = !program.canAddTask() && !program.isWithinLimits();
 
-		LOGGER.info("[selftest] 任务数上限: 上限={} 到上限前都放行={} 到上限即停且仍合法={} 超出即不合法={}",
-			ArmProgram.MAX_TASKS, grew, stopsAtLimit, overLimitIllegal);
+		LOGGER.info("[selftest] 任务数上限: 配置上限={} 到上限前都放行={} 到上限即停且仍合法={} 超出即不合法={}",
+			limit, grew, stopsAtLimit, overLimitIllegal);
 		if (!grew || !stopsAtLimit || !overLimitIllegal)
 			LOGGER.error("[selftest] 任务数上限的判据坏了：grew={} stopsAtLimit={} overLimitIllegal={}"
 				+ " —— 「界面能加但服务端要拒」会让关界面时整场编辑全丢", grew, stopsAtLimit, overLimitIllegal);

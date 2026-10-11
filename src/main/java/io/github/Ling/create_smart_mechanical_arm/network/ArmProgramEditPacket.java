@@ -26,7 +26,8 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  * 就是整份 {@code Schedule} 一起传（{@code ScheduleItem.use} → 编辑 → 关闭时发），
  * 服务端只做"校验 + 落盘"。这套做法的好处是<b>状态只有一份权威</b>：客户端怎么改都行，
  * 服务端要么整体接受、要么整体拒绝，不会出现"增量补丁对不上底稿"的中间态。
- * 代价是包体大一点 —— 256 条上限的程序约几十 KB，相对 1 MB 的载荷上限可以忽略。
+ * 代价是包体大一点 —— 默认上限（条目总数 ≤ {@code maxEntriesTotal} = 256）的程序约几十 KB，
+ * 相对 1 MB 的载荷上限可以忽略。
  *
  * <p>{@code PLAN.md §5.2} 里原本写的是"增量编辑 + S2C 同步 + BE 并发编辑锁"，这里改成了
  * 全量提交，<b>原因有二</b>：
@@ -40,7 +41,14 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  */
 public record ArmProgramEditPacket(CompoundTag program) implements CustomPacketPayload {
 
-	/** 防御性上限：合法程序（8 任务 × 256 条目）实测在几十 KB 量级，128 KB 足够宽松。 */
+	/**
+	 * 防御性上限：默认配置（条目总数 ≤ {@code maxEntriesTotal} = 256）的合法程序实测在几十 KB 量级，
+	 * 128 KB 足够宽松。
+	 *
+	 * <p>与 {@code SmartArmConfig.maxEntriesTotal} 的关系（**有意保留的兜底**）：条目上限<b>可调</b>，
+	 * 但**不削弱**这条守卫 —— 玩家把 maxEntriesTotal 拉高到几 KB 条目时，序列化可能超过 128 KB，
+	 * 那时保存会被这里整份拒收（{@code TOO_LARGE}，不落盘）。调这个配置项前先读它的注释。
+	 */
 	public static final int MAX_TAG_BYTES = 128 * 1024;
 
 	public enum SaveResult {

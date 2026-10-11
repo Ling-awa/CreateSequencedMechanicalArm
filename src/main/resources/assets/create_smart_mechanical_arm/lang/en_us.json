@@ -118,7 +118,7 @@
   "create_smart_mechanical_arm.gui.editor.hint.entry_on_success": "After success: continue in order, or jump somewhere (jumps give you loops)",
   "create_smart_mechanical_arm.gui.editor.hint.entry_on_timeout": "On failure: retry in place, then follow the destination once the time limit on the right is used up (stop / skip / jump). Picking a destination sets a limit automatically (0 = immediately); leaving it unset means retry forever and the destination never applies",
   "create_smart_mechanical_arm.gui.editor.hint.entry_note": "For yourself only; not used at runtime. Max 128 characters (longer text gets an ellipsis); a line break is written as \\n in the box",
-  "create_smart_mechanical_arm.gui.editor.status.over_limit": "Size limit reached (256 entries total)",
+  "create_smart_mechanical_arm.gui.editor.status.over_limit": "Size limit reached (%s entries total, configurable)",
   "create_smart_mechanical_arm.gui.editor.status.too_many_tasks": "Task limit reached (%s)",
   "create_smart_mechanical_arm.gui.editor.opt.take": "Take",
   "create_smart_mechanical_arm.gui.editor.opt.deposit": "Deposit",

@@ -118,7 +118,7 @@
   "create_smart_mechanical_arm.gui.editor.hint.entry_on_success": "成功之后：顺着往下走，还是跳到指定位置（跳转可用来做循环）",
   "create_smart_mechanical_arm.gui.editor.hint.entry_on_timeout": "失败后：先原地重试，攒够右边的时限再走去向（停下报错 / 跳过这条 / 跳到指定位置）。选了去向就会自动给一个时限（默认 0 = 立刻）；时限留空表示一直重试，那时去向不会生效",
   "create_smart_mechanical_arm.gui.editor.hint.entry_note": "写给自己看的，不参与运行；上限 128 字（超了自动加省略号），换行在框里写成 \\n",
-  "create_smart_mechanical_arm.gui.editor.status.over_limit": "操作表已达规模上限（共 256 条）",
+  "create_smart_mechanical_arm.gui.editor.status.over_limit": "操作表已达规模上限（共 %s 条，可在配置里调）",
   "create_smart_mechanical_arm.gui.editor.status.too_many_tasks": "任务数已达上限（%s 个）",
   "create_smart_mechanical_arm.gui.editor.opt.take": "取出",
   "create_smart_mechanical_arm.gui.editor.opt.deposit": "放入",

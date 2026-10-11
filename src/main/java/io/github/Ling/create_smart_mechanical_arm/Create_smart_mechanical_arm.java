@@ -14,6 +14,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.common.NeoForge;
@@ -61,6 +62,9 @@ public class Create_smart_mechanical_arm {
         // 以前这里注册的是 MDK 示例配置（`Config.SPEC`：logDirtBlock / magicNumber / 一串要打日志的物品）——
         // 那四个配置项全工程没有任何消费点，却会实打实生成一份 config 文件。删掉它，
         // 等真出现"需要给玩家调的参数"时再建一个名副其实的 Config（PLAN §11 决策 69）。
+        // 现在它来了：规模上限（任务数 / 信号数 / 条目总数）做成 COMMON 配置 ——
+        // 两端各自读自己那份 config/create_smart_mechanical_arm-common.toml（单人游戏里是同一个文件）。
+        modContainer.registerConfig(ModConfig.Type.COMMON, SmartArmConfig.SPEC);
     }
 
     private void commonSetup(final FMLCommonSetupEvent event) {
@@ -92,6 +96,9 @@ public class Create_smart_mechanical_arm {
         public static void onClientSetup(FMLClientSetupEvent event) {
             LOGGER.info("HELLO FROM CLIENT SETUP");
             LOGGER.info("MINECRAFT NAME >> {}", Minecraft.getInstance().getUser().getName());
+            // 客户端读的是**自己那份** config 文件（专用服务器上可与服务端不同 ⇒ 界面提示只是提前告知，
+            // 真正的裁决在服务端）。这行日志就是"客户端这一侧的生效值"的现场证据。
+            LOGGER.info("Smart Mechanical Arm 客户端 {}", SmartArmConfig.effectiveSummary());
             // 客户端是渲染所在侧，这条决定了取物位置是否精确（臂顶端会不会插进方块里）
             logAccessorState();
         }

@@ -2588,10 +2588,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	private void insertTaskAt(int at) {
 		// 上限守卫（两个入口都走这里：底栏 ＋ 与列表末尾那张空卡）—— 必须在 pushUndo **之前**：
-		// 加不进去就不该在撤销栈里留一条空操作，更不该让玩家一路加到第 9 个。服务端是**整份接受或整份拒绝**
+		// 加不进去就不该在撤销栈里留一条空操作，更不该让玩家一路加过配置上限。服务端是**整份接受或整份拒绝**
 		// （`ArmProgramEditPacket` 只判 `isWithinLimits()`），超限时关界面 = 这一场编辑一个字都没落盘。
 		if (!program.canAddTask()) {
-			status = tr("status.too_many_tasks", ArmProgram.MAX_TASKS).getString();
+			status = tr("status.too_many_tasks", ArmProgram.maxTasks()).getString();
 			rebuildPending = true;
 			return;
 		}
@@ -2611,8 +2611,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			rebuildPending = true;
 			return;
 		}
-		if (totalEntries() >= ArmProgram.MAX_ENTRIES_TOTAL) {
-			status = tr("status.over_limit").getString();
+		if (totalEntries() >= ArmProgram.maxEntriesTotal()) {
+			status = tr("status.over_limit", ArmProgram.maxEntriesTotal()).getString();
 			rebuildPending = true;
 			return;
 		}
@@ -2653,11 +2653,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private void duplicate(Card card) {
 		if (card.task) {
 			ArmProgramTask source = task(card.taskIndex);
-			// 复制任务同样要守上限（条目分支下面那条 `MAX_ENTRIES_TOTAL` 是它的对应物）：
+			// 复制任务同样要守上限（条目分支下面那条 `maxEntriesTotal()` 是它的对应物）：
 			// 少这一道，玩家按一次"复制"就能把程序顶到不合法，然后在关界面时整份被服务端拒收。
 			if (source == null || !program.canAddTask()) {
 				if (source != null) {
-					status = tr("status.too_many_tasks", ArmProgram.MAX_TASKS).getString();
+					status = tr("status.too_many_tasks", ArmProgram.maxTasks()).getString();
 					rebuildPending = true;
 				}
 				return;
@@ -2669,7 +2669,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			pointerIndex = card.taskIndex;
 		} else {
 			ArmProgramEntry source = entry(card);
-			if (source == null || totalEntries() >= ArmProgram.MAX_ENTRIES_TOTAL)
+			if (source == null || totalEntries() >= ArmProgram.maxEntriesTotal())
 				return;
 			pushUndo();
 			ArmProgramTask task = task(card.taskIndex);
@@ -3293,7 +3293,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 自检：编辑器的任务数上限守卫真的接上了吗（第二十四轮审计发现的丢数据路径）。
 	 *
 	 * <p>为什么必须在界面上实测接线：服务端是<b>整份接受或整份拒绝</b>（只判 {@code isWithinLimits()}），
-	 * 所以"编辑器能一路加到第 9 个任务"＝"关界面时这一场编辑一个字都落不了盘，玩家只看到一行红字"。
+	 * 所以"编辑器能一路加过配置上限（maxTasks）"＝"关界面时这一场编辑一个字都落不了盘，玩家只看到一行红字"。
 	 * 判据 {@link ArmProgram#canAddTask()} 的边界由服务端自检 {@code checkTaskLimit} 钉住；
 	 * 这里钉的是<b>入口有没有用它</b>：把程序填到上限，再调真正的入口 {@link #insertTaskAt}，必须
 	 * ① 被挡住且给出提示 ② 让出一个位置后能正常加进去（守卫不能把正常路径也挡死）。
