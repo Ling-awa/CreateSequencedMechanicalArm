@@ -8,6 +8,9 @@ import org.jetbrains.annotations.Nullable;
 
 import com.simibubi.create.Create;
 import com.simibubi.create.content.equipment.sandPaper.SandPaperPolishingRecipe;
+import com.simibubi.create.content.kinetics.belt.BeltBlockEntity;
+import com.simibubi.create.content.kinetics.belt.behaviour.TransportedItemStackHandlerBehaviour;
+import com.simibubi.create.content.kinetics.belt.transport.TransportedItemStack;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import io.github.Ling.create_smart_mechanical_arm.interaction.ArmEffects;
@@ -746,6 +749,22 @@ public class ProgramRuntime {
 			return;
 		}
 
+		// ★ 传送带走**原地加工**（照 `BeltDeployerCallbacks.activate:118-132`），置物台等普通容器走"取出→加工→放回"。
+		//
+		// ⚠️ 为什么带子不能"取出放回"（用户第二十七轮续二十八实测：第一次成功、之后产物全被"原料"堵住、
+		//    最后全掉进臂的溢出库存）：带子的 `extractItem` 只是把栈清零、**真正移除要等下一次**
+		//    `BeltInventory.tick/write` 处理 `toRemove`（`BeltInventory:67-73`、`:408-423`），
+		//    而我们在**同一 tick** 里紧接着 `insertItem` ⇒ `canInsertAt` 用 `isBlocking`
+		//    （`:368-374`：`insertedAt == 这一格 && insertedFrom == UP && 位置在后`）判定"那格还占着"。
+		//    更糟的是：**我们自己放回去的那个产物恰好满足** `insertedAt == 这一格 && insertedFrom == UP`
+		//    ⇒ 从那以后这一格的插入永远被拒。原地加工由带子自己记账（产物进 `toInsert`、原件进 `toRemove`），
+		//    位置也不动 ⇒ 顺带解决"物品从上半格跳到格子中间"的观感问题。
+		TransportedItemStackHandlerBehaviour transport = beltBehaviourAt(level, arm, entry);
+		if (transport != null) {
+			deployOnBelt(arm, task, entry, level, transport, applicator);
+			return;
+		}
+
 		// 1) 从载具取出 1 个被加工物
 		ItemStack processed = ItemStack.EMPTY;
 		for (int slot = 0; slot < handler.getSlots(); slot++) {
@@ -779,13 +798,70 @@ public class ProgramRuntime {
 				arm.insertIntoInventory(leftover);
 		}
 
-		// 5) 结算手持应用物
-		arm.consumeHeldItem(DeployRecipes.keepsHeldItem(recipe.value()));
+		// 5) 结算手持应用物 + 反馈 + 记成功（与带子那条路共用）
+		finishDeploy(arm, task, entry, level, recipe, processed);
+	}
 
-		// 6) 反馈（音效 + 粒子），照抄 BeltDeployerCallbacks.activate:162 与机械手的物品粒子
+	/**
+	 * 传送带上的组装：**原地加工**（照 Create 的 `BeltDeployerCallbacks.activate:118-132`）。
+	 *
+	 * <p>做法：在目标方块中心半格内找第一件"能匹配配方"的物品，对它调
+	 * {@code handleProcessingOnAllItems}，返回
+	 * {@code convertTo(left)}（没有产物，只剩原件被消耗后的余量）或
+	 * {@code convertToAndLeaveHeld(collect, left)}（有产物 ⇒ 产物上带、原件余量留在带上）。
+	 * **不 extract、不 insert** —— 记账全部交给带子（产物进 `toInsert`、原件进 `toRemove`），
+	 * 于是不会撞上 `canInsertAt`/"那格被自己占住"的坑，物品位置也不会跳。
+	 */
+	private void deployOnBelt(SmartArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
+		TransportedItemStackHandlerBehaviour transport, ItemStack applicator) {
+		boolean[] handled = { false };
+		RecipeHolder<? extends Recipe<?>>[] recipeRef = new RecipeHolder<?>[1];
+		ItemStack[] processedRef = new ItemStack[1];
+		transport.handleProcessingOnAllItems(t -> {
+			if (handled[0])
+				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+			RecipeHolder<? extends Recipe<?>> recipe = DeployRecipes.find(level, t.stack, applicator);
+			if (recipe == null)
+				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+			List<ItemStack> results = RecipeApplier.applyRecipeOn(level, t.stack.copyWithCount(1), recipe.value(),
+				true);
+			List<TransportedItemStack> produced = new ArrayList<>();
+			for (ItemStack out : results)
+				if (!out.isEmpty())
+					produced.add(new TransportedItemStack(out));
+			TransportedItemStack left = t.copy();
+			left.stack.shrink(1); // 消耗掉被加工的那 1 个；多出来的余量留在带上
+			handled[0] = true;
+			recipeRef[0] = recipe;
+			processedRef[0] = t.stack.copyWithCount(1);
+			return produced.isEmpty()
+				? TransportedItemStackHandlerBehaviour.TransportedResult.convertTo(left)
+				: TransportedItemStackHandlerBehaviour.TransportedResult.convertToAndLeaveHeld(produced, left);
+		});
+		if (!handled[0]) {
+			// 前置检查刚放行的物品在这几 tick 里被别的机器加工/拿走了 ⇒ 按"没配方"重试（不是停机）
+			handleFailure(arm, task, entry, "没有匹配的 deploying / item_application 配方");
+			return;
+		}
+		finishDeploy(arm, task, entry, level, recipeRef[0], processedRef[0]);
+	}
+
+	/** 组装成功后的共同收尾：结算手持应用物 → 音效粒子 → 记成功。 */
+	private void finishDeploy(SmartArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
+		RecipeHolder<? extends Recipe<?>> recipe, ItemStack processed) {
+		arm.consumeHeldItem(DeployRecipes.keepsHeldItem(recipe.value()));
 		ArmEffects.deploy(level, arm.getBlockPos(), arm.getEffectorPosition(), processed,
 			recipe.value() instanceof SandPaperPolishingRecipe);
 		succeed(arm, task, entry);
+	}
+
+	/** 目标方块是传送带就返回它承载物品的 behaviour（否则 null ⇒ 走普通容器那条路）。 */
+	private static TransportedItemStackHandlerBehaviour beltBehaviourAt(Level level, SmartArmBlockEntity arm,
+		ArmProgramEntry entry) {
+		if (!(level.getBlockEntity(arm.getBlockPos()
+			.offset(offsetOf(arm, entry))) instanceof BeltBlockEntity belt))
+			return null;
+		return belt.getBehaviour(TransportedItemStackHandlerBehaviour.TYPE);
 	}
 
 	private static void returnToCarrier(SmartArmBlockEntity arm, IItemHandler handler, ItemStack stack) {
