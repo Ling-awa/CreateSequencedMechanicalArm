@@ -825,10 +825,19 @@ public class ProgramRuntime {
 				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
 			List<ItemStack> results = RecipeApplier.applyRecipeOn(level, t.stack.copyWithCount(1), recipe.value(),
 				true);
+			// ⚠️ 产物必须是**被加工那件的 copy**（照 `BeltDeployerCallbacks:100-115`）：这样它继承
+			//    `beltPosition`/`insertedAt`/`insertedFrom` ⇒ 落在**加工位置**上、随带子往下游走。
+			//    早先写成 `new TransportedItemStack(out)` ⇒ 默认 `beltPosition = 0` ⇒ 产物被插到**带子起点**
+			//    （用户第二十七轮续二十九实测："产物被添加到了传送带的开头"）。
 			List<TransportedItemStack> produced = new ArrayList<>();
-			for (ItemStack out : results)
-				if (!out.isEmpty())
-					produced.add(new TransportedItemStack(out));
+			for (ItemStack out : results) {
+				if (out.isEmpty())
+					continue;
+				TransportedItemStack copy = t.copy();
+				copy.stack = out;
+				copy.locked = false;
+				produced.add(copy);
+			}
 			TransportedItemStack left = t.copy();
 			left.stack.shrink(1); // 消耗掉被加工的那 1 个；多出来的余量留在带上
 			handled[0] = true;

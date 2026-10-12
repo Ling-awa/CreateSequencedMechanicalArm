@@ -14,6 +14,8 @@ import com.simibubi.create.content.contraptions.StructureTransform;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.kinetics.belt.BeltBlockEntity;
 import com.simibubi.create.content.kinetics.belt.behaviour.TransportedItemStackHandlerBehaviour;
+import com.simibubi.create.content.kinetics.belt.transport.BeltInventory;
+import com.simibubi.create.content.kinetics.belt.transport.TransportedItemStack;
 import com.simibubi.create.content.kinetics.deployer.DeployerFakePlayer;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
@@ -131,10 +133,15 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	 */
 	private boolean pinTarget;
 	/**
-	 * "客户端那一半"（带子物品上的 `locked`）当前是不是已经打上了 —— 只在状态变化时同步一次。
-	 * 见 {@link #applyBeltClientHold(boolean)}。
+	 * 当前被我们按住的那件带子物品（**按对象**认领，不靠位置窗口）。
+	 *
+	 * <p>为什么要记住对象：`BeltPoint.keepAlive()` 只在"方块中心 ±.51"的窗口里找一件物品，
+	 * 带速高时物品在两次服务器 tick 之间就可能跳出去 ⇒ 那一次什么也锁不到 ⇒ 物品溜走
+	 * （用户第二十七轮续二十九："高速时加工一次后立即溜走，中低速正常"）。
 	 */
-	private boolean clientHoldApplied;
+	private TransportedItemStack pinnedBeltItem;
+	/** 已经给它打过"客户端按住"标记（`locked`）的那一件 —— 只在换了对象时再同步一次。 */
+	private TransportedItemStack clientHoldItem;
 	/** 通用目标（攻击/使用任意方块）时爪子从哪一面够过去；客户端插值也要用，所以进同步 NBT。 */
 	@Nullable
 	public Direction movingFace;
@@ -304,8 +311,8 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	public void cancelMove() {
 		// 松手时也要把**客户端那一半**（带子物品的 `locked`）放开 —— 它不会被自动消费，
 		// 忘了清就会在客户端留下一件永远不动的"幽灵物品"（服务端那边 `lockedExternally` 本来就是每 tick 重设的）。
-		if (clientHoldApplied)
-			applyBeltClientHold(false);
+		if (clientHoldItem != null || pinnedBeltItem != null)
+			releaseBeltHold();
 		// 收工/换目标/等待/停机时都要清掉客户端的挖掘裂纹（残留的话方块上会挂着挖了一半的裂痕）
 		rightClick.clearBreakingProgress();
 		// 已经在待机就直接返回：重复发"进度归零"的同步会让客户端把动画钉在插值起点上
@@ -362,40 +369,95 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	/**
-	 * 让**客户端**也把那件物品按住：给带子上的物品打 `locked`（**只在状态变化时调**）。
+	 * 每 tick 按住目标带子上的那件物品（**按对象锁定**，不靠 .51 位置窗口）。
 	 *
-	 * <p><b>为什么不用 `lockedExternally` 让客户端停住</b>：那个标记在**客户端也会被消费**
-	 * （`BeltInventory:119-127`：这一 tick 不动，然后把标记清掉）⇒ 只能靠**每 tick 发包**维持，
-	 * 而包一抖就出现"物品动一格、下一包又被纠正回来"的**抽动**（用户第二十七轮续二十五实测：
-	 * "幽灵贴图"修好之后，每隔一阵物品位置就抽一下）。
-	 *
-	 * <p><b>`locked` 为什么能用</b>：客户端那条分支是**只读**的 ——
-	 * `if (world.isClientSide && currentItem.locked) continue;`（`:120`）命中就跳过，**不清标记**
-	 * ⇒ **一次同步就能长期按住**。而服务端在这段时间根本走不到"带子加工"那条路：`:124-126` 的
-	 * `lockedExternally` 会先 `continue`，所以服务端不会顺手把 `locked` 清掉（清它的代码在
-	 * `:241-263` 的加工路径里）。⇒ 两个标记各管一侧，互不干扰。
-	 *
-	 * <p>必须发给**控制器**那一段（`BeltBlockEntity.write:218-219`：物品表只在 `isController()` 时进包）。
+	 * <p>两个标记各管一侧：`lockedExternally`（服务端：这一 tick 不许动，带子每 tick 会把它消费掉）
+	 * 与 `locked`（客户端：只读标记，客户端那条分支命中就 `continue`、**不清标记** ⇒ 一次同步即可长期按住）。
+	 * 详细依据见 §7.17c/§7.17d。
 	 */
-	private void applyBeltClientHold(boolean hold) {
-		clientHoldApplied = hold;
-		if (level == null || level.isClientSide || movingOffset == null)
+	private void holdBeltItem() {
+		TransportedItemStack item = findBeltItem();
+		if (item == null)
 			return;
-		if (!(level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt))
-			return;
-		TransportedItemStackHandlerBehaviour transport = belt.getBehaviour(TransportedItemStackHandlerBehaviour.TYPE);
-		if (transport == null)
-			return;
-		boolean[] changed = { false };
-		transport.handleProcessingOnAllItems(t -> {
-			if (t.locked != hold) {
-				t.locked = hold;
-				changed[0] = true;
+		item.lockedExternally = true;
+		if (item != clientHoldItem) {
+			clientHoldItem = item;
+			item.locked = true;
+			syncBeltController();
+		}
+	}
+
+	/**
+	 * 认领要一直按住的那件物品：上次那件还在就继续用它（**哪怕它已经稍微挪出目标格**），
+	 * 否则在**目标格**里挑离中心最近的一件（原地加工会把对象换掉，所以要能重新认领）。
+	 */
+	@Nullable
+	private TransportedItemStack findBeltItem() {
+		BeltInventory inventory = beltInventory();
+		BeltBlockEntity belt = beltBlock();
+		if (inventory == null || belt == null)
+			return null;
+		List<TransportedItemStack> items = inventory.getTransportedItems();
+		if (pinnedBeltItem != null && items.contains(pinnedBeltItem)) {
+			pinnedBeltItem.locked = true; // 加工可能换过对象，补一下客户端标记（同一对象时是幂等的）
+			if (pinnedBeltItem != clientHoldItem) {
+				clientHoldItem = pinnedBeltItem;
+				syncBeltController();
 			}
-			return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
-		});
+			return pinnedBeltItem;
+		}
+		float center = belt.index + .5f;
+		TransportedItemStack best = null;
+		float bestDistance = Float.MAX_VALUE;
+		for (TransportedItemStack item : items) {
+			if (item.stack.isEmpty())
+				continue;
+			if (item.beltPosition < belt.index || item.beltPosition >= belt.index + 1)
+				continue; // 只认目标格
+			float distance = Math.abs(item.beltPosition - center);
+			if (distance < bestDistance) {
+				bestDistance = distance;
+				best = item;
+			}
+		}
+		pinnedBeltItem = best;
+		if (best == null)
+			clientHoldItem = null;
+		return best;
+	}
+
+	/** 松手：两个标记都要清（客户端那个不会被自动消费，忘清会在客户端留下永远不动的"幽灵物品"）。 */
+	private void releaseBeltHold() {
+		if (clientHoldItem != null) {
+			clientHoldItem.locked = false;
+			clientHoldItem.lockedExternally = false;
+			syncBeltController();
+		} else if (pinnedBeltItem != null)
+			pinnedBeltItem.lockedExternally = false;
+		clientHoldItem = null;
+		pinnedBeltItem = null;
+	}
+
+	@Nullable
+	private BeltInventory beltInventory() {
+		BeltBlockEntity belt = beltBlock();
+		if (belt == null)
+			return null;
 		BeltBlockEntity controller = belt.getControllerBE();
-		if (changed[0] && controller != null)
+		return controller == null ? null : controller.getInventory();
+	}
+
+	@Nullable
+	private BeltBlockEntity beltBlock() {
+		if (level == null || movingOffset == null)
+			return null;
+		return level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt ? belt : null;
+	}
+
+	private void syncBeltController() {
+		BeltBlockEntity belt = beltBlock();
+		BeltBlockEntity controller = belt == null ? null : belt.getControllerBE();
+		if (controller != null)
 			controller.sendData();
 	}
 
@@ -740,9 +802,9 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		ArmInteractionPoint pinPoint = pinPoint();
 		boolean pinning = level != null && !level.isClientSide && pinPoint != null && canPinTarget();
 		if (pinning)
-			pinPoint.keepAlive();
-		if (pinning != clientHoldApplied)
-			applyBeltClientHold(pinning);
+			holdBeltItem();
+		else if (clientHoldItem != null || pinnedBeltItem != null)
+			releaseBeltHold();
 
 		if (level == null || level.isClientSide)
 			return;
