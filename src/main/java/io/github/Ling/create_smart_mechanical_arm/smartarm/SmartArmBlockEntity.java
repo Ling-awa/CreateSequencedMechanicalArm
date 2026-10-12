@@ -369,27 +369,35 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	/**
-	 * 每 tick 按住目标带子上的那件物品（**按对象锁定**，不靠 .51 位置窗口）。
+	 * 每 tick 按住目标带子上的那件物品。
 	 *
-	 * <p>两个标记各管一侧：`lockedExternally`（服务端：这一 tick 不许动，带子每 tick 会把它消费掉）
-	 * 与 `locked`（客户端：只读标记，客户端那条分支命中就 `continue`、**不清标记** ⇒ 一次同步即可长期按住）。
-	 * 详细依据见 §7.17c/§7.17d。
+	 * <p><b>为什么两个标记都要用</b>（这是踩了三轮才对上的地方）：
+	 * <ul>
+	 *   <li>{@code locked} 才是真正"按住"的那个：服务端 `BeltInventory:161-162`
+	 *       （{@code if (currentItem.locked) continue;}）与客户端 `:119-121` **都会**因此跳过这一 tick 的移动，
+	 *       而且**都不会把它清掉**；它还随物品一起存盘/同步 ⇒ 客户端既不用额外发包、也不会抽动。</li>
+	 *   <li>{@code lockedExternally} 是"挡住带子自己的加工路径"的盾：带子在 `:241-252` 里发现物品
+	 *       {@code locked} 却**找不到加工行为**（我们是**臂**，不是装在带子 2 格高的
+	 *       {@code BeltProcessingBehaviour}，见该类注释 `:13-17`）时，会替我们把它清掉并
+	 *       {@code notifyUpdate()}。只要 {@code lockedExternally} 还在，`:124-126` 就会先 {@code continue}，
+	 *       那段清理代码永远走不到。它每 tick 被消费一次 ⇒ **每 tick 重设**。</li>
+	 * </ul>
 	 */
 	private void holdBeltItem() {
 		TransportedItemStack item = findBeltItem();
 		if (item == null)
 			return;
-		item.lockedExternally = true;
-		if (item != clientHoldItem) {
-			clientHoldItem = item;
-			item.locked = true;
-			syncBeltController();
-		}
+		item.lockedExternally = true; // 每 tick 重设（会被带子消费）；locked 不会被消费，认领时设一次即可
 	}
 
 	/**
-	 * 认领要一直按住的那件物品：上次那件还在就继续用它（**哪怕它已经稍微挪出目标格**），
+	 * 认领要按住的那件物品：上次那件还在就继续用它（哪怕它已经漂出目标格），
 	 * 否则在**目标格**里挑离中心最近的一件（原地加工会把对象换掉，所以要能重新认领）。
+	 *
+	 * <p>认领时**顺手把它拉到格子中心**（照 `BeltInventory:291-295` 的 `ProcessingResult.HOLD` 处理）：
+	 * 臂的取物点就在格子中心，而 `handleProcessingOnAllItems` 只认"中心 ±.51" ⇒
+	 * 物品停在格子边缘时，取物与组装两条路都可能"看不到它"（用户第二十七轮续三十实测：
+	 * 改完反而完全抓不到 —— 就是因为只锁不定心）。
 	 */
 	@Nullable
 	private TransportedItemStack findBeltItem() {
@@ -398,35 +406,44 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		if (inventory == null || belt == null)
 			return null;
 		List<TransportedItemStack> items = inventory.getTransportedItems();
-		if (pinnedBeltItem != null && items.contains(pinnedBeltItem)) {
-			pinnedBeltItem.locked = true; // 加工可能换过对象，补一下客户端标记（同一对象时是幂等的）
-			if (pinnedBeltItem != clientHoldItem) {
-				clientHoldItem = pinnedBeltItem;
-				syncBeltController();
-			}
-			return pinnedBeltItem;
-		}
-		float center = belt.index + .5f;
-		TransportedItemStack best = null;
-		float bestDistance = Float.MAX_VALUE;
-		for (TransportedItemStack item : items) {
-			if (item.stack.isEmpty())
-				continue;
-			if (item.beltPosition < belt.index || item.beltPosition >= belt.index + 1)
-				continue; // 只认目标格
-			float distance = Math.abs(item.beltPosition - center);
-			if (distance < bestDistance) {
-				bestDistance = distance;
-				best = item;
+		TransportedItemStack item = pinnedBeltItem != null && items.contains(pinnedBeltItem) ? pinnedBeltItem : null;
+		if (item == null) {
+			float center = belt.index + .5f;
+			float bestDistance = Float.MAX_VALUE;
+			for (TransportedItemStack candidate : items) {
+				if (candidate.stack.isEmpty())
+					continue;
+				if (candidate.beltPosition < belt.index || candidate.beltPosition >= belt.index + 1)
+					continue; // 只认目标格
+				float distance = Math.abs(candidate.beltPosition - center);
+				if (distance < bestDistance) {
+					bestDistance = distance;
+					item = candidate;
+				}
 			}
 		}
-		pinnedBeltItem = best;
-		if (best == null)
+		pinnedBeltItem = item;
+		if (item == null) {
 			clientHoldItem = null;
-		return best;
+			return null;
+		}
+		if (item != clientHoldItem || !item.locked) {
+			centreOnBelt(belt, item);
+			item.locked = true;
+			clientHoldItem = item;
+			syncBeltController();
+		}
+		return item;
 	}
 
-	/** 松手：两个标记都要清（客户端那个不会被自动消费，忘清会在客户端留下永远不动的"幽灵物品"）。 */
+	/** 把物品拉到目标格中心；1/512 那个偏移是照抄上游的（让它落在中心的正确一侧）。 */
+	private void centreOnBelt(BeltBlockEntity belt, TransportedItemStack item) {
+		boolean positive = belt.getDirectionAwareBeltMovementSpeed() > 0;
+		item.beltPosition = belt.index + .5f + (positive ? 1 / 512f : -1 / 512f);
+		item.prevBeltPosition = item.beltPosition;
+	}
+
+	/** 松手：两个标记都要清（`locked` 不会被自动消费，忘清会在客户端留下永远不动的"幽灵物品"）。 */
 	private void releaseBeltHold() {
 		if (clientHoldItem != null) {
 			clientHoldItem.locked = false;
