@@ -330,13 +330,18 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 
 	@Nullable
 	public IItemHandler getMovingHandler() {
-		if (movingHandler == null || level == null || level.isClientSide)
-			return movingHandler;
+		if (level == null || level.isClientSide)
+			return null;
 		// 快照可能已失效：移动途中目标容器被换掉/拿走时，旧 handler 指向的是**已经从世界移除的方块实体**，
 		// 往里写就是把物品塞进一个没人看得见的对象（物品凭空消失）。每次读取时核对"还是那个方块实体吗"。
+		//
+		// ⚠️ `movingHandler == null` **也要走重解析**：读盘路径会把它清成 null（只留存盘的 `Offset`），
+		// 而"退出重进"就是走这条路 —— 旧写法（`if (movingHandler == null) return movingHandler;`）
+		// 会在缓存为空时**直接把 null 返回**，自愈分支永远跑不到 ⇒ 重登后**第一次取物必空**
+		// （失败后走重试、下一轮 `beginMove` 才把缓存填回来，所以第二次又正常了 —— 用户第二十七轮续二十七实测）。
 		BlockPos target = worldPosition.offset(movingOffset);
 		BlockEntity current = level.getBlockEntity(target);
-		if (current != movingHandlerOwner) {
+		if (movingHandler == null || current != movingHandlerOwner) {
 			movingHandlerOwner = current;
 			movingHandler = handlerAt(target);
 			markProgramDirty();

@@ -645,6 +645,11 @@ public class SmartArmSelfTest {
 			reloaded.setLevel(level);
 			reloaded.read(snapshot.copy(), server.registryAccess(), false);
 			boolean pinAfterReload = reloaded.canPinTarget() && reloaded.pinPoint() != null;
+			// ⑥b **重登后第一次取物不能空**：读盘会把 `movingHandler` 清成 null，而 `getMovingHandler()`
+			//     旧写法在缓存为空时直接返回 null（自愈分支跑不到）⇒ 第一次 `take()` 必失败、重试才成功
+			//     （用户第二十七轮续二十七实测："接上应力后第一下拿物品会拿空"）。
+			boolean handlerAfterReload = reloaded.getMovingHandler() != null;
+			boolean takeReadyAfterReload = pinAfterReload && handlerAfterReload;
 			// 反例（挖掘）的结果：见 ④
 			boolean otherRan = false;
 			boolean otherPins = true;
@@ -676,8 +681,9 @@ public class SmartArmSelfTest {
 			}
 
 			LOGGER.info("[selftest] 前置检查重试节流: 空载具报因={} 放物品后下一 tick 就放行={} 间隔常量={} "
-				+ "锁窗口: 取物移动中={} 断应力后={} 重登后={} 挖掘移动中={}（挖掘跑起来了={}）", sawFailure, cleared,
-				ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, pinWithoutStress, pinAfterReload, otherPins, otherRan);
+				+ "锁窗口: 取物移动中={} 断应力后={} 重登后={}（重登后句柄={}） 挖掘移动中={}（挖掘跑起来了={}）",
+				sawFailure, cleared, ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, pinWithoutStress,
+				takeReadyAfterReload, handlerAfterReload, otherPins, otherRan);
 			if (!sawFailure)
 				LOGGER.error("[selftest] 重试节流自检**没跑起来**：空载具时没报出失败原因（{}）—— 等于没测",
 					text(emptyFailure));
@@ -692,6 +698,9 @@ public class SmartArmSelfTest {
 			if (!pinAfterReload)
 				LOGGER.error("[selftest] 退出重进后**不再续锁**目标物品（读盘会把 `movingPoint` 清空，"
 					+ "判据必须能按 `movingOffset` 重建）—— 已经定住的物品会被放回传送带");
+			if (!handlerAfterReload)
+				LOGGER.error("[selftest] 退出重进后 `getMovingHandler()` 返回 null（缓存为空时必须重解析）"
+					+ "—— 表现就是重登后**第一次取物拿空**，重试才成功");
 			if (!pinWithoutStress)
 				LOGGER.error("[selftest] 断掉应力后**不再**续锁目标物品 —— 与原版（`ArmBlockEntity:133-140`）"
 					+ "不一致：停机臂应当继续占住物品（用户确认过这是期望行为）");
