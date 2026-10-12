@@ -13,6 +13,7 @@ import com.simibubi.create.api.contraption.transformable.TransformableBlockEntit
 import com.simibubi.create.content.contraptions.StructureTransform;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.kinetics.belt.BeltBlockEntity;
+import com.simibubi.create.content.kinetics.belt.behaviour.TransportedItemStackHandlerBehaviour;
 import com.simibubi.create.content.kinetics.deployer.DeployerFakePlayer;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
@@ -129,6 +130,11 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	 * 所以必须每 tick 续锁 —— 见 {@link #tick()}。
 	 */
 	private boolean pinTarget;
+	/**
+	 * "客户端那一半"（带子物品上的 `locked`）当前是不是已经打上了 —— 只在状态变化时同步一次。
+	 * 见 {@link #applyBeltClientHold(boolean)}。
+	 */
+	private boolean clientHoldApplied;
 	/** 通用目标（攻击/使用任意方块）时爪子从哪一面够过去；客户端插值也要用，所以进同步 NBT。 */
 	@Nullable
 	public Direction movingFace;
@@ -296,6 +302,10 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	public void cancelMove() {
+		// 松手时也要把**客户端那一半**（带子物品的 `locked`）放开 —— 它不会被自动消费，
+		// 忘了清就会在客户端留下一件永远不动的"幽灵物品"（服务端那边 `lockedExternally` 本来就是每 tick 重设的）。
+		if (clientHoldApplied)
+			applyBeltClientHold(false);
 		// 收工/换目标/等待/停机时都要清掉客户端的挖掘裂纹（残留的话方块上会挂着挖了一半的裂痕）
 		rightClick.clearBreakingProgress();
 		// 已经在待机就直接返回：重复发"进度归零"的同步会让客户端把动画钉在插值起点上
@@ -347,26 +357,53 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	/**
-	 * 把正在被 pin 的**传送带**同步一次给客户端（置物台不需要：它没有"客户端自己模拟位移"这回事）。
+	 * 让**客户端**也把那件物品按住：给带子上的物品打 `locked`（**只在状态变化时调**）。
 	 *
-	 * <p>⚠️ **必须发给控制器那一段，不能发给臂旁边那一段**：`BeltBlockEntity.write:218-219` 里物品表
-	 * 只在 {@code isController()} 时才写进客户端包，客户端也只在 {@code isController()} 时读它
-	 * （`:241-242`）。往普通段发同步 = **白发**，客户端那份物品数据里根本没有 pin 标记 ⇒
-	 * 物品模型会继续往前跑（用户第二十七轮续二十四那张"幽灵贴图"截图）。
-	 * 而 pin 标记本身写在**控制器**的库存里（段的 {@code getInventory()} 是委托给控制器的）。
+	 * <p><b>为什么不用 `lockedExternally` 让客户端停住</b>：那个标记在**客户端也会被消费**
+	 * （`BeltInventory:119-127`：这一 tick 不动，然后把标记清掉）⇒ 只能靠**每 tick 发包**维持，
+	 * 而包一抖就出现"物品动一格、下一包又被纠正回来"的**抽动**（用户第二十七轮续二十五实测：
+	 * "幽灵贴图"修好之后，每隔一阵物品位置就抽一下）。
 	 *
-	 * <p>为什么每 tick 都发：客户端那份标记被消费一次就清掉（`BeltInventory:119-127`），
-	 * 只有"每 tick 都告诉它一次"才能让这一段也停住。代价只有带子那一个小包，而且只在取物/组装
-	 * 伸过去的那几十 tick 里发。
+	 * <p><b>`locked` 为什么能用</b>：客户端那条分支是**只读**的 ——
+	 * `if (world.isClientSide && currentItem.locked) continue;`（`:120`）命中就跳过，**不清标记**
+	 * ⇒ **一次同步就能长期按住**。而服务端在这段时间根本走不到"带子加工"那条路：`:124-126` 的
+	 * `lockedExternally` 会先 `continue`，所以服务端不会顺手把 `locked` 清掉（清它的代码在
+	 * `:241-263` 的加工路径里）。⇒ 两个标记各管一侧，互不干扰。
+	 *
+	 * <p>必须发给**控制器**那一段（`BeltBlockEntity.write:218-219`：物品表只在 `isController()` 时进包）。
 	 */
-	private void syncPinnedBelt() {
-		if (level == null || movingPoint == null)
+	private void applyBeltClientHold(boolean hold) {
+		clientHoldApplied = hold;
+		if (level == null || level.isClientSide || movingOffset == null)
 			return;
 		if (!(level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt))
 			return;
+		TransportedItemStackHandlerBehaviour transport = belt.getBehaviour(TransportedItemStackHandlerBehaviour.TYPE);
+		if (transport == null)
+			return;
+		boolean[] changed = { false };
+		transport.handleProcessingOnAllItems(t -> {
+			if (t.locked != hold) {
+				t.locked = hold;
+				changed[0] = true;
+			}
+			return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+		});
 		BeltBlockEntity controller = belt.getControllerBE();
-		if (controller != null)
+		if (changed[0] && controller != null)
 			controller.sendData();
+	}
+
+	/**
+	 * 现在要不要**续锁**目标上的物品：运行时说"这一条正在从目标取东西"（`TAKE`/`DEPLOY` 且已开始/正在执行）。
+	 *
+	 * <p>⚠️ **停机（无应力）时也继续锁** —— 这是**原版语义**：上游 `ArmBlockEntity:133-140` 只看
+	 * `chasedPointProgress < 1`，所以一条没通电的臂同样会把传送带上的物品一直占住（旧物品被拿走/移走后再来的
+	 * 新物品也会被它锁住）。用户第二十七轮续二十五明确："停机臂无限期占住物品是原版逻辑，我们的没有问题"，
+	 * 所以**不要**在这里加"没应力就松手"。
+	 */
+	public boolean canPinTarget() {
+		return runtime.shouldPinTarget(this);
 	}
 
 	@Nullable
@@ -685,20 +722,18 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		super.tick();
 		tickMovementProgress();
 
-		// 取物/组装期间每 tick 续锁目标上的物品（上游 `ArmBlockEntity:133-140` 的同一机制）。
+		// 取物/组装期间续锁目标上的物品（上游 `ArmBlockEntity:133-140` 的同一机制）。分两半：
+		//   ① 服务端：`keepAlive()`（`lockedExternally`）—— **必须每 tick 重设**，带子每 tick 会把它消费掉；
+		//   ② 客户端：`locked` —— **只在状态变化时同步一次**（客户端不会消费它），这样就不会因为
+		//      "包一抖、物品动一格又被纠正回来"而抽动（见 applyBeltClientHold 的注释）。
 		//
-		// ⚠️ 判据由**运行时**给（`shouldPinTarget()`：当前条目是不是"从目标取东西"的那类），
-		// 而不是只看 `chasedPointProgress < 1` —— 旧写法会在**刚好到位**那一 tick 停掉续锁，
-		// 而真正取物就发生在那之后 ⇒ 物品在最后一步被带子带走（用户第二十七轮续二十三实测）。
-		// 另外带子每 tick 都会把 `lockedExternally` 消费掉（`BeltInventory:119-127`），所以必须每 tick 重设。
-		if (level != null && !level.isClientSide && movingPoint != null && runtime.shouldPinTarget(this)) {
+		// ⚠️ 判据由**运行时**给（`shouldPinTarget()`），而不是只看 `chasedPointProgress < 1` ——
+		// 旧写法会在**刚好到位**那一 tick 停掉续锁，而真正取物就发生在那之后（用户第二十七轮续二十三实测）。
+		boolean pinning = level != null && !level.isClientSide && movingPoint != null && canPinTarget();
+		if (pinning)
 			movingPoint.keepAlive();
-			// 客户端也要"看起来"停住：`lockedExternally` 只是**服务端**标记，客户端的带子模拟位移时
-			// 只看它自己那份物品数据，而且那个分支在客户端同样会跑、用完立刻清（`BeltInventory:119-127`）。
-			// 不把带子的物品表同步过去，玩家看到的就是"**幽灵贴图继续往前跑**、实际位置其实被定住了"
-			// —— 用户第二十七轮续二十四实测（他/她还能从正确位置取走物品，说明服务端一直是对的）。
-			syncPinnedBelt();
-		}
+		if (pinning != clientHoldApplied)
+			applyBeltClientHold(pinning);
 
 		if (level == null || level.isClientSide)
 			return;

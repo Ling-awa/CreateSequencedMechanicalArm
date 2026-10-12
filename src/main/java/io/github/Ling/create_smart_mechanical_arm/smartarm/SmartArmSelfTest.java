@@ -628,6 +628,12 @@ public class SmartArmSelfTest {
 			boolean cleared = afterInsert == null;
 			// ③ 之后程序已经 `beginMove` ⇒ 取物类应当处于"要续锁"的窗口里
 			boolean pinWhileTaking = arm.runtime.shouldPinTarget(arm);
+			// ③b **断掉应力后仍然继续锁** —— 这是原版语义（上游只看 `chasedPointProgress < 1`），
+			//    用户第二十七轮续二十五确认过："停机臂无限期占住物品是原版逻辑，我们的没有问题"。
+			//    所以这里断言的是"**仍然**在锁"（真）—— 将来谁把它改成"没应力就松手"，这条会红。
+			arm.setSpeed(0);
+			boolean pinWithoutStress = arm.canPinTarget();
+			arm.setSpeed(32); // 还原，后面的反例还要它伸过去
 			// 反例（挖掘）的结果：见 ④
 			boolean otherRan = false;
 			boolean otherPins = true;
@@ -659,8 +665,8 @@ public class SmartArmSelfTest {
 			}
 
 			LOGGER.info("[selftest] 前置检查重试节流: 空载具报因={} 放物品后下一 tick 就放行={} 间隔常量={} "
-				+ "锁窗口: 取物移动中={} 挖掘移动中={}（挖掘跑起来了={}）", sawFailure, cleared,
-				ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, otherPins, otherRan);
+				+ "锁窗口: 取物移动中={} 断应力后={} 挖掘移动中={}（挖掘跑起来了={}）", sawFailure, cleared,
+				ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, pinWithoutStress, otherPins, otherRan);
 			if (!sawFailure)
 				LOGGER.error("[selftest] 重试节流自检**没跑起来**：空载具时没报出失败原因（{}）—— 等于没测",
 					text(emptyFailure));
@@ -672,6 +678,9 @@ public class SmartArmSelfTest {
 			if (!pinWhileTaking)
 				LOGGER.error("[selftest] 取物/组装在移动途中**没有续锁**目标物品 —— 传送带会把物品带走"
 					+ "（上游 `ArmBlockEntity:133-140` 是每 tick 锁；到位那一 tick 也要锁）");
+			if (!pinWithoutStress)
+				LOGGER.error("[selftest] 断掉应力后**不再**续锁目标物品 —— 与原版（`ArmBlockEntity:133-140`）"
+					+ "不一致：停机臂应当继续占住物品（用户确认过这是期望行为）");
 			if (!otherRan)
 				LOGGER.error("[selftest] 锁窗口反例（挖掘）**没跑起来**（{}）—— 这条反例等于没测",
 					text(arm.runtime.getLastFailure()));
