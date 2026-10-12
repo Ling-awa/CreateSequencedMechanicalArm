@@ -53,7 +53,15 @@ import net.minecraft.world.item.ItemStack;
 public final class ScriptDecompiler {
 
 	/** 缩进：制表符一个（与 §12.3 草案一致，也是 TABS：项目里别的地方也用 tab 缩进）。 */
-	private static final String INDENT = "\t";
+	/**
+	 * 条目行的缩进：**两个空格**，不是制表符。
+	 *
+	 * <p>⚠️ 原来写的是 {@code "\t"}，游戏里显示成一个小方框、里面写着"HT" ——
+	 * MC 的默认字体把 {@code \t} 当**控制字符**画（HT = Horizontal Tab），玩家看到的就是那个图标
+	 * （用户第二十七轮续二十三的截图）。空格不会：既不赌字体，也和 §12.3 的示例写法一致。
+	 * 解析侧不受影响：词法器本来就把 {@code \t} 当空白跳过，所以带制表符的老文件照样能编译。
+	 */
+	private static final String INDENT = "  ";
 
 	private final HolderLookup.Provider registries;
 	private final StringBuilder out = new StringBuilder();

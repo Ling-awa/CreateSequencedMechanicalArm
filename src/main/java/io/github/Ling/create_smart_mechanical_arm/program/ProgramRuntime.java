@@ -72,8 +72,21 @@ public class ProgramRuntime {
 	public static final int MAX_IDLE_SPINS = 4096;
 	/** {@code MAX} 卸货模式下单次操作的搬运上限。 */
 	public static final int MAX_TRANSFER_PER_OP = 64;
-	/** 前置检查未通过时的重试间隔（ticks）：避免每 tick 都去查能力。 */
-	public static final int PRECHECK_RETRY_TICKS = 10;
+	/**
+	 * 前置检查未通过时的**重试间隔**（ticks）。
+	 *
+	 * <p><b>为什么是 0（= 每 tick 重查）</b>：这里原来是 10，注释写着"避免每 tick 都去查能力" ——
+	 * 那是**我们自己发明的节流，上游动力臂没有**：`ArmBlockEntity.tick()` 每 tick 都会走
+	 * `searchForItem()` / `collectItem()`（`ArmBlockEntity.java:126-152`），所以它"看到物品就立刻动手"。
+	 * 10 tick（0.5 秒）的间隔在传送带上直接表现为**取不到**：高速带上的物品在点位上只停留几 tick，
+	 * 我们每 10 tick 才看一眼 ⇒ 几乎必然错过；而且每次前置检查失败还会 {@code cancelMove()}
+	 * 把手臂收回去，于是"取出"看起来有明显间隔、物品从眼前溜走（用户第二十七轮续二十三实测）。
+	 *
+	 * <p>代价（每 tick 查一次能力）可以接受：{@code preCheckFailure} 只做
+	 * {@code extract/insert(simulate)} 这类**纯模拟**，与"每 tick 推进一条原语"的其它路径同量级；
+	 * 上游动力臂也是每 tick 做同类查询。
+	 */
+	public static final int PRECHECK_RETRY_TICKS = 0;
 	/** 调用栈深度上限：超过判为疑似递归并停机（比"无限递归把栈撑爆"好）。 */
 	public static final int MAX_CALL_DEPTH = 8;
 

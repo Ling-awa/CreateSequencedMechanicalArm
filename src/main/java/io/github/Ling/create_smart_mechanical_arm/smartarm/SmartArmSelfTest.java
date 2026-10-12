@@ -144,6 +144,7 @@ public class SmartArmSelfTest {
 		checkArmPointClassification(server);
 		checkFunnelTransferNotice(server);
 		checkTakeGateEndToEnd(server);
+		checkPrecheckRetryIsPerTick(server);
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
@@ -571,6 +572,90 @@ public class SmartArmSelfTest {
 			level.setBlockAndUpdate(targetPos, oldTarget);
 			level.setBlockAndUpdate(armPos, oldArm);
 		}
+	}
+
+	/**
+	 * 「前置检查失败后的重试是**每 tick** 的」（对齐上游动力臂：`ArmBlockEntity.tick()` 每 tick 都
+	 * `searchForItem()` / `collectItem()`，`ArmBlockEntity.java:126-152`）。
+	 *
+	 * <p><b>为什么要这条断言</b>：这里原来是 10 tick 的节流（我们自己发明的"避免每 tick 查能力"），
+	 * 在传送带上直接表现为"取不到 + 物品从眼前溜走"—— 高速带上的物品在点位上只停留几 tick，
+	 * 每 10 tick 才看一眼必然错过，而且每次失败还会 `cancelMove()` 把手臂收回去
+	 * （用户第二十七轮续二十三实测）。
+	 *
+	 * <p><b>判据为什么能分辨</b>：前置检查通过时 `beginEntry` 会**立刻**清掉黄字失败提示
+	 * （`ProgramRuntime:392`），所以"放进物品后的**下一个** tick 提示就消失" ⟺ 重试没有间隔。
+	 * 10 tick 节流下第二个 tick 只会去减 cooldown、提示仍在 ⇒ 这条断言会变红（做得到反证）。
+	 */
+	private static void checkPrecheckRetryIsPerTick(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 60, 200, spawn.getZ() + 60);
+		BlockPos depotPos = armPos.offset(2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldDepot = level.getBlockState(depotPos);
+		try {
+			BlockState depotState = stateOf("create:depot");
+			if (depotState == null) {
+				LOGGER.error("[selftest] 重试节流自检**没跑起来**：找不到 create:depot");
+				return;
+			}
+			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
+				.defaultBlockState());
+			level.setBlockAndUpdate(depotPos, depotState);
+			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 重试节流自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
+			ArmProgram program = new ArmProgram();
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "自检";
+			ArmProgramEntry entry = new ArmProgramEntry();
+			entry.op = OperationType.TAKE;
+			entry.offset = depotPos.subtract(armPos);
+			task.entries.add(entry);
+			program.tasks.add(task);
+			arm.setProgram(program);
+
+			arm.runtime.tick(arm); // ① 空载具 ⇒ 前置检查不通过（并写出黄字原因）
+			String emptyFailure = arm.runtime.getLastFailure();
+			boolean sawFailure = emptyFailure != null;
+
+			boolean inserted = putOneInto(level, depotPos); // ② 走方块自己的物品能力放一个
+			arm.runtime.tick(arm);                          // ③ **只跑一个 tick**
+			String afterInsert = arm.runtime.getLastFailure();
+			boolean cleared = afterInsert == null;
+
+			LOGGER.info("[selftest] 前置检查重试节流: 空载具报因={} 放物品后下一 tick 就放行={} 间隔常量={}",
+				sawFailure, cleared, ProgramRuntime.PRECHECK_RETRY_TICKS);
+			if (!sawFailure)
+				LOGGER.error("[selftest] 重试节流自检**没跑起来**：空载具时没报出失败原因（{}）—— 等于没测",
+					text(emptyFailure));
+			else if (!inserted)
+				LOGGER.error("[selftest] 重试节流自检**没跑起来**：物品没能放进载具 —— 这条断言等于没测");
+			else if (!cleared)
+				LOGGER.error("[selftest] 前置检查**不是每 tick 重查**（放了物品后一个 tick 仍报「{}」）—— "
+					+ "传送带上会表现为「取不到 + 物品溜走」，对齐上游必须每 tick 查", afterInsert);
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 重试节流自检抛异常：{}", t.toString());
+		} finally {
+			level.setBlockAndUpdate(depotPos, oldDepot);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+	}
+
+	/** 走目标方块**自己的物品能力**放一个铁锭（不碰 BE 内部字段，与"世界里真的放了一个"一致）。 */
+	private static boolean putOneInto(ServerLevel level, BlockPos pos) {
+		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
+		if (handler == null)
+			return false;
+		for (int slot = 0; slot < handler.getSlots(); slot++) {
+			if (handler.insertItem(slot, new ItemStack(Items.IRON_INGOT), false)
+				.isEmpty())
+				return true;
+		}
+		return false;
 	}
 
 	/** 一次探测：摆上方块 → 问三件事（只进不出 / 是交互点 / 有通用物品能力）→ 还原方块。 */
