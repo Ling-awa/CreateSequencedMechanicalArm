@@ -455,6 +455,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		pinnedBeltItem = null;
 	}
 
+	/** 目标方块是传送带时返回它的（控制器的）库存。 */
 	@Nullable
 	private BeltInventory beltInventory() {
 		BeltBlockEntity belt = beltBlock();
@@ -477,6 +478,33 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		if (controller != null)
 			controller.sendData();
 	}
+
+	/**
+	 * 组装的产物走出"臂的判定窗口"大约需要几 tick。
+	 *
+	 * <p>为什么需要这个等待：产物是**在加工位置原地生成**的，它会短暂占着我们的判定窗口
+	 * （带子上要几 tick 才走出这一格；置物台上它就停在那儿）⇒ 紧接着的前置检查看到的是**产物**
+	 * —— 它通常匹配不到配方（或者匹配到的是"再加工一次"那条路）⇒ 检查失败 ⇒ 收臂 ⇒ 几 tick 后又伸出去
+	 * ⇒ 观感就是"每次组装完都会变慢一下"（用户第二十七轮续三十二实测）。
+	 * 所以组装成功后主动等一小会儿，让产物先离开。
+	 *
+	 * <p>时长按**带速**算（走完一整格需要多久），没有带子/带速为 0 时用保守常数；两端都夹住，
+	 * 免得极慢的带子把臂卡住太久、极快的带子又不够。
+	 */
+	public int productClearTicks() {
+		BeltBlockEntity belt = beltBlock();
+		if (belt == null)
+			return PRODUCT_CLEAR_DEFAULT_TICKS;
+		float perTick = Math.abs(belt.getBeltMovementSpeed());
+		if (perTick < 1e-4f)
+			return PRODUCT_CLEAR_DEFAULT_TICKS;
+		return Mth.clamp((int) Math.ceil(1f / perTick) + 1, PRODUCT_CLEAR_MIN_TICKS, PRODUCT_CLEAR_MAX_TICKS);
+	}
+
+	/** 没有带速可算时的保守等待（约半秒）。 */
+	private static final int PRODUCT_CLEAR_DEFAULT_TICKS = 10;
+	private static final int PRODUCT_CLEAR_MIN_TICKS = 2;
+	private static final int PRODUCT_CLEAR_MAX_TICKS = 40;
 
 	/**
 	 * 现在要不要**续锁**目标上的物品：运行时说"这一条正在从目标取东西"（`TAKE`/`DEPLOY` 且已开始/正在执行）。
@@ -1377,16 +1405,17 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		movingOffset = NBTHelper.readBlockPos(tag, "Offset");
 		movingFace = tag.contains("Face") ? Direction.byName(tag.getString("Face")) : null;
 		moveSeq = tag.getInt("MoveSeq");
-		// ⚠️ 客户端**只在"相位真的变了"时才接受服务端带来的 `Progress`**。
+		// ⚠️ 客户端接受服务端 `Progress` 的判据：**相位变了 或 开了新一次移动（`moveSeq` 变了）**。
 		//
-		// 为什么：收回（IDLE）这段动画是**客户端自己推进**的 —— 两边都用
-		// `chasedPointProgress += min(256,|speed|)/1024` 各自累加，而客户端的角度插值就拿它当系数。
-		// 收回开始时服务端把进度置 0（`cancelMove()`）并同步一次 ✓ 那一次要收；
-		// 但**收回过程中任何一次同步**（重试失败、目标重新解析、程序脏标记…）都会把客户端刚走到的
-		// 进度**按回 0** ⇒ 插值系数从头再来 ⇒ 现象就是"收回动画突然变慢/回弹"
-		// （用户第二十七轮续三十一："完成一次组装、再喂料时它正常拦截，但收回去的动画会变慢"）。
-		// 按相位变化来收：MOVING→IDLE（开始收）与 IDLE→MOVING（开始伸）各收一次，中间一律听客户端的。
-		if (!clientPacket || oldPhase != phase)
+		// 为什么（两轮才收敛，两个方向都踩过）：
+		//   ① **必须收**：`beginMove` 把进度置 0 并 `moveSeq++` —— 连续任务时相位**一直是 MOVING**
+		//      （中间不经过 IDLE），所以只看相位的话客户端进度会永远停在 1.00 ⇒ **动画直接闪现、不插值**
+		//      （用户第二十七轮续三十二实测：潜行看护目镜 `progress` 恒为 1.00）。这就是 `moveSeq` 这一项的用处。
+		//   ② **不能乱收**：收回（IDLE）是**客户端自己推进**的动画，`chasedPointProgress` 就是它的插值系数；
+		//      收回期间任何一次同步（重试失败、目标重解析、脏标记…）若把进度按回服务端的 0，
+		//      观感就是"收回变慢/回弹一下"（§7.19）。而收回期间**没有新的 `beginMove`** ⇒
+		//      相位与 `moveSeq` 都不变 ⇒ 这些同步**不会**再打断它 ✓。
+		if (!clientPacket || oldPhase != phase || oldMoveSeq != moveSeq)
 			chasedPointProgress = tag.getFloat("Progress");
 		// 信号表：存档与客户端包都读（§7.16e）。**入网只在服务端**（下面 rejoinNetwork）——
 		// 客户端读到的那份纯粹给护目镜看，不碰网络表（getNetworkOf 把 world 当 IdentityHashMap 的键）。

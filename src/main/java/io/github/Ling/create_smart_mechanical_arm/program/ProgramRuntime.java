@@ -858,12 +858,16 @@ public class ProgramRuntime {
 		finishDeploy(arm, task, entry, level, recipeRef[0], processedRef[0]);
 	}
 
-	/** 组装成功后的共同收尾：结算手持应用物 → 音效粒子 → 记成功。 */
+	/** 组装成功后的共同收尾：结算手持应用物 → 音效粒子 → **等产物离开判定窗口** → 记成功。 */
 	private void finishDeploy(SmartArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
 		RecipeHolder<? extends Recipe<?>> recipe, ItemStack processed) {
 		arm.consumeHeldItem(DeployRecipes.keepsHeldItem(recipe.value()));
 		ArmEffects.deploy(level, arm.getBlockPos(), arm.getEffectorPosition(), processed,
 			recipe.value() instanceof SandPaperPolishingRecipe);
+		// ★ 产物是在**加工位置原地**生成的，它会短暂占着我们的判定窗口 ⇒ 紧接着的前置检查看到的是产物、
+		//   匹配不到配方 ⇒ 失败 ⇒ 收臂 ⇒ 再伸出去 ⇒ 观感"每次组装完都会变慢一下"
+		//   （用户第二十七轮续三十二实测）。这里主动等它走开（时长按带速算，见 SmartArmBlockEntity#productClearTicks）。
+		setIdleCooldown(arm.productClearTicks());
 		succeed(arm, task, entry);
 	}
 
