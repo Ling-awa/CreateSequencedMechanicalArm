@@ -52,14 +52,20 @@ public final class SmartArmConfig {
 	 *
 	 * <p>⚠️ 条目越多，整份程序序列化越大 —— 超过 {@code ArmProgramEditPacket.MAX_TAG_BYTES}（128KB）
 	 * 就会在保存时被拒（整份不落盘）。所以这个值不是"越大越好"。
+	 *
+	 * <p><b>实测（自检里那三行）</b>：MC 的 {@code tag.sizeInBytes()} 给**每个键**固定
+	 * {@code 64 + 2×键名长} 的开销，而一个条目**无条件写约 18 个键** ⇒
+	 * 单条最轻 **2216 字节**（只有 {@code op}）、典型 **≈2561**、最重 **3719**（满备注 128 字 + 图标 + 频率对）；
+	 * 于是 **128KB 的真实天花板 ≈ 35（重）~ 59（轻）条，典型 ≈51 条** —— 与这里填多少无关。
 	 */
 	public static final ModConfigSpec.IntValue MAX_ENTRIES_TOTAL = BUILDER
 		.comment("Maximum total number of entries across the whole program.",
-			"整份程序的条目总数上限（所有任务合计）。默认 256。",
-			"Note: the bigger this is, the bigger the serialized program gets; anything above",
-			"ArmProgramEditPacket.MAX_TAG_BYTES (128 KB) is rejected on save (nothing gets written).",
-			"注意：条目越多整份程序序列化越大，超过 ArmProgramEditPacket.MAX_TAG_BYTES（128KB）",
-			"就会在保存时被拒（这一场编辑一个字都落不了盘）—— 所以不是随便拉满。")
+			"整份程序的条目总数上限（所有任务合计）。默认 256 —— 但见下面的实测。",
+			"MEASURED: the lightest possible entry is 2216 bytes, a typical one ~2561, the heaviest",
+			"(128-char note + icon + frequency pair) 3719. MAX_TAG_BYTES is 128 KB, so the REAL ceiling",
+			"is about 35 (heavy) to 59 (lean) entries, ~51 typical - regardless of this setting.",
+			"实测：单条最轻 2216 字节、典型 ≈2561、最重 3719 ⇒ 128KB 的真实天花板是 35（重）~59（轻）条、",
+			"典型 ≈51 条，与这个配置值无关。条目写得越朴素能放越多；超了会在保存时被明确拒绝（不是静默丢）。")
 		.defineInRange("maxEntriesTotal", DEFAULT_MAX_ENTRIES_TOTAL, 1, 4096);
 
 	public static final ModConfigSpec SPEC = BUILDER.build();

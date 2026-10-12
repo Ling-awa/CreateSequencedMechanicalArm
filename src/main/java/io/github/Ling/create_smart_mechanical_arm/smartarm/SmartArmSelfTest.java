@@ -152,6 +152,7 @@ public class SmartArmSelfTest {
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
+		checkProgramSize(server);
 
 		for (Map.Entry<String, Supplier<ArmProgram>> preset : DevPresets.all()
 			.entrySet()) {
@@ -220,6 +221,118 @@ public class SmartArmSelfTest {
 				}
 			}
 		}
+	}
+
+	/**
+	 * 「整份程序序列化后有多大、128KB 能放多少条」的实测（用户问的就是这个）。
+	 *
+	 * <p><b>为什么必须实测、不能估</b>：MC 的 {@code CompoundTag.sizeInBytes()} 不是序列化字节数，
+	 * 而是<b>内存估算</b> —— 每个键固定 {@code 28 + 2×键名长 + 36}，再叠加值本身：
+	 * <ul>
+	 *   <li>{@code off}（BlockPos 的三个 int）单独一项就 ≈282 字节；</li>
+	 *   <li>{@link ArmProgramEntry#save} 无条件写 ~18 个键、条件写 6 个 ⇒ 光键名开销就 ≈1.5KB，
+	 *       于是"只有 op 的一条"也有 2KB 出头，而"塞满备注 + 图标 + 频率"的一条接近 4KB。</li>
+	 * </ul>
+	 * 凭直觉按"一条几十字节"估会差两个数量级：{@code maxEntriesTotal = 256} 这种值看起来毫无风险，
+	 * 实际会在保存那一刻被 {@code ArmProgramEditPacket.MAX_TAG_BYTES}（128KB）整份拒收
+	 * —— 而拒收的表现是"这一场编辑一个字都落不了盘"。这四行就是把它钉进日志。
+	 *
+	 * <p>⚠️ 这四行是<b>测量，不是断言</b>：数值随上游物品 id 长度与配置值变化，写死期望值只会变成噪音。
+	 */
+	private static void checkProgramSize(MinecraftServer server) {
+		HolderLookup.Provider registries = server.registryAccess();
+
+		// ① 现有预设里条目最多的那一份 —— 一份真实会被存读的程序（不是人为造的最坏情况）
+		String widest = "无";
+		ArmProgram sample = null;
+		int entries = 0;
+		for (Map.Entry<String, Supplier<ArmProgram>> preset : DevPresets.all()
+			.entrySet()) {
+			ArmProgram candidate = preset.getValue()
+				.get();
+			int count = candidate.tasks.stream()
+				.mapToInt(task -> task.entries.size())
+				.sum();
+			if (count > entries) {
+				entries = count;
+				widest = preset.getKey();
+				sample = candidate;
+			}
+		}
+		int sampleBytes = sample == null ? 0 : sample.save(registries)
+			.sizeInBytes();
+		int perEntry = entries == 0 ? 0 : sampleBytes / entries;
+		LOGGER.info("[selftest] 程序体积: 条目={} 字节={} 每条≈{} （那是预设「{}」，条目最多的那份）", entries, sampleBytes,
+			perEntry, widest);
+
+		// ② 两端：编辑器造得出的最重一条 / 最轻一条
+		ArmProgramEntry heaviest = heaviestEntry();
+		int heavyBytes = heaviest.save(registries)
+			.sizeInBytes();
+		// 「最轻」= 除了 op 全是字段默认值 —— 注意 save() 里那 ~18 个键是**无条件**写的，
+		// 所以"一条什么都没有的操作"并不小，这是"能放多少条"的乐观上界。
+		int lightBytes = new ArmProgramEntry().save(registries)
+			.sizeInBytes();
+		LOGGER.info("[selftest] 单条最重={} 字节（备注满 {} 字 + 自定义图标 + 两个频率物品 + 发信号 + 所有属性非默认）",
+			heavyBytes, ArmProgramEntry.NOTE_MAX);
+		LOGGER.info("[selftest] 单条最轻={} 字节（只有 op，其余全是默认值）", lightBytes);
+
+		// ③ 换算：128KB ÷ 实测每条 = 能放多少条。给的是**区间**（真实程序里既有空操作也有塞满的，
+		// 单点估计必然两头都不准），以及"当前配置上限那一档（全按最重）实测多大"。
+		int cap = ArmProgramEditPacket.MAX_TAG_BYTES;
+		int configured = SmartArmConfig.maxEntriesTotal();
+		LOGGER.info("[selftest] 128KB 换算: 全按最轻≈{}条 全按最重≈{}条 全按预设每条≈{}条 ｜ 配置上限={}条 全按最重实测={} 字节（守卫 {}）",
+			lightBytes == 0 ? 0 : cap / lightBytes, heavyBytes == 0 ? 0 : cap / heavyBytes,
+			perEntry == 0 ? 0 : cap / perEntry, configured, filledBytes(registries, heaviest, configured), cap);
+	}
+
+	/** 编辑器造得出的"一条最重"：所有字段非默认 + 满额备注 + 自定义图标 + 一对频率。 */
+	private static ArmProgramEntry heaviestEntry() {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.SIGNAL;
+		entry.offset = new BlockPos(1234567, 255, -1234567);
+		entry.absolute = true;
+		entry.delay = 12000;
+		entry.face = Direction.NORTH;
+		entry.failAmount = 120;
+		entry.failUnit = ArmProgramEntry.WaitUnit.MINUTE;
+		entry.onSuccess = ArmProgramEntry.SkipAction.SKIP_TO;
+		entry.successTarget = "搬一趟";
+		entry.onTimeout = ArmProgramEntry.SkipAction.SKIP_TO;
+		entry.timeoutTarget = "12";
+		// 128 个汉字 = 256 字节（sizeInBytes 按 UTF-16 算，与实际序列化的 UTF-8 无关）
+		entry.note = "汉".repeat(ArmProgramEntry.NOTE_MAX);
+		// 物品 id 字符串越长，估算越大 —— 拿 netherite_pickaxe 当"长 id"的代表
+		entry.icon = new ItemStack(Items.NETHERITE_PICKAXE);
+		entry.count = 64;
+		entry.waitAmount = ArmProgramEntry.SIGNAL_MAX_AMOUNT;
+		entry.waitUnit = ArmProgramEntry.WaitUnit.MINUTE;
+		entry.waitForPowered = false;
+		entry.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		entry.frequency = testFrequency(Items.REDSTONE_TORCH, Items.IRON_INGOT);
+		entry.callTarget = "子任务名字";
+		entry.callRepeat = ArmProgramTask.MAX_LOOP_COUNT;
+		entry.errorMessage = "写给护目镜看的错误信息";
+		entry.unloadRepeat = ArmProgramEntry.UnloadRepeat.UNTIL_EMPTY;
+		entry.unloadAmount = ArmProgramEntry.UnloadAmount.MAX;
+		return entry;
+	}
+
+	/**
+	 * 一份"条目塞满、且每条都按最重算"的真实程序有多大（回答"配置上限那一档会不会超 128KB"）。
+	 *
+	 * <p>同一个 {@link ArmProgramEntry} 实例被反复放进列表：{@code save()} 只读，而"每条都一样重"
+	 * 正是这里要的最坏情况。全按最重 ⇒ 结论是保守的（真实程序必然更小）。
+	 */
+	private static int filledBytes(HolderLookup.Provider registries, ArmProgramEntry entry, int count) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "size_probe";
+		for (int i = 0; i < count; i++)
+			task.entries.add(entry);
+		program.tasks.add(task);
+		return program.save(registries)
+			.sizeInBytes();
 	}
 
 	/**
