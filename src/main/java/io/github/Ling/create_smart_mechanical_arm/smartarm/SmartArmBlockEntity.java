@@ -1377,7 +1377,17 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		movingOffset = NBTHelper.readBlockPos(tag, "Offset");
 		movingFace = tag.contains("Face") ? Direction.byName(tag.getString("Face")) : null;
 		moveSeq = tag.getInt("MoveSeq");
-		chasedPointProgress = tag.getFloat("Progress");
+		// ⚠️ 客户端**只在"相位真的变了"时才接受服务端带来的 `Progress`**。
+		//
+		// 为什么：收回（IDLE）这段动画是**客户端自己推进**的 —— 两边都用
+		// `chasedPointProgress += min(256,|speed|)/1024` 各自累加，而客户端的角度插值就拿它当系数。
+		// 收回开始时服务端把进度置 0（`cancelMove()`）并同步一次 ✓ 那一次要收；
+		// 但**收回过程中任何一次同步**（重试失败、目标重新解析、程序脏标记…）都会把客户端刚走到的
+		// 进度**按回 0** ⇒ 插值系数从头再来 ⇒ 现象就是"收回动画突然变慢/回弹"
+		// （用户第二十七轮续三十一："完成一次组装、再喂料时它正常拦截，但收回去的动画会变慢"）。
+		// 按相位变化来收：MOVING→IDLE（开始收）与 IDLE→MOVING（开始伸）各收一次，中间一律听客户端的。
+		if (!clientPacket || oldPhase != phase)
+			chasedPointProgress = tag.getFloat("Progress");
 		// 信号表：存档与客户端包都读（§7.16e）。**入网只在服务端**（下面 rejoinNetwork）——
 		// 客户端读到的那份纯粹给护目镜看，不碰网络表（getNetworkOf 把 world 当 IdentityHashMap 的键）。
 		readSignalTable(tag, registries);
