@@ -349,15 +349,24 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	/**
 	 * 把正在被 pin 的**传送带**同步一次给客户端（置物台不需要：它没有"客户端自己模拟位移"这回事）。
 	 *
-	 * <p>为什么每 tick 都发：客户端那份物品数据里的 {@code lockedExternally} 被消费一次就清掉，
-	 * 所以只有"每 tick 都告诉它一次"才能让它这一段也停住。代价只有带子那一个小包（物品表），
-	 * 而且只在取物/组装伸过去的那几十 tick 里发。
+	 * <p>⚠️ **必须发给控制器那一段，不能发给臂旁边那一段**：`BeltBlockEntity.write:218-219` 里物品表
+	 * 只在 {@code isController()} 时才写进客户端包，客户端也只在 {@code isController()} 时读它
+	 * （`:241-242`）。往普通段发同步 = **白发**，客户端那份物品数据里根本没有 pin 标记 ⇒
+	 * 物品模型会继续往前跑（用户第二十七轮续二十四那张"幽灵贴图"截图）。
+	 * 而 pin 标记本身写在**控制器**的库存里（段的 {@code getInventory()} 是委托给控制器的）。
+	 *
+	 * <p>为什么每 tick 都发：客户端那份标记被消费一次就清掉（`BeltInventory:119-127`），
+	 * 只有"每 tick 都告诉它一次"才能让这一段也停住。代价只有带子那一个小包，而且只在取物/组装
+	 * 伸过去的那几十 tick 里发。
 	 */
 	private void syncPinnedBelt() {
 		if (level == null || movingPoint == null)
 			return;
-		if (level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt)
-			belt.sendData();
+		if (!(level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt))
+			return;
+		BeltBlockEntity controller = belt.getControllerBE();
+		if (controller != null)
+			controller.sendData();
 	}
 
 	@Nullable
