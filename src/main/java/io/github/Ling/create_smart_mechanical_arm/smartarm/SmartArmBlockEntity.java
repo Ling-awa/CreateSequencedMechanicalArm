@@ -311,6 +311,21 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		// 忘了清就会在客户端留下一件永远不动的"幽灵物品"（服务端那边 `lockedExternally` 本来就是每 tick 重设的）。
 		if (clientHoldItem != null || pinnedBeltItem != null)
 			releaseBeltHold();
+		retract();
+	}
+
+	/**
+	 * **只收臂，不松手**：折回待机位（客户端靠相位变化做平滑插值），但目标上的物品继续按着。
+	 *
+	 * <p>为什么要有这么一个和 {@link #cancelMove()} 分开的方法：**收回是动作，认领是意图**。
+	 * 每条条目结束后的收回（§7.22 的"每物品一次伸收"）不该顺手把目标上的物品放回传送带 ——
+	 * 否则那一格在"收回 + 待机"期间无人认领，物品流走，下一件又要重新等
+	 * （用户第二十七轮续三十五实测："又变成无法定住被加工的物品了"）。
+	 * 认领的寿命归程序意图管：{@link #canPinTarget()} 为假、或目标换了，才真的松手。
+	 *
+	 * <p>真的该松手的场合（换卡 / 等待 / 停机 / 拆方块）走的仍然是 {@link #cancelMove()}。
+	 */
+	public void retract() {
 		// 收工/换目标/等待/停机时都要清掉客户端的挖掘裂纹（残留的话方块上会挂着挖了一半的裂痕）
 		rightClick.clearBreakingProgress();
 		// 已经在待机就直接返回：重复发"进度归零"的同步会让客户端把动画钉在插值起点上
@@ -381,7 +396,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	 * </ul>
 	 */
 	private void holdBeltItem() {
-		TransportedItemStack item = findBeltItem();
+		TransportedItemStack item = claimBeltItem();
 		if (item == null)
 			return;
 		item.lockedExternally = true; // 每 tick 重设（会被带子消费）；locked 不会被消费，认领时设一次即可
@@ -389,7 +404,14 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 
 	/**
 	 * 认领要按住的那件物品：上次那件还在就继续用它（哪怕它已经漂出目标格），
-	 * 否则在**目标格**里挑离中心最近的一件（原地加工会把对象换掉，所以要能重新认领）。
+	 * 否则在**目标格**里挑一件**这条条目真的加工得了的**、离中心最近的（原地加工会把对象换掉，
+	 * 所以要能重新认领）。
+	 *
+	 * <p><b>为什么要过"加工得了"这一关</b>（用户第二十七轮续三十五）：认领现在是**长期**的
+	 * （跨收回、跨待机，见 {@link #canPinTarget()}）。见谁按谁的话，刚加工出来的**产物**会被按在
+	 * 原地 —— 它恰好不再匹配配方，于是"按着 → 等不到加工 → 一直按着"，整条带子被一件物品堵死。
+	 * 判据交给运行时（{@code ProgramRuntime.canWorkOn}），它用的是**与前置检查同一批事实**，
+	 * 所以"认领了却永远加工不了"不会出现：产物流走，下一件能加工的进来。
 	 *
 	 * <p>认领时**顺手把它拉到格子中心**（照 `BeltInventory:291-295` 的 `ProcessingResult.HOLD` 处理）：
 	 * 臂的取物点就在格子中心，而 `handleProcessingOnAllItems` 只认"中心 ±.51" ⇒
@@ -397,13 +419,19 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	 * 改完反而完全抓不到 —— 就是因为只锁不定心）。
 	 */
 	@Nullable
-	private TransportedItemStack findBeltItem() {
+	private TransportedItemStack claimBeltItem() {
 		BeltInventory inventory = beltInventory();
 		BeltBlockEntity belt = beltBlock();
-		if (inventory == null || belt == null)
+		if (inventory == null || belt == null) {
+			releaseBeltHold();
 			return null;
+		}
 		List<TransportedItemStack> items = inventory.getTransportedItems();
-		TransportedItemStack item = pinnedBeltItem != null && items.contains(pinnedBeltItem) ? pinnedBeltItem : null;
+		// ① 保留：上一次认领的那件**还在带子上**就继续按着（哪怕它漂出了目标格 —— 它本来就是
+		//    我们按住的，中途换目标只会让它被放回带上跑掉）。
+		TransportedItemStack item = pinnedBeltItem != null && items.contains(pinnedBeltItem)
+			&& !pinnedBeltItem.stack.isEmpty() ? pinnedBeltItem : null;
+		// ② 认领：目标格里"这条条目加工得了"的、离中心最近的一件。
 		if (item == null) {
 			float center = belt.index + .5f;
 			float bestDistance = Float.MAX_VALUE;
@@ -412,6 +440,8 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 					continue;
 				if (candidate.beltPosition < belt.index || candidate.beltPosition >= belt.index + 1)
 					continue; // 只认目标格
+				if (!runtime.canWorkOn(this, candidate.stack))
+					continue; // 产物 / 加工不了的东西：不按（否则会堵住带子）
 				float distance = Math.abs(candidate.beltPosition - center);
 				if (distance < bestDistance) {
 					bestDistance = distance;
@@ -419,11 +449,11 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 				}
 			}
 		}
-		pinnedBeltItem = item;
 		if (item == null) {
-			clientHoldItem = null;
+			releaseBeltHold();
 			return null;
 		}
+		pinnedBeltItem = item;
 		if (item != clientHoldItem || !item.locked) {
 			centreOnBelt(belt, item);
 			item.locked = true;
@@ -464,9 +494,25 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 
 	@Nullable
 	private BeltBlockEntity beltBlock() {
-		if (level == null || movingOffset == null)
+		if (level == null)
 			return null;
-		return level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt ? belt : null;
+		BlockPos offset = workOffset();
+		if (offset == null)
+			return null;
+		return level.getBlockEntity(worldPosition.offset(offset)) instanceof BeltBlockEntity belt ? belt : null;
+	}
+
+	/**
+	 * 本 tick 关心的那一格（相对本臂）：**当前条目的目标优先**，退回"上一次真的动过身"的目标。
+	 *
+	 * <p>为什么不能只用 {@code movingOffset}：它是"上一次真的动过身"的目标，换目标时会指着一格旧位置 ——
+	 * 认领（{@link #pinPoint()}）已经改成按当前条目算，若 {@link #beltBlock()} 还按旧位置，
+	 * 就会去按**另一条带子**上的物品。两者必须同源。
+	 */
+	@Nullable
+	private BlockPos workOffset() {
+		BlockPos offset = runtime.entryOffset(this);
+		return offset != null ? offset : movingOffset;
 	}
 
 	private void syncBeltController() {
@@ -510,7 +556,11 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	private static final int TRANSIENT_BLOCK_MAX_TICKS = 40;
 
 	/**
-	 * 现在要不要**续锁**目标上的物品：运行时说"这一条正在从目标取东西"（`TAKE`/`DEPLOY` 且已开始/正在执行）。
+	 * 现在要不要**认领并按住**目标上的物品：运行时说"当前这条条目是从目标取东西 / 在目标上加工"
+	 * （{@code TAKE} / {@code DEPLOY}）。
+	 *
+	 * <p>判据是**程序意图**，不是手臂状态：手臂在伸、在收、在待机、换目标前的等待期，
+	 * 只要当前条目还是取物/组装，就继续按着那一格里的物品（§7.22 与"每物品一次伸收"配套的那一半）。
 	 *
 	 * <p>⚠️ **停机（无应力）时也继续锁** —— 这是**原版语义**：上游 `ArmBlockEntity:133-140` 只看
 	 * `chasedPointProgress < 1`，所以一条没通电的臂同样会把传送带上的物品一直占住（旧物品被拿走/移走后再来的
@@ -837,16 +887,19 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		super.tick();
 		tickMovementProgress();
 
-		// 取物/组装期间续锁目标上的物品（上游 `ArmBlockEntity:133-140` 的同一机制）。分两半：
+		// 取物/组装期间按住目标上的物品（上游 `ArmBlockEntity:133-140` 的同一机制）。分两半：
 		//   ① 服务端：`keepAlive()`（`lockedExternally`）—— **必须每 tick 重设**，带子每 tick 会把它消费掉；
 		//   ② 客户端：`locked` —— **只在状态变化时同步一次**（客户端不会消费它），这样就不会因为
 		//      "包一抖、物品动一格又被纠正回来"而抽动（见 applyBeltClientHold 的注释）。
 		//
-		// ⚠️ 判据由**运行时**给（`shouldPinTarget()`），而不是只看 `chasedPointProgress < 1` ——
-		// 旧写法会在**刚好到位**那一 tick 停掉续锁，而真正取物就发生在那之后（用户第二十七轮续二十三实测）。
+		// ⚠️ 判据（`canPinTarget()`）是**程序意图**：当前条目是不是"取物 / 组装"。
+		// 曾经写成 `chasedPointProgress < 1`（漏掉到位那一 tick），后来又写成 `MOVING + EXECUTING`
+		// —— 后者在"每物品一次伸收"（§7.22）之后会出现整段"收回 + 待机"无人认领的窗口，
+		// 物品从臂下直接流走（用户第二十七轮续三十五："又变成无法定住被加工的物品了"）。
+		// 认领**不随手臂状态起落**：手臂在折返/在等下一件，仍然是"我要这一格里的物品"。
 		// ⚠️ 判据**不能**用 `movingPoint != null`：读盘路径会把它显式清成 null（只留存盘的 `phase`/`Offset`），
 		// 而"退出重进"正是走读盘这条路 ⇒ 用缓存当判据会在重登后**静默松手**（用户第二十七轮续二十六实测）。
-		// 所以改用 {@link #pinPoint()}：先看缓存，缓存没了就按 `movingOffset` 重建。
+		// 所以用 {@link #pinPoint()}：按**当前条目的目标**解析（那是程序里持久化的事实）。
 		ArmInteractionPoint pinPoint = pinPoint();
 		boolean pinning = level != null && !level.isClientSide && pinPoint != null && canPinTarget();
 		if (pinning)
@@ -865,18 +918,22 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	/**
-	 * 要续锁的那个交互点：优先用移动中缓存的 {@link #movingPoint}，**缓存没了就按 {@link #movingOffset} 重建**。
+	 * 要认领的那个交互点：<b>按当前条目的目标算</b>（{@code ProgramRuntime.pinOffset}）。
 	 *
-	 * <p>为什么必须能重建：读盘时 `movingPoint` 被显式清成 null（只留 `phase`/`Offset` 两个存盘字段），
-	 * 而"退出重进"走的就是读盘 ⇒ 只看缓存的写法会在重登后静默松手，把已经定住的物品放回传送带上
-	 * （用户第二十七轮续二十六实测：重进后被定住的物品又被释放了）。
+	 * <p>为什么不用缓存、也不用 {@code movingOffset}：
+	 * <ul>
+	 *   <li>读盘会把 {@code movingPoint} 显式清成 null（只留 `phase`/`Offset`），而"退出重进"走的
+	 *       就是读盘 ⇒ 只看缓存的写法会在重登后**静默松手**，把已经定住的物品放回传送带上
+	 *       （用户第二十七轮续二十六实测）。</li>
+	 *   <li>{@code movingOffset} 是"上一次真的动过身"的目标：换目标时它还是旧的那一格，
+	 *       于是新目标的前置检查期间会继续按着**旧目标**的物品（本次顺带修掉）。</li>
+	 * </ul>
+	 * 当前条目的目标是**程序里持久化的事实**，与手臂状态无关，所以两个毛病一起没了。
 	 */
 	@Nullable
 	public ArmInteractionPoint pinPoint() {
-		ArmInteractionPoint point = currentPoint();
-		if (point == null && movingOffset != null && level != null && !level.isClientSide)
-			point = resolvePoint(movingOffset);
-		return point;
+		BlockPos offset = runtime.pinOffset(this);
+		return offset == null ? null : resolvePoint(offset);
 	}
 
 	/** 推进移动进度；客户端顺带做角度插值（照抄 ArmBlockEntity.tickMovementProgress 的语义）。 */

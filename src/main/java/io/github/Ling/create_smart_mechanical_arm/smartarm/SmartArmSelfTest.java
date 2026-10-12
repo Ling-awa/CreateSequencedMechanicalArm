@@ -145,6 +145,7 @@ public class SmartArmSelfTest {
 		checkFunnelTransferNotice(server);
 		checkTakeGateEndToEnd(server);
 		checkPrecheckRetryIsPerTick(server);
+		checkClaimFollowsIntent(server);
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
@@ -728,6 +729,146 @@ public class SmartArmSelfTest {
 				return true;
 		}
 		return false;
+	}
+
+	/** 那个方块现在是不是空的（同样走方块自己的能力，不看内部字段）。 */
+	private static boolean isEmpty(ServerLevel level, BlockPos pos) {
+		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
+		if (handler == null)
+			return false;
+		for (int slot = 0; slot < handler.getSlots(); slot++) {
+			if (!handler.getStackInSlot(slot)
+				.isEmpty())
+				return false;
+		}
+		return true;
+	}
+
+	/**
+	 * 「认领窗口跟**程序意图**走，不跟手臂状态走」（用户第二十七轮续三十五实测）。
+	 *
+	 * <p><b>为什么要有这条断言</b>：§7.22 把每条条目改成"伸 → 加工 → 收"之后，认领窗口原来写成
+	 * {@code state ∈ {MOVING, EXECUTING}}，于是**收回 + 待机那一整段没有任何人认领那一格** ——
+	 * 传送带上的物品直接从臂下流过去，用户看到的就是"又变成无法定住被加工的物品了"。
+	 * 正确的分法是：**动作归动作（相位/动画），认领归认领（程序意图）**。
+	 *
+	 * <p><b>判据为什么能分辨</b>：这里真跑运行时——
+	 * ① 还没动身（前置检查没过、状态是 RETRY）时就必须已经在认领窗口里；
+	 * ② 条目成功后（手臂正在收回 + 待机，状态 IDLE/RETRY）**仍然**在认领窗口里；
+	 * ③ 换到另一条条目时，认领的**目标跟着换**（不能还按着旧目标那一格）；
+	 * ④ 反例：反例条目（挖掘）不认领。
+	 * 把判据改回"看状态"，②会立刻变红（成功后的下一个 tick 状态已经不是 MOVING/EXECUTING）。
+	 */
+	private static void checkClaimFollowsIntent(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 70, 200, spawn.getZ() + 70);
+		BlockPos depotA = armPos.offset(2, 0, 0);
+		BlockPos depotB = armPos.offset(-2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldA = level.getBlockState(depotA);
+		BlockState oldB = level.getBlockState(depotB);
+		try {
+			BlockState depotState = stateOf("create:depot");
+			if (depotState == null) {
+				LOGGER.error("[selftest] 认领窗口自检**没跑起来**：找不到 create:depot");
+				return;
+			}
+			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
+				.defaultBlockState());
+			level.setBlockAndUpdate(depotA, depotState);
+			level.setBlockAndUpdate(depotB, depotState);
+			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 认领窗口自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32);
+
+			BlockPos offsetA = depotA.subtract(armPos);
+			BlockPos offsetB = depotB.subtract(armPos);
+			ArmProgram program = new ArmProgram();
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "自检认领";
+			ArmProgramEntry first = new ArmProgramEntry();
+			first.op = OperationType.TAKE;
+			first.offset = offsetA;
+			task.entries.add(first);
+			ArmProgramEntry second = new ArmProgramEntry();
+			second.op = OperationType.TAKE;
+			second.offset = offsetB;
+			task.entries.add(second);
+			program.tasks.add(task);
+			arm.setProgram(program);
+
+			// ① 一个 tick 都没伸过去：空载具 ⇒ 前置检查不过、状态进 RETRY —— 仍然必须认领
+			arm.runtime.tick(arm);
+			boolean claimsBeforeMoving = arm.canPinTarget();
+			boolean offsetFollowsFirst = offsetA.equals(arm.runtime.pinOffset(arm));
+			String precheckReason = arm.runtime.getLastFailure();
+			boolean ran = precheckReason != null; // 前提：这一 tick 真的跑了前置检查（否则等于没测）
+
+			// ② 让第一条**真的成功**（放到 A 里的物品被取走），然后在"收回 + 待机"期间看认领。
+			//    自检不跑运动学（`arm.tick()` 需要真实动力网络，见"出库顺序"那条的同样处理）：
+			//    每轮把 `chasedPointProgress` 置 1 当作"已到位"，其余全走**真实入口** `runtime.tick()`。
+			//    ⚠️ "成功了没有"必须用**与待测判据无关**的事实来判（A 里的物品没了），
+			//    不能用 `pinOffset` 自己 —— 否则判据一坏，这里就变成"没跑起来"，红得不明不白。
+			boolean fed = putOneInto(level, depotA);
+			boolean succeeded = false;
+			for (int i = 0; i < 200; i++) {
+				arm.chasedPointProgress = 1f;
+				arm.runtime.tick(arm);
+				if (isEmpty(level, depotA)) {
+					succeeded = true; // 物品真的被取走了 ⇒ 第一条成功、已经轮到第二条
+					break;
+				}
+			}
+			boolean claimsWhileRetracting = arm.canPinTarget();
+			// ③ 接下来几 tick（收回 + 待机整段）都要继续认领，且认领的是**新**目标
+			boolean claimsThroughout = true;
+			boolean offsetFollowsSecond = true;
+			for (int i = 0; i < 40; i++) {
+				arm.runtime.tick(arm);
+				claimsThroughout &= arm.canPinTarget();
+				offsetFollowsSecond &= offsetB.equals(arm.runtime.pinOffset(arm));
+			}
+
+			// ④ 反例：停机（无应力）时也仍然认领（原版语义，用户确认过）
+			arm.setSpeed(0);
+			boolean claimsWhileStopped = arm.canPinTarget();
+			arm.setSpeed(32);
+
+			LOGGER.info("[selftest] 认领窗口跟程序意图: 未动身就认领={}（前置检查跑了={}） 目标跟着第1条={} "
+				+ "第1条成功后仍在认领={}（真的成功了={}） 收回+待机整段都认领={} 目标跟着第2条={} 停机仍认领={}",
+				claimsBeforeMoving, ran, offsetFollowsFirst, claimsWhileRetracting, succeeded, claimsThroughout,
+				offsetFollowsSecond, claimsWhileStopped);
+
+			if (!ran)
+				LOGGER.error("[selftest] 认领窗口自检**没跑起来**：空载具时前置检查没报出原因 —— 等于没测");
+			else if (!fed)
+				LOGGER.error("[selftest] 认领窗口自检**没跑起来**：物品没能放进载具 A —— 后面那些断言等于没测");
+			else if (!succeeded)
+				LOGGER.error("[selftest] 认领窗口自检**没跑起来**：第一条条目一直没成功（最后一句原因「{}」）"
+					+ "—— 等于没测", text(arm.runtime.getLastFailure()));
+			if (!claimsBeforeMoving)
+				LOGGER.error("[selftest] 还没动身时**不在认领窗口里** —— 认领必须由程序意图决定"
+					+ "（当前条目是取物/组装就该认领），不能等手臂开始移动才认领："
+					+ "否则'空载具等物品'期间进来的物品谁都不按住，传送带直接把它带走");
+			if (!offsetFollowsFirst || !offsetFollowsSecond)
+				LOGGER.error("[selftest] 认领的目标**没有跟着当前条目换**（第1条={} 第2条一致={}）—— "
+					+ "会让手臂按着旧目标那一格上的物品，新目标那格却没人管", offsetFollowsFirst, offsetFollowsSecond);
+			if (!claimsWhileRetracting || !claimsThroughout)
+				LOGGER.error("[selftest] 条目成功后（手臂收回 + 待机期间）**松手了**（成功后={} 整段={}）—— "
+					+ "这正是 §7.22 引入的回归：那一整段没人认领，物品就从臂下流走", claimsWhileRetracting,
+					claimsThroughout);
+			if (!claimsWhileStopped)
+				LOGGER.error("[selftest] 停机（无应力）后不再认领 —— 与原版不一致（`ArmBlockEntity:133-140`）");
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 认领窗口自检抛异常：{}", t.toString());
+		} finally {
+			level.setBlockAndUpdate(depotA, oldA);
+			level.setBlockAndUpdate(depotB, oldB);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
 	}
 
 	/** 一次探测：摆上方块 → 问三件事（只进不出 / 是交互点 / 有通用物品能力）→ 还原方块。 */

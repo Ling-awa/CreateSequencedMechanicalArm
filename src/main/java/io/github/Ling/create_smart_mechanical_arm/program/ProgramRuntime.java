@@ -401,8 +401,9 @@ public class ProgramRuntime {
 			//   几 tick 它就走。立刻 `cancelMove()` 的话会变成"收回→再伸出去"的空转，观感就是卡顿
 			//   （用户第二十七轮续三十三）。所以给它一个**宽限期**（时长按带速算，见 transientBlockTicks）；
 			//   超过还没等到才折回待机 —— "空载具时原地待机"的语义不变，只是不再为一次短暂占用抖动画。
+			//   同样用 `retract()`：折回待机**不是松手**，认领还归程序意图管（见 §7.22 / pinOffset）。
 			if (waitElapsed >= arm.transientBlockTicks())
-				arm.cancelMove(); // 折回静止位待机；客户端靠相位变化做平滑插值
+				arm.retract(); // 折回静止位待机；客户端靠相位变化做平滑插值
 			setIdleCooldown(PRECHECK_RETRY_TICKS);
 			handleFailure(arm, task, entry, blocked);
 			return;
@@ -973,7 +974,11 @@ public class ProgramRuntime {
 		//   加工速率只受"物品到货速度 / 有没有输出空间"限制，而不是受手臂动作限制。
 		//   收回本身要时间（与伸展同一公式）⇒ 顺手给一个**等长的待机**让收回真的走完；
 		//   否则下一条会在收回刚开始时就把它截断，看起来只是"抖一下"。
-		arm.cancelMove();
+		//
+		// ⚠️ 用 `retract()` 而不是 `cancelMove()`：收回**不等于松手**。认领的寿命归程序意图管
+		//   （`pinOffset()`），这里一松手、下一 tick 又认领回来，物品会在带上被放开一格再拽回来
+		//   （用户第二十七轮续三十五："又变成无法定住被加工的物品了"）。
+		arm.retract();
 		setIdleCooldown(arm.swingTicks());
 
 		if (entry.onSuccess == SkipAction.SKIP_TO && !entry.successTarget.isBlank()) {
@@ -992,19 +997,91 @@ public class ProgramRuntime {
 	}
 
 	/**
-	 * 现在要不要**每 tick 续锁**目标上的物品（给 {@code SmartArmBlockEntity.tick()} 用）。
+	 * 现在要不要**认领并每 tick 续锁**目标上的物品（给 {@code SmartArmBlockEntity.tick()} 用）。
 	 *
-	 * <p>只对"从目标取东西"的条目（{@code TAKE} / {@code DEPLOY}）为真：这两类在**手臂伸过去的那段时间里**
-	 * 目标上的物品必须留在原地（传送带会把它带走）。投放类**不锁** —— 别为了一次投放把整条带子停住几秒。
+	 * <p>只对"从目标取东西 / 在目标上加工"的条目（{@code TAKE} / {@code DEPLOY}）为真：
+	 * 这两类要求目标上的物品**留在原地**等手臂（传送带会把它带走）。投放类（{@code DEPOSIT} 等）
+	 * **不认领** —— 别为了一次投放把整条带子停住几秒。
 	 *
-	 * <p>状态判据是 {@code MOVING + EXECUTING}：到位那一 tick 直到真正取物之间也要锁，
-	 * 这正是旧写法（只看 {@code chasedPointProgress < 1}）漏掉的那一格。
+	 * <p>⚠️ 判据**不再**看手臂状态（曾经是 {@code MOVING + EXECUTING}）。为什么：那样写的话，
+	 * 每物品一次伸收（§7.22）会让"收回 + 待机"那段时间完全没有认领 ⇒ 物品从臂下流走、定不住
+	 * （用户第二十七轮续三十五实测）。现在判据 = 当前条目是不是取物/组装（{@link #pinOffset}）。
 	 */
 	public boolean shouldPinTarget(SmartArmBlockEntity arm) {
-		if (state != EntryState.MOVING && state != EntryState.EXECUTING)
+		return pinOffset(arm) != null;
+	}
+
+	/**
+	 * 现在要认领的那个目标的偏移（相对本臂）；不认领时返回 {@code null}。
+	 *
+	 * <p><b>判据是"程序想干什么"，而不是"手臂现在处于什么状态"</b>（用户第二十七轮续三十五实测修正）：
+	 * 原来写成 {@code state ∈ {MOVING, EXECUTING}}，于是**每条条目结束后的收回 + 待机那段时间
+	 * 整条带子都不再被认领** —— 物品从臂下直接流过去、谁也定不住（"又变成无法定住被加工的物品了"）。
+	 * 而"手臂在折返/在等下一件"并不代表它不要那件物品：只要当前条目还是「取物 / 组装」，
+	 * 它就该继续把目标格里的物品按住。★ 这是"每物品一次伸收"（§7.22）与"定住物品"能同时成立的**唯一**
+	 * 分法：**动作归动作（相位/动画），认领归认领（程序意图）**，两者不再互相绑死。
+	 *
+	 * <p>顺带修掉一个更老的隐患：偏移取自**当前条目的目标**（持久化在卡的程序里），而不是
+	 * {@code movingOffset}（那是"上一次真的动过身"的目标）。换目标时旧写法会在新目标的
+	 * 前置检查期间继续按着**旧目标那一格**的物品。
+	 */
+	@Nullable
+	public BlockPos pinOffset(SmartArmBlockEntity arm) {
+		if (isHalted())
+			return null;
+		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
+		if (entry == null || !entry.op.requiresTarget())
+			return null;
+		if (entry.op != OperationType.TAKE && entry.op != OperationType.DEPLOY)
+			return null;
+		return offsetOf(arm, entry);
+	}
+
+	/**
+	 * 当前条目目标的那一格（相对本臂）；这条条目没有目标（等待类）时返回 {@code null}。
+	 *
+	 * <p>与 {@link #pinOffset} 的区别只有一条：**不看操作类型**。给"关心这一格本身"的用法
+	 * （带速宽限期、目标是不是带子）用 —— 那些地方不该因为条目是「投放」就退回旧位置。
+	 */
+	@Nullable
+	public BlockPos entryOffset(SmartArmBlockEntity arm) {
+		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
+		if (entry == null || !entry.op.requiresTarget())
+			return null;
+		return offsetOf(arm, entry);
+	}
+
+	/**
+	 * 这件物品**现在值得认领吗** —— 认领 = 用 {@code locked} 把它按在带子上等手臂来加工
+	 * （见 {@link SmartArmBlockEntity#updateBeltHold()}）。
+	 *
+	 * <p>为什么认领要过这一关：认领是**长期的**（跨条目、跨收回、跨待机），如果见谁按谁，
+	 * 刚加工出来的**产物**就会被按在原点动弹不得 —— 组装出来的东西恰好不再匹配配方，
+	 * 于是那条带子会被一件永远等不到加工的物品堵死。所以只认"这一条条目真的加工得了"的：
+	 * <ul>
+	 *   <li>{@code TAKE}：臂里放得下（放不下就别按着，让它流走，别把带子堵住）；</li>
+	 *   <li>{@code DEPLOY}：手上拿着应用物，且**这件物品匹配得到配方**（产物自然被排除）。</li>
+	 * </ul>
+	 * 这一步与前置检查用的是同一批事实，所以"认领了却永远加工不了"不会出现。
+	 */
+	public boolean canWorkOn(SmartArmBlockEntity arm, ItemStack stack) {
+		if (stack.isEmpty())
 			return false;
 		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
-		return entry != null && (entry.op == OperationType.TAKE || entry.op == OperationType.DEPLOY);
+		if (entry == null)
+			return false;
+		Level level = arm.getLevel();
+		if (level == null)
+			return false;
+		return switch (entry.op) {
+			case TAKE -> arm.canAccept(stack.copyWithCount(1));
+			case DEPLOY -> {
+				ItemStack applicator = arm.getHeldItem();
+				yield !applicator.isEmpty()
+					&& DeployRecipes.find(level, stack.copyWithCount(1), applicator) != null;
+			}
+			default -> false;
+		};
 	}
 
 	@Nullable
