@@ -43,6 +43,17 @@ public class ArmProgram {
 	public final List<ArmProgramTask> tasks = new ArrayList<>();
 
 	/**
+	 * 程序备注（PLAN.md §12.3b，NBT 键 {@code note}）：脚本文件最前面那段块注释。
+	 *
+	 * <p>与条目备注（{@link ArmProgramEntry#note}）共用同一个上限 {@link ArmProgramEntry#NOTE_MAX} 与
+	 * 同一套写法 —— 判据写两份必然漂移（决策 68/85），所以连"多行怎么存"都一模一样（存真换行）。
+	 *
+	 * <p><b>只由代码编辑 / 导入写</b>（GUI 里没有编辑入口，P1 不做）：这正是"文件头注释最稳"的形态 ——
+	 * GUI 根本不碰它，于是"GUI 改完再导出，注释还在"（§12.3a）。
+	 */
+	public String note = "";
+
+	/**
 	 * 世界内录入的"会话状态"：当前是录入还是编辑模式、正在编辑哪个任务。
 	 *
 	 * <p>为什么放在程序里而不是新建物品组件：这张卡的程序本来就是一个随卡走、且由服务端权威写入的
@@ -98,6 +109,10 @@ public class ArmProgram {
 		tag.put("tasks", list);
 		tag.putString("emode", editorMode);
 		tag.putInt("etask", editorTask);
+		// 非空才写（同 sigmode 的省字节做法，§12.3b）：程序备注是"大多数卡上都没有"的字段，
+		// 空字符串写进去只会让 128KB 预算里多占一份无用的键
+		if (!note.isEmpty())
+			tag.putString("note", note);
 		return tag;
 	}
 
@@ -106,6 +121,9 @@ public class ArmProgram {
 		program.absolute = tag.getBoolean("abs");
 		program.editorMode = tag.contains("emode") ? tag.getString("emode") : "RECORD";
 		program.editorTask = Math.max(0, tag.getInt("etask"));
+		// 备注**不在这里夹**：夹（截断）会让"文本 → 模型 → 文本"丢字（不变量 #1 死在这一步）。
+		// 上限的守门人只有两个：编译器（超了报错带行号，见 ScriptParser）与反编译后的文本本身。
+		program.note = tag.getString("note");
 		ListTag list = tag.getList("tasks", Tag.TAG_COMPOUND);
 		for (int i = 0; i < list.size(); i++)
 			program.tasks.add(ArmProgramTask.load(list.getCompound(i), registries));

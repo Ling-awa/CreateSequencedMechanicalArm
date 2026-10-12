@@ -33,6 +33,14 @@ public class ArmProgramTask {
 	public String name = "task";
 	public LoopType loop = LoopType.NONE;
 	public int loopCount = 1;
+	/**
+	 * 任务备注（PLAN.md §12.3b，NBT 键 {@code note}）：{@code task} 那一行的行尾注释，
+	 * 或紧跟其后的独占行注释块。
+	 *
+	 * <p>与条目备注共用同一个上限 {@link ArmProgramEntry#NOTE_MAX}（决策 68/85：同一件事不写两份判据），
+	 * 存的是**真换行**（多行注释原样进来）。GUI 里**没有**编辑入口 —— 它只由代码编辑 / 导入写（P1）。
+	 */
+	public String note = "";
 	/** 任务图标（可选）：编辑器幽灵槽里的物品，空 = 用默认的任务图标。 */
 	public ItemStack icon = ItemStack.EMPTY;
 	public final List<ArmProgramEntry> entries = new ArrayList<>();
@@ -53,6 +61,9 @@ public class ArmProgramTask {
 		tag.putString("name", name);
 		tag.putString("loop", loop.name());
 		tag.putInt("loopN", loopCount);
+		// 非空才写（同 sigmode 的省字节做法，§12.3b）
+		if (!note.isEmpty())
+			tag.putString("note", note);
 		if (!icon.isEmpty())
 			tag.put("icon", icon.saveOptional(registries));
 		ListTag list = new ListTag();
@@ -67,6 +78,8 @@ public class ArmProgramTask {
 		task.name = tag.contains("name") ? tag.getString("name") : "task";
 		task.loop = readLoop(tag.getString("loop"));
 		task.loopCount = Math.max(1, Math.min(MAX_LOOP_COUNT, tag.getInt("loopN")));
+		// 备注不在这里夹（见 ArmProgram.load 的说明）：截断会破坏"文本 → 模型 → 文本"的不变量 #1
+		task.note = tag.getString("note");
 		if (tag.contains("icon"))
 			task.icon = ItemStack.parseOptional(registries, tag.getCompound("icon"));
 		ListTag list = tag.getList("entries", Tag.TAG_COMPOUND);

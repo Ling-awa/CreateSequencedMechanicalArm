@@ -1066,9 +1066,105 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * <p>用户第二十七轮：<i>"鼠标移动到虚拟物品的位置的时候，如果有备注就显示备注内容，而不是「左键编辑」"</i>
 	 * —— 备注是玩家写给这一条的话，在列表里扫一眼就能读到它，比一句"左键编辑"有用得多。
 	 * 没有备注时才退回动作提示。
+	 *
+	 * <p>§12.3b 的两个新备注也挂在这里（P1 只从代码写，GUI 不给编辑入口）：
+	 * 任务页 ⇒ <b>任务备注</b>；操作页的第一张卡（= 主任务）⇒ <b>程序备注</b>。
+	 * 程序的备注只可能有一份，挂在"你打开编辑器看到的第一张卡"上是最不容易找错的位置。
 	 */
-	private List<Component> headerTooltip(Card card) {
-		return entryNoteTooltip(card.task ? null : entry(card));
+	private List<Component> headerTooltip(Card card, int index) {
+		List<Component> lines = new ArrayList<>(entryNoteTooltip(card.task ? null : entry(card)));
+		if (card.task) {
+			ArmProgramTask task = task(card.taskIndex);
+			if (task != null && !task.note.isBlank())
+				lines.addAll(noteBlock("entry.task_note", task.note));
+		} else if (index == 0 && program != null && !program.note.isBlank()) {
+			lines.addAll(noteBlock("entry.program_note", program.note));
+		}
+		return lines;
+	}
+
+	/**
+	 * 一段备注的悬停提示：「标题（灰）」+ **逐行原文**。
+	 *
+	 * <p>⚠️ 逐行的理由与 {@link #entryNoteTooltip} 完全相同（{@link ArmEntryText#noteLines}）：
+	 * 把带 {@code \n} 的整段塞进一个元素，在 tooltip 装得下屏幕时 NeoForge 不会断行，
+	 * {@code \n} 会被画成"缺字方框"（用户实测）。
+	 */
+	private static List<Component> noteBlock(String titleKey, String note) {
+		List<Component> lines = new ArrayList<>();
+		lines.add(tr(titleKey)
+			.copy()
+			.withStyle(ChatFormatting.GRAY));
+		for (String line : ArmEntryText.noteLines(note))
+			lines.add(Component.literal(line));
+		return lines;
+	}
+
+	/**
+	 * 自检：§12.3b 的两个新备注（程序备注 / 任务备注）要**真的挂在悬停提示上**。
+	 *
+	 * <p>为什么值得一条断言：这两处是**追加式**改动（决策：不叫醒 3800 行的编辑器），
+	 * 而"挂了但挂错卡片""多行又塞回一个元素"这两种错都不会报错 —— 只会表现为
+	 * "导出的代码注释在界面上看不见 / 看见一个缺字方框"。
+	 *
+	 * <p>判据与 {@link #noteTooltipProblem} 同源：**一行一个组件**，提示里不许出现含 {@code \n} 的元素。
+	 */
+	private static String programAndTaskNoteProblem(Inventory inventory, RegistryAccess registries) {
+		ArmProgram program = new ArmProgram();
+		program.note = "程序备注一\n程序备注二";
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检";
+		task.note = "任务备注一\n任务备注二";
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.TAKE;
+		entry.note = "条目备注";
+		task.entries.add(entry);
+		program.tasks.add(task);
+
+		ItemStack card = new ItemStack(SmartArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CardProgramStorage.write(card, program, registries);
+		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+		ItemStack.STREAM_CODEC.encode(buffer, card);
+		ArmProgramScreen screen = new ArmProgramScreen(new ArmProgramMenu(0, inventory, buffer), inventory, tr("title"));
+
+		// 操作页的第一张卡 = 主任务 ⇒ 应当带上程序备注；任务页的那张卡 ⇒ 应当带上任务备注
+		screen.page = Page.ENTRIES;
+		List<Card> entryCards = screen.layout();
+		if (entryCards.isEmpty())
+			return "自检数据里没有条目卡片";
+		List<Component> firstTip = screen.headerTooltip(entryCards.get(0), 0);
+		screen.page = Page.TASKS;
+		List<Card> taskCards = screen.layout();
+		if (taskCards.isEmpty())
+			return "自检数据里没有任务卡片";
+		List<Component> taskTip = screen.headerTooltip(taskCards.get(0), 0);
+
+		for (Component line : firstTip)
+			if (line.getString()
+				.contains("\n"))
+				return "程序备注的提示里有含 \\n 的整段文字（会被画成缺字方框）";
+		for (Component line : taskTip)
+			if (line.getString()
+				.contains("\n"))
+				return "任务备注的提示里有含 \\n 的整段文字（会被画成缺字方框）";
+
+		boolean programHead = firstTip.stream()
+			.anyMatch(line -> line.getString()
+				.equals(tr("entry.program_note").getString()));
+		boolean programBody = firstTip.stream()
+			.anyMatch(line -> line.getString()
+				.equals("程序备注二"));
+		boolean taskHead = taskTip.stream()
+			.anyMatch(line -> line.getString()
+				.equals(tr("entry.task_note").getString()));
+		boolean taskBody = taskTip.stream()
+			.anyMatch(line -> line.getString()
+				.equals("任务备注二"));
+		if (!programHead || !programBody)
+			return "程序备注没有挂到操作页第一张卡的悬停提示上（标题=" + programHead + " 正文=" + programBody + "）";
+		if (!taskHead || !taskBody)
+			return "任务备注没有挂到任务页那张卡的悬停提示上（标题=" + taskHead + " 正文=" + taskBody + "）";
+		return null;
 	}
 
 	/**
@@ -1164,7 +1260,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			// 标题芯片 → 编辑（操作页=必填信息：动作+坐标；任务页=任务名）
 			if (x > 25 && x <= 25 + headerWidth(card, i) && localY > 4 && localY <= 20) {
 				lastHit = "header";
-				tooltip(graphics, mx, my, headerTooltip(card));
+				tooltip(graphics, mx, my, headerTooltip(card, i));
 				if (click == 0) {
 					status = "";
 					openEditor(card, null);
@@ -3053,6 +3149,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (noteTip != null && problem == null)
 				problem = "备注提示: " + noteTip;
 
+			// §12.3b：程序备注 / 任务备注的悬停提示（脚本导入写进去的那两个字段必须在界面上看得见）
+			String scriptNotes = programAndTaskNoteProblem(inventory, registries);
+			if (scriptNotes != null && problem == null)
+				problem = "脚本备注: " + scriptNotes;
+
 			screen.editingProp = null;
 			screen.editing = null;
 			screen.menu.slotsActive = false;
@@ -3903,6 +4004,20 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	};
 
 	/**
+	 * 脚本（§12 的 P1）用到的**全部**键。
+	 *
+	 * <p>为什么值得单独列一张表：脚本的三个命令的反馈是**热键映射的字符串**（{@code code.check_failed} 之类），
+	 * 键名打错的表现是"聊天栏显示原始 key"——编译、运行都不报错，而玩家一眼就看见。
+	 * 除命令反馈外还有 §12.3b 那两个新备注的悬停标题（现在挂在标题芯片上）。
+	 */
+	private static final String[] SCRIPT_LANG_KEYS = {
+		"need_player", "bad_name", "read_failed", "check_ok", "check_failed", "warning",
+		"export_need_card", "export_empty", "export_header", "export_written", "export_failed",
+		"import_need_card", "import_over_limit", "import_too_large", "import_ok",
+		"program_note", "task_note"
+	};
+
+	/**
 	 * 自检 12：两个语言文件的**键集必须完全一致**，且本轮要用的键都得在（§7.16b 四 断言 12）。
 	 *
 	 * <p>为什么值得一条断言：`opt.<枚举小写>` 是**派生**出来的键，枚举一改名（`WAIT_SIGNAL → SIGNAL`）
@@ -3930,6 +4045,18 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			List<String> missing = new ArrayList<>();
 			for (String key : SIGNAL_LANG_KEYS) {
 				String full = prefix + key;
+				if (!zh.containsKey(full))
+					missing.add("zh:" + key);
+				if (!en.containsKey(full))
+					missing.add("en:" + key);
+			}
+			// 脚本的键挂在**另一个前缀**下：命令反馈在 `create_smart_mechanical_arm.code.*`，
+			// 两个备注的悬停标题在 `create_smart_mechanical_arm.gui.editor.entry.*`
+			for (String key : SCRIPT_LANG_KEYS) {
+				boolean command = key.startsWith("export") || key.startsWith("import")
+					|| key.equals("need_player") || key.equals("bad_name") || key.equals("read_failed")
+					|| key.equals("check_ok") || key.equals("check_failed") || key.equals("warning");
+				String full = command ? "create_smart_mechanical_arm.code." + key : prefix + "entry." + key;
 				if (!zh.containsKey(full))
 					missing.add("zh:" + key);
 				if (!en.containsKey(full))

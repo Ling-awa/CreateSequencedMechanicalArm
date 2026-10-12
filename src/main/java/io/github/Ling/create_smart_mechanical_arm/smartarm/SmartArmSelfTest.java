@@ -1,6 +1,7 @@
 package io.github.Ling.create_smart_mechanical_arm.smartarm;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,17 +45,21 @@ import io.github.Ling.create_smart_mechanical_arm.program.DeployRecipes;
 import io.github.Ling.create_smart_mechanical_arm.program.ProgramCoordinates;
 import io.github.Ling.create_smart_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_smart_mechanical_arm.program.OperationType;
+import io.github.Ling.create_smart_mechanical_arm.program.script.ScriptCompiler;
+import io.github.Ling.create_smart_mechanical_arm.program.script.ScriptResult;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtUtils;
+import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -69,6 +74,7 @@ import net.minecraft.world.entity.MobSpawnType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.DyedItemColor;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.level.Level;
@@ -153,6 +159,7 @@ public class SmartArmSelfTest {
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
 		checkProgramSize(server);
+		checkScriptRoundTrip(server);
 
 		for (Map.Entry<String, Supplier<ArmProgram>> preset : DevPresets.all()
 			.entrySet()) {
@@ -220,6 +227,18 @@ public class SmartArmSelfTest {
 						LOGGER.error("[selftest] preset {} 有一条「收发信号」没绑频率", preset.getKey());
 				}
 			}
+		}
+
+		// 自检跑完**自己退出**（只在开关打开时）—— 这是给"跑一次自检验证改动"用的时间账优化：
+		// 服务器不退出的话，`runServer` 只能挂到超时被杀，每次迭代白等两分钟；而且"被超时杀掉"是 exit 1，
+		// 与"编译真的失败"长得一模一样（本项目为这个混淆过）。开关由 build.gradle 的 server run 从
+		// `-PsmaSelfTest=exit` 透传（见 build.gradle 里那条 systemProperty），常规手动 `runServer` 不受影响。
+		if (Boolean.getBoolean("create_smart_mechanical_arm.selftest.exit")) {
+			LOGGER.info("[selftest] selftest.exit=true ⇒ 自检结束，请求服务器退出（日志到此为止就是全部结果）");
+			// 另起一个守护线程调 halt(false)：它不 join 服务器线程，但**万一它阻塞**也不会把启动流程卡死。
+			Thread exit = new Thread(() -> server.halt(false), "smartarm-selftest-exit");
+			exit.setDaemon(true);
+			exit.start();
 		}
 	}
 
@@ -2800,6 +2819,666 @@ public class SmartArmSelfTest {
 		ArmProgram program = CardProgramStorage.read(card, registries);
 		CardEditPacket.removeAt(player, card, program, registries, pos);
 	}
+
+	// ————————————————————————— 脚本语言（§12 的 P1） —————————————————————————
+
+	/**
+	 * 脚本文本 ↔ 操作表的两条往返不变量（§12.4，P1 的验收硬指标）。
+	 *
+	 * <p><b>为什么要这两条</b>：文本一旦与模型不一致，它就变成**第三个真理来源**
+	 * —— 与决策 68/85 记的"判据写两份必然漂移"是同一个病。
+	 * ① {@code compile(decompile(p)) ≡ p} 保证"导出再导入 = 什么都没变"（不会静默丢字段）；
+	 * ② {@code decompile(compile(t)) == canonical(t)} 保证"写出来的文本就是规范形式"。
+	 *
+	 * <p>语料分两半：**真实预设**（{@code /smartarm card <预设>} 用的那一批，全是会被存进卡的程序）
+	 * 与**手写用例**（多行注释、含 {@code *&#47;} 的备注、超限备注、未知任务/物品、越界数值、
+	 * 全部操作类型、{@code #RRGGBB} 染色、完整 SNBT 物品）。
+	 *
+	 * <p><b>反证（决策 68：新守卫必须做一次"反证"，确认它真的会红）</b> —— 都只需改一行、跑一次启动：
+	 * <ol>
+	 *   <li>把 {@code ScriptDecompiler.writeSuffixes} 里 {@code if (entry.count != 1)} 改成 {@code if (false)}
+	 *       ⇒ 抽到取物条目的 count 会丢 ⇒ {@code [selftest] 脚本不变量①…} 必须报出「count」那条差异；</li>
+	 *   <li>把 {@code time(...)} 的单位后缀全改成 {@code "t"} ⇒ 单位丢失 ⇒ 不变量①必须红；</li>
+	 *   <li>把 {@code ScriptParser.attachComment} 里的 {@code ctx.owner} 改成永远 {@code PROGRAM}
+	 *       ⇒ 条目备注全挂到程序备注上 ⇒ {@code 注释归属} 与不变量①同时红；</li>
+	 *   <li>把 {@code noteSuffix} 的 {@code note.contains("*&#47;")} 判断去掉（一律用块注释）
+	 *       ⇒ 含 {@code *&#47;} 的备注把注释提前闭合 ⇒ 不变量①必须红（保底形式那条用例）；</li>
+	 *   <li>{@code ArmProgram.save} 里把 {@code if (!note.isEmpty())} 改成 {@code if (false)}
+	 *       ⇒ 程序备注丢 ⇒ "程序备注进 NBT"那行必须报红。</li>
+	 * </ol>
+	 */
+	private static void checkScriptRoundTrip(MinecraftServer server) {
+		HolderLookup.Provider registries = server.registryAccess();
+		List<String> problems = new ArrayList<>();
+
+		// ① 真实预设：全部导出 → 编译 → 比字段（含程序/任务/条目备注，§12.4 的"逐字段"）
+		int presets = 0;
+		int presetProblems = problems.size();
+		for (Map.Entry<String, Supplier<ArmProgram>> entry : DevPresets.all()
+			.entrySet()) {
+			presets++;
+			ArmProgram original = entry.getValue()
+				.get();
+			String text = ScriptCompiler.decompile(original, registries);
+			ScriptResult<ArmProgram> compiled = ScriptCompiler.compile(text, registries);
+			if (compiled.hasErrors()) {
+				problems.add("预设 " + entry.getKey() + " 反编译出来的文本编译不过：" + ScriptCompiler.errorLines(compiled.errors()));
+				continue;
+			}
+			String difference = scriptDifference(original, compiled.value());
+			if (difference != null)
+				problems.add("预设 " + entry.getKey() + " 的不变量①不成立：" + difference);
+			// ② 规范形式：同一份模型写两次必须一字不差（这条挂了，说明反编译器里藏了随机/顺序依赖）
+			String again = ScriptCompiler.decompile(compiled.value(), registries);
+			if (!text.equals(again))
+				problems.add("预设 " + entry.getKey() + " 的反编译不是幂等的（两次输出不同）");
+		}
+		LOGGER.info("[selftest] 脚本不变量①（真实预设）: {} 份预设，逐字段等价失败 {} 处", presets,
+			problems.size() - presetProblems);
+
+		// ② 手写语料：覆盖"文本面"的那些写法（含全部操作类型、三种物品写法、两种备注写法）
+		int corpus = 0;
+		int corpusProblems = problems.size();
+		for (Map.Entry<String, String> sample : SCRIPT_CORPUS.entrySet()) {
+			corpus++;
+			String source = sample.getValue();
+			ScriptResult<ArmProgram> first = ScriptCompiler.compile(source, registries);
+			if (first.hasErrors()) {
+				problems.add("语料 " + sample.getKey() + " 编译不过：" + ScriptCompiler.errorLines(first.errors()));
+				continue;
+			}
+			String canonical = ScriptCompiler.decompile(first.value(), registries);
+			ScriptResult<ArmProgram> second = ScriptCompiler.compile(canonical, registries);
+			if (second.hasErrors()) {
+				problems.add("语料 " + sample.getKey() + " 的规范形式编译不过：" + ScriptCompiler.errorLines(second.errors()));
+				continue;
+			}
+			// ★ 不变量 #2：decompile(compile(t)) == canonical(t)
+			//   （canonical(t) = decompile(compile(t))，所以这条的实质是"再走一轮输出不变"）
+			String canonicalAgain = ScriptCompiler.decompile(second.value(), registries);
+			if (!canonical.equals(canonicalAgain))
+				problems.add("语料 " + sample.getKey() + " 的不变量②不成立（规范形式再编译后变了）");
+			// ★ 不变量 #1 在语料上也要成立：compile(canonical) ≡ compile(t)
+			String difference = scriptDifference(first.value(), second.value());
+			if (difference != null)
+				problems.add("语料 " + sample.getKey() + " 的不变量①不成立：" + difference);
+		}
+		LOGGER.info("[selftest] 脚本不变量②（手写语料）: {} 份语料，规范形式失败 {} 处", corpus,
+			problems.size() - corpusProblems);
+
+		// ③ 注释 = 备注的**归属**（§12.3a）：三种归属各一条，逐字符比对
+		ScriptResult<ArmProgram> notes = ScriptCompiler.compile(SCRIPT_NOTES_SAMPLE, registries);
+		boolean notesCompiled = !notes.hasErrors();
+		String programNote = notesCompiled ? notes.value().note : "";
+		String taskNote = notesCompiled && !notes.value().tasks.isEmpty() ? notes.value().tasks.get(0).note : "";
+		String entryNote = notesCompiled && !notes.value().tasks.isEmpty() && !notes.value().tasks.get(0).entries.isEmpty()
+			? notes.value().tasks.get(0).entries.get(0).note
+			: "";
+		// ⚠️ "编译不过"要先报，别的判据都在它成立的前提下才有意义（第一版把顺序写反，
+		//   编译失败时会额外报三条"备注丢了"的假错 —— 决策 85："只量该量的东西"）。
+		boolean programNoteOk = notesCompiled && "程序备注\n第二行".equals(programNote);
+		boolean taskNoteOk = notesCompiled && "任务备注".equals(taskNote);
+		boolean entryNoteOk = notesCompiled && "条目备注\n第二行".equals(entryNote);
+		// 块注释与 note="…" 是同一个字段的两种写法（§12.3a 细则 3），编译后必须一模一样
+		ScriptResult<ArmProgram> quoted = ScriptCompiler.compile(SCRIPT_QUOTED_NOTE_SAMPLE, registries);
+		boolean quotedOk = !quoted.hasErrors() && !quoted.value().tasks.isEmpty()
+			&& !quoted.value().tasks.get(0).entries.isEmpty()
+			&& quoted.value().tasks.get(0).entries.get(0).note.equals("条目备注\n第二行");
+		LOGGER.info("[selftest] 脚本注释归属: 程序备注={} 任务备注={} 条目备注={} 保底写法同值={} （程序=[{}] 任务=[{}] 条目=[{}]）",
+			programNoteOk, taskNoteOk, entryNoteOk, quotedOk, showNote(programNote), showNote(taskNote), showNote(entryNote));
+		if (!notesCompiled)
+			problems.add("注释归属用例编译不过：" + ScriptCompiler.errorLines(notes.errors()));
+		if (!programNoteOk)
+			problems.add("文件最前面的注释块没有变成程序备注：[ " + showNote(programNote) + " ]");
+		if (!taskNoteOk)
+			problems.add("task 行尾的注释没有变成任务备注：[ " + showNote(taskNote) + " ]");
+		if (!entryNoteOk)
+			problems.add("条目行尾 / 紧跟其后的注释没有变成条目备注：[ " + showNote(entryNote) + " ]");
+		if (!quotedOk)
+			problems.add("note=\"…\" 保底写法与块注释不产生同一个备注（两种写法必须是一个字段）");
+
+		// ④ 两个新字段的 NBT 往返（§12.3b：**非空才写**）
+		ArmProgram noteProgram = notesCompiled ? notes.value() : new ArmProgram();
+		CompoundTag noteTag = noteProgram.save(registries);
+		boolean programNoteKey = noteTag.contains("note");
+		boolean taskNoteKey = !noteTag.getList("tasks", Tag.TAG_COMPOUND)
+			.isEmpty()
+			&& noteTag.getList("tasks", Tag.TAG_COMPOUND)
+				.getCompound(0)
+				.contains("note");
+		ArmProgram noteBack = ArmProgram.load(noteTag, registries);
+		boolean noteTextKept = noteBack.note.equals(programNote)
+			&& (noteBack.tasks.isEmpty() || noteBack.tasks.get(0).note.equals(taskNote));
+		ArmProgram plain = new ArmProgram();
+		plain.tasks.add(new ArmProgramTask());
+		boolean emptyNotWritten = !plain.save(registries)
+			.contains("note")
+			&& !plain.save(registries)
+				.getList("tasks", Tag.TAG_COMPOUND)
+				.getCompound(0)
+				.contains("note");
+		LOGGER.info("[selftest] 脚本备注字段: 程序 note 键={} 任务 note 键={} 文本保真={} 空备注不写键={}", programNoteKey,
+			taskNoteKey, noteTextKept, emptyNotWritten);
+		if (!programNoteKey || !taskNoteKey)
+			problems.add("程序 / 任务备注没有写进 NBT（键 note 缺失）—— 导出再导入会丢注释");
+		if (!noteTextKept)
+			problems.add("程序 / 任务备注过不了 NBT 往返");
+		if (!emptyNotWritten)
+			problems.add("空备注也被写进了 NBT（§12.3b 要求非空才写）");
+
+		// ⑤ 编译期必须报错的那些（§12.3 的净收益）：每条都要报在**写那一行**上
+		String overLongNote = "x".repeat(ArmProgramEntry.NOTE_MAX + 1);
+		boolean overLongReported = reportsAt(registries,
+			"task main\n  take @rel 0 0 0 /*" + overLongNote + "*/\n", 2, "128");
+		boolean unknownTaskReported = reportsAt(registries,
+			"task main\n  call 不存在的任务\n", 2, "unknown task") && reportsAt(registries,
+				"task main\n  take @rel 0 0 0 fail=goto 不存在的任务\n", 2, "unknown task");
+		// 未知任务名要**列出已知任务名**（用户点名要的：{@code unknown task: cook_wok} + 已知清单）
+		ScriptResult<ArmProgram> unknownTask = ScriptCompiler.compile("task main\n  call 没有这个\n", registries);
+		boolean knownListed = !unknownTask.hasErrors() || unknownTask.errors()
+			.stream()
+			.anyMatch(error -> error.message()
+				.contains("main"));
+		boolean unknownItemReported = reportsAt(registries, "task main\n  take @rel 0 0 0 icon=notamod:no_such_item\n", 2,
+			"未知物品");
+		boolean badCountReported = reportsAt(registries, "task main\n  take @rel 0 0 0 count=65\n", 2, "count");
+		boolean badCoordReported = reportsAt(registries, "task main\n  take @rel 0 0 999999999\n", 2, "坐标");
+		boolean badOpReported = reportsAt(registries, "task main\n  teleport @rel 0 0 0\n", 2, "未知操作");
+		boolean badModeReported = reportsAt(registries, "task main\n  signal recv_x on freq=iron_ingot\n", 2, "信号模式");
+		boolean missingFreqReported = reportsAt(registries, "task main\n  signal recv on\n", 2, "频率");
+		// ⚠️ `/*` 在**引号外**才算注释开头（§12.3a 细则 2），所以这里必须用真的注释、
+		// 而不是 "引号里带 /* 的字符串"：后者正是那条细则要保护的写法。
+		boolean unclosedCommentReported = reportsAt(registries, "task main\n  take @rel 0 0 0 /* 没闭合\n", 2, "没有闭合");
+		LOGGER.info(
+			"[selftest] 脚本编译期错误: 超长备注={} 未知任务={} 已知任务名列出={} 未知物品={} 个数越界={} 坐标越界={} 未知操作={} 未知模式={} 缺频率={} 注释未闭合={}",
+			overLongReported, unknownTaskReported, knownListed, unknownItemReported, badCountReported, badCoordReported,
+			badOpReported, badModeReported, missingFreqReported, unclosedCommentReported);
+		if (!overLongReported)
+			problems.add("超过 " + ArmProgramEntry.NOTE_MAX + " 字的备注没有报错（静默截断会破坏不变量①）");
+		if (!unknownTaskReported)
+			problems.add("未知任务名没有在编译期报错（这是跳转只认任务名换来的净收益）");
+		if (!knownListed)
+			problems.add("未知任务名的错误里没有列出已知任务名");
+		if (!unknownItemReported)
+			problems.add("未知物品 id 没有报错");
+		if (!badCountReported)
+			problems.add("count 越界（65）没有报错");
+		if (!badCoordReported)
+			problems.add("坐标越界没有报错");
+		if (!badOpReported)
+			problems.add("未知操作名没有报错");
+		if (!badModeReported)
+			problems.add("未知信号模式没有报错");
+		if (!missingFreqReported)
+			problems.add("signal 没绑频率没有报错（那条条目会永远等不到）");
+		if (!unclosedCommentReported)
+			problems.add("块注释没有闭合没有报错");
+
+		// ⑥ 物品的三种写法（§12.1）：只有"无组件 / 唯一组件是染色 / 其它"这三种输出
+		ItemStack plainItem = new ItemStack(Items.IRON_INGOT);
+		ItemStack dyed = new ItemStack(Items.LEATHER_HELMET);
+		dyed.set(DataComponents.DYED_COLOR, new DyedItemColor(0xC41E3A, true));
+		ItemStack bannered = new ItemStack(Items.BLACK_BANNER);
+		// ⚠️ 必须**真给一个组件**：空白旗帜本来就没有组件，写成裸 id 才是对的（原来这条断言因此假红）。
+		//    用 `custom_name` 还有个好处：它**不参与频率身份**（§12.2）⇒ 顺带覆盖"组件不影响频率"的那种物品。
+		bannered.set(DataComponents.CUSTOM_NAME, Component.literal("示例"));
+		ArmProgram itemProbe = new ArmProgram();
+		ArmProgramTask itemTask = new ArmProgramTask();
+		itemTask.name = "物品";
+		ArmProgramEntry ta = new ArmProgramEntry();
+		ta.op = OperationType.TAKE;
+		ta.offset = new BlockPos(1, 0, 0);
+		ta.icon = plainItem;
+		ArmProgramEntry tb = new ArmProgramEntry();
+		tb.op = OperationType.TAKE;
+		tb.offset = new BlockPos(2, 0, 0);
+		tb.icon = dyed;
+		ArmProgramEntry tc = new ArmProgramEntry();
+		tc.op = OperationType.TAKE;
+		tc.offset = new BlockPos(3, 0, 0);
+		tc.icon = bannered;
+		itemTask.entries.add(ta);
+		itemTask.entries.add(tb);
+		itemTask.entries.add(tc);
+		itemProbe.tasks.add(itemTask);
+		String itemText = ScriptCompiler.decompile(itemProbe, registries);
+		boolean plainWritten = itemText.contains("icon=minecraft:iron_ingot")
+			&& !itemText.contains("icon={id:\"minecraft:iron_ingot\"");
+		boolean sugarWritten = itemText.contains("#C41E3A");
+		// 完整 SNBT 的键顺序是 codec 的字典序（components 在 id 之前），所以不能断言 `icon={id:…`
+		boolean snbtWritten = itemText.contains("icon={components:") && itemText.contains("id:\"minecraft:black_banner\"");
+		ScriptResult<ArmProgram> itemBack = ScriptCompiler.compile(itemText, registries);
+		boolean sugarKept = !itemBack.hasErrors() && itemBack.value().tasks.get(0).entries.get(1)
+			.icon.get(DataComponents.DYED_COLOR) != null
+			&& itemBack.value().tasks.get(0).entries.get(1)
+				.icon.get(DataComponents.DYED_COLOR)
+				.rgb() == 0xC41E3A;
+		String itemDump = itemText.replace("\n", " ⏎ ");
+		if (itemDump.length() > 400)
+			itemDump = itemDump.substring(0, 400) + "…";
+		LOGGER.info("[selftest] 脚本物品写法: 无组件只写 id={} 唯一染色用 #RRGGBB={} 其它写完整 SNBT={} 染色往返={} 全文=[{}]",
+			plainWritten, sugarWritten, snbtWritten, sugarKept, itemDump);
+		if (!plainWritten)
+			problems.add("无组件物品没有写成简写 id（§12.1 的规范形式）");
+		if (!sugarWritten)
+			problems.add("唯一组件是染色时没有写成 #RRGGBB");
+		if (!snbtWritten)
+			problems.add("带其它组件的物品没有写成完整 SNBT");
+		if (!sugarKept)
+			problems.add("#RRGGBB 染色过不了往返");
+
+		// ⑦ 备注与 128KB 预算的量化（§12.3a 细则 4：注释不是免费的）
+		ArmProgram budgetProbe = new ArmProgram();
+		budgetProbe.note = "汉".repeat(ArmProgramEntry.NOTE_MAX);
+		ArmProgramTask budgetTask = new ArmProgramTask();
+		budgetTask.name = "预算";
+		budgetTask.note = "汉".repeat(ArmProgramEntry.NOTE_MAX);
+		budgetProbe.tasks.add(budgetTask);
+		int withNotes = budgetProbe.save(registries)
+			.sizeInBytes();
+		budgetProbe.note = "";
+		budgetTask.note = "";
+		int withoutNotes = budgetProbe.save(registries)
+			.sizeInBytes();
+		boolean noteCostSane = withNotes > withoutNotes;
+		LOGGER.info("[selftest] 脚本备注预算: 满备注程序 {} 字节 vs 无备注 {} 字节 ⇒ 两条满备注 ≈ {} 字节（128KB 的 {}%）",
+			withNotes, withoutNotes, withNotes - withoutNotes,
+			String.format(java.util.Locale.ROOT, "%.1f", (withNotes - withoutNotes) * 100.0 / ArmProgramEditPacket.MAX_TAG_BYTES));
+		if (!noteCostSane)
+			problems.add("备注没有参与 NBT 体积（预算讨论无从谈起）");
+
+		// ⑧ 程序头（§12.3 末尾，主代理 87①）：文本首行的坐标空间就是 ArmProgram.absolute。
+		//    反编译器**永远写**；编译器缺省按 rel；导入时与手持卡形态不符是命令层的硬错（游戏内人工确认）。
+		//    注意（假红修掉）：原来这里复用上面那个 `budgetTask`，而它**一条条目都没有** ⇒
+		//    `anyMatch(entry -> entry.absolute)` 必然 false —— 一条永远红的断言等于没测。
+		ArmProgram absProgram = new ArmProgram();
+		absProgram.absolute = true;
+		ArmProgramTask absTask = new ArmProgramTask();
+		absTask.name = "绝对";
+		ArmProgramEntry absEntry = new ArmProgramEntry();
+		absEntry.op = OperationType.TAKE;
+		absEntry.absolute = true;
+		absEntry.offset = new BlockPos(10, 64, -3);
+		absTask.entries.add(absEntry);
+		absProgram.tasks.add(absTask);
+		String absText = ScriptCompiler.decompile(absProgram, registries);
+		ScriptResult<ArmProgram> absBack = ScriptCompiler.compile(absText, registries);
+		boolean headerAlwaysWritten = absText.startsWith("@abs\n") && itemText.startsWith("@rel\n");
+		boolean headerRoundTrip = !absBack.hasErrors() && absBack.value().absolute;
+		boolean headerAbsKept = absBack.value().tasks.stream()
+			.flatMap(task -> task.entries.stream())
+			.anyMatch(entry -> entry.absolute);
+		//    缺省（不写程序头）= rel：老的手写文本与老导出文件都吃得下
+		ScriptResult<ArmProgram> noHeader = ScriptCompiler.compile("task main\n  take @rel 0 0 0\n", registries);
+		boolean headerDefaultsRel = !noHeader.hasErrors() && !noHeader.value().absolute;
+		boolean headerAfterTaskReported = reportsAt(registries, "task main\n  @abs\n", 2, "第一行");
+		boolean doubleHeaderReported = reportsAt(registries, "@rel\n@abs\ntask main\n  take @rel 0 0 0\n", 2, "只能有一行");
+		boolean headerExtraReported = reportsAt(registries, "@abs 1 2 3\ntask main\n  take @rel 0 0 0\n", 1, "后面不能再有");
+		LOGGER.info("[selftest] 脚本程序头: 反编译永远写={} @abs往返={} 条目绝对性保留={} 缺省=rel={} 晚写报错={} 重复报错={} 多余记号报错={}",
+			headerAlwaysWritten, headerRoundTrip, headerAbsKept, headerDefaultsRel, headerAfterTaskReported,
+			doubleHeaderReported, headerExtraReported);
+		if (!headerAlwaysWritten)
+			problems.add("反编译器没有永远写出程序头 @abs/@rel（导出再导入会把坐标空间静默改掉）");
+		if (!headerRoundTrip)
+			problems.add("@abs 程序头过不了往返（绝对坐标表会被读成相对）");
+		if (!headerAbsKept)
+			problems.add("绝对程序里的条目绝对性丢了");
+		if (!headerDefaultsRel)
+			problems.add("不写程序头时没有缺省成 rel");
+		if (!headerAfterTaskReported)
+			problems.add("程序头写在 task 之后没有报错");
+		if (!doubleHeaderReported)
+			problems.add("程序头写了两行没有报错");
+		if (!headerExtraReported)
+			problems.add("程序头后面跟了别的东西没有报错");
+
+		// ⑨ §12.3a 第 6 条：同一个归属对象上的两块注释**合并**成一个备注（换行连接），不报错
+		ScriptResult<ArmProgram> merged = ScriptCompiler.compile(SCRIPT_MERGED_NOTE_SAMPLE, registries);
+		boolean mergedCompiled = !merged.hasErrors();
+		String mergedNote = mergedCompiled && !merged.value().tasks.isEmpty()
+			&& !merged.value().tasks.get(0).entries.isEmpty() ? merged.value().tasks.get(0).entries.get(0).note : "";
+		// 期望值**带首尾空格**：`/* 行尾一句 */` 的块体原样就是" 行尾一句 "（§12.3a 逐字符原样），
+		// 少写空格会把一条正确实现判红。
+		boolean mergedOk = mergedCompiled && " 行尾一句 \n 紧接着再补一句 ".equals(mergedNote);
+		boolean noQuotedDuplicateError = mergedCompiled || merged.errors()
+			.stream()
+			.noneMatch(error -> error.message()
+				.contains("已经有一个备注"));
+		boolean mergedCanonicalKeeps = mergedCompiled && ScriptCompiler.canonical(SCRIPT_MERGED_NOTE_SAMPLE, registries)
+			.contains("行尾一句") && ScriptCompiler.canonical(SCRIPT_MERGED_NOTE_SAMPLE, registries)
+				.contains("紧接着再补一句");
+		LOGGER.info("[selftest] 脚本两块注释合并: 编译通过={} 备注=[{}] 没有报重复={} 规范形式两块都在={}", mergedCompiled,
+			showNote(mergedNote), noQuotedDuplicateError, mergedCanonicalKeeps);
+		if (!mergedCompiled)
+			problems.add("两块注释（行尾 + 紧跟独占行）被当成错误了：" + ScriptCompiler.errorLines(merged.errors()));
+		if (!mergedOk)
+			problems.add("两块注释没有合并成换行连接的备注：[ " + showNote(mergedNote) + " ]");
+		if (!mergedCanonicalKeeps)
+			problems.add("两块注释合并后再反编译，备注内容丢了");
+
+		// ⑨b 写在条目**上面**的注释归**上一条**（§12.3a 唯一那条规则：归"上面最近的那个拥有备注的东西"）
+		ScriptResult<ArmProgram> leading = ScriptCompiler.compile(
+			"task main\n  take @rel 0 0 0\n  /* 上面那句的说明 */\n  take @rel 1 0 0\n", registries);
+		ArmProgramTask leadingTask = leading.hasErrors() || leading.value().tasks.isEmpty() ? null
+			: leading.value().tasks.get(0);
+		boolean leadingHasTwo = leadingTask != null && leadingTask.entries.size() > 1;
+		String leadingFirst = leadingHasTwo ? leadingTask.entries.get(0).note : "";
+		String leadingSecond = leadingHasTwo ? leadingTask.entries.get(1).note : "";
+		boolean leadingOk = !leading.hasErrors() && " 上面那句的说明 ".equals(leadingFirst) && leadingSecond.isEmpty();
+		LOGGER.info("[selftest] 脚本注释归属(写在上面): 归上一条={} 上一条备注=[{}] 下一条备注=[{}]", leadingOk,
+			showNote(leadingFirst), showNote(leadingSecond));
+		if (!leadingOk)
+			problems.add("写在条目上面的注释没有归到**上一条**：[上=" + showNote(leadingFirst) + " 下="
+				+ showNote(leadingSecond) + " ]");
+
+		// ⑩ §12.3 末尾（主代理 87③）：`unload amount=` 必填，反编译器永远写
+		boolean unloadAmountRequired = reportsAt(registries, "task main\n  unload @rel 0 0 2 repeat=once\n", 2, "amount");
+		ScriptResult<ArmProgram> oneStack = ScriptCompiler.compile("task main\n  unload @rel 0 0 2 amount=one_stack\n",
+			registries);
+		boolean oneStackRoundTrip = !oneStack.hasErrors()
+			&& ScriptCompiler.decompile(oneStack.value(), registries)
+				.contains("amount=one_stack");
+		LOGGER.info("[selftest] 脚本 unload 必填: 缺 amount 报错={} one_stack 往返={}", unloadAmountRequired, oneStackRoundTrip);
+		if (!unloadAmountRequired)
+			problems.add("unload 缺 amount= 没有报错（靠枚举默认值 = 第二个真理来源）");
+		if (!oneStackRoundTrip)
+			problems.add("unload amount=one_stack 过不了往返");
+
+		// ⑪ SNBT 写法必须能被**原版 TagParser** 吃下（§12.1 明说复用 ItemStack.CODEC 的 SNBT）
+		String snbtProbe = null;
+		String snbtError = null;
+		for (int i = itemText.indexOf("icon="); i >= 0; i = itemText.indexOf("icon=", i + 1)) {
+			int end = itemText.indexOf('\n', i);
+			String line = end < 0 ? itemText.substring(i) : itemText.substring(i, end);
+			String value = line.substring("icon=".length())
+				.trim();
+			if (!value.startsWith("{"))
+				continue;
+			snbtProbe = value;
+			try {
+				net.minecraft.nbt.TagParser.parseTag(value);
+			} catch (Throwable failed) {
+				snbtError = value + " ⇒ " + failed;
+			}
+		}
+		LOGGER.info("[selftest] 脚本 SNBT 原版解析: 探针={} 错误={}", snbtProbe == null ? "无" : showNote(snbtProbe), snbtError);
+		if (snbtError != null)
+			problems.add("SNBT 写法过不了原版 TagParser：" + snbtError);
+
+		for (String problem : problems)
+			LOGGER.error("[selftest] 脚本：{}", problem);
+		LOGGER.info("[selftest] 脚本文本往返: {} 处问题（不变量①真实预设 + 不变量①②手写语料 共 {} 份语料）", problems.size(),
+			presets + corpus);
+	}
+
+	/** 逐字段比较（§12.4 的"逐字段"）：**哪一处不同要说出来**，不然自检红了还得回去猜。 */
+	@Nullable
+	private static String scriptDifference(ArmProgram a, ArmProgram b) {
+		if (a.tasks.size() != b.tasks.size())
+			return "任务数 " + a.tasks.size() + " → " + b.tasks.size();
+		if (a.absolute != b.absolute)
+			return "程序坐标形态变了";
+		if (!a.editorMode.equals(b.editorMode))
+			return "编辑模式变了：" + a.editorMode + " → " + b.editorMode;
+		if (a.editorTask != b.editorTask)
+			return "正在编辑的任务下标变了：" + a.editorTask + " → " + b.editorTask;
+		if (!a.note.equals(b.note))
+			return "程序备注不同：[ " + showNote(a.note) + " ] → [ " + showNote(b.note) + " ]";
+		for (int t = 0; t < a.tasks.size(); t++) {
+			ArmProgramTask x = a.tasks.get(t);
+			ArmProgramTask y = b.tasks.get(t);
+			if (!x.name.equals(y.name))
+				return "任务 " + t + " 名字变了：" + x.name + " → " + y.name;
+			if (x.loop != y.loop)
+				return "任务「" + x.name + "」的循环方式变了：" + x.loop + " → " + y.loop;
+			if (x.loopCount != y.loopCount)
+				return "任务「" + x.name + "」的循环次数变了：" + x.loopCount + " → " + y.loopCount;
+			if (!x.note.equals(y.note))
+				return "任务「" + x.name + "」的备注不同：[ " + showNote(x.note) + " ] → [ " + showNote(y.note) + " ]";
+			if (!ItemStack.matches(x.icon, y.icon))
+				return "任务「" + x.name + "」的图标变了";
+			if (x.entries.size() != y.entries.size())
+				return "任务「" + x.name + "」的条目数变了：" + x.entries.size() + " → " + y.entries.size();
+			for (int e = 0; e < x.entries.size(); e++) {
+				String problem = entryDifference(x.name, e, x.entries.get(e), y.entries.get(e));
+				if (problem != null)
+					return problem;
+			}
+		}
+		return null;
+	}
+
+	@Nullable
+	private static String entryDifference(String task, int index, ArmProgramEntry a, ArmProgramEntry b) {
+		String where = "任务「" + task + "」第 " + (index + 1) + " 条";
+		if (a.op != b.op)
+			return where + "操作变了：" + a.op + " → " + b.op;
+		if (!a.offset.equals(b.offset))
+			return where + "坐标变了：" + a.offset.toShortString() + " → " + b.offset.toShortString();
+		if (a.absolute != b.absolute)
+			return where + "绝对/相对变了";
+		if (a.delay != b.delay)
+			return where + "delay 变了：" + a.delay + " → " + b.delay;
+		if (a.face != b.face)
+			return where + "朝向变了：" + a.face + " → " + b.face;
+		if (a.failAmount != b.failAmount)
+			return where + "时限变了：" + a.failAmount + " → " + b.failAmount;
+		if (a.failUnit != b.failUnit)
+			return where + "时限单位变了：" + a.failUnit + " → " + b.failUnit;
+		if (a.onSuccess != b.onSuccess)
+			return where + "成功后动作变了：" + a.onSuccess + " → " + b.onSuccess;
+		if (!a.successTarget.equals(b.successTarget))
+			return where + "成功落点变了：" + a.successTarget + " → " + b.successTarget;
+		if (a.onTimeout != b.onTimeout)
+			return where + "超时后动作变了：" + a.onTimeout + " → " + b.onTimeout;
+		if (!a.timeoutTarget.equals(b.timeoutTarget))
+			return where + "超时落点变了：" + a.timeoutTarget + " → " + b.timeoutTarget;
+		if (!a.note.equals(b.note))
+			return where + "备注不同：[ " + showNote(a.note) + " ] → [ " + showNote(b.note) + " ]";
+		if (a.count != b.count)
+			return where + "个数变了：" + a.count + " → " + b.count;
+		if (a.waitAmount != b.waitAmount)
+			return where + "时长变了：" + a.waitAmount + " → " + b.waitAmount;
+		if (a.waitUnit != b.waitUnit)
+			return where + "时长单位变了：" + a.waitUnit + " → " + b.waitUnit;
+		// 极性（等通电 / 等断电）**只对"收/等"有意义**：发信号（send_on / send_off）的强度由模式本身决定，
+		// 运行时不读这个字段（ProgramRuntime 的 SIGNAL 分支：收 = 阻塞等待走极性真值表；发 = 直接发/释放）。
+		// 所以文本面**有意**不为 send 携带它（§12.3：send_on/send_off 只带 place=），比较也必须放过 ——
+		// 否则预设里那个"从 recv 改过来时留下的"残留值会把一条正确实现判红。
+		boolean sendMode = a.op == OperationType.SIGNAL && a.signalMode != ArmProgramEntry.SignalMode.RECEIVE;
+		if (!sendMode && a.waitForPowered != b.waitForPowered)
+			return where + "极性变了：" + a.waitForPowered + " → " + b.waitForPowered;
+		if (a.signalMode != b.signalMode)
+			return where + "信号模式变了：" + a.signalMode + " → " + b.signalMode;
+		if (!a.callTarget.equals(b.callTarget))
+			return where + "调用目标变了：" + a.callTarget + " → " + b.callTarget;
+		if (a.callRepeat != b.callRepeat)
+			return where + "调用次数变了：" + a.callRepeat + " → " + b.callRepeat;
+		if (!a.errorMessage.equals(b.errorMessage))
+			return where + "错误信息变了";
+		if (a.unloadRepeat != b.unloadRepeat)
+			return where + "卸货方式变了：" + a.unloadRepeat + " → " + b.unloadRepeat;
+		if (a.unloadAmount != b.unloadAmount)
+			return where + "卸货上限变了：" + a.unloadAmount + " → " + b.unloadAmount;
+		if (!ItemStack.matches(a.icon, b.icon))
+			return where + "图标变了";
+		// 频率：**逐字段比物品与染色**（§12.2：参与频率身份的只有这两项；但这里连组件一起比，
+		// 因为不变量 #1 要的是"模型逐字段不变"，而不是"频率身份不变"）
+		if ((a.frequency == null) != (b.frequency == null))
+			return where + "频率绑没绑变了";
+		if (a.frequency != null && b.frequency != null) {
+			if (!ItemStack.matches(a.frequency.getFirst()
+				.getStack(), b.frequency.getFirst()
+					.getStack())
+				|| !ItemStack.matches(a.frequency.getSecond()
+					.getStack(), b.frequency.getSecond()
+						.getStack()))
+				return where + "频率的那对物品变了：" + frequencyText(a) + " → " + frequencyText(b);
+		}
+		return null;
+	}
+
+	private static String frequencyText(ArmProgramEntry entry) {
+		if (entry.frequency == null)
+			return "未绑";
+		return entry.frequency.getFirst()
+			.getStack()
+			.getHoverName()
+			.getString() + " + " + entry.frequency.getSecond()
+				.getStack()
+				.getHoverName()
+				.getString();
+	}
+
+	/** 编译一小段文本，断言**在某一行**报出的错误里含某个关键词。 */
+	private static boolean reportsAt(HolderLookup.Provider registries, String text, int line, String keyword) {
+		ScriptResult<ArmProgram> result = ScriptCompiler.compile(text, registries);
+		if (!result.hasErrors())
+			return false;
+		return result.errors()
+			.stream()
+			.anyMatch(error -> error.line() == line && error.message()
+				.contains(keyword));
+	}
+
+	/**
+	 * 一行里既有条目又有注释（真实情况），所以取**内容那一段**：截到第一个 `/*` 为止。
+	 * 程序头（{@code @abs}/{@code @rel}）从 C 阶段起永远是文本第一行（主代理 87①），
+	 * 所以这里**先跳过它**，返回值才是"这条条目长什么样"。
+	 */
+	private static String firstLine(String text) {
+		String rest = text;
+		if (rest.startsWith("@abs") || rest.startsWith("@rel")) {
+			int headerEnd = rest.indexOf('\n');
+			rest = headerEnd < 0 ? "" : rest.substring(headerEnd + 1);
+		}
+		int eol = rest.indexOf('\n');
+		String line = eol < 0 ? rest : rest.substring(0, eol);
+		int comment = line.indexOf("/*");
+		return (comment < 0 ? line : line.substring(0, comment)).trim();
+	}
+
+	/** 日志里显示备注：换行画成 `\n`（否则多行备注会把一行日志撑开）。 */
+	private static String showNote(String note) {
+		String value = note == null ? "" : note;
+		if (value.length() > 40)
+			value = value.substring(0, 40) + "…";
+		return value.replace("\n", "\\n");
+	}
+
+	/**
+	 * 手写语料（§12.4 要求的那几类）：**全部操作类型**、三种物品写法、
+	 * {@code t/s/m} 三种单位、跳转的两种落点（任务名 / 序号）、卸货两种参数、
+	 * {@code freq} 两格 / 一格 / 留空、多行备注、含 {@code *&#47;} 的备注。
+	 *
+	 * <p>为什么用常量表而不是写成一大段文本再切：每一份都要**独立编译**并各自报错，
+	 * 切成一份一份之后，"哪一份坏了"在日志里直接看得见。
+	 */
+	private static final Map<String, String> SCRIPT_CORPUS = scriptCorpus();
+
+	private static Map<String, String> scriptCorpus() {
+		Map<String, String> corpus = new LinkedHashMap<>();
+		corpus.put("全部操作", """
+			task 主任务 loop=count loopN=3
+			  take      @rel 1 0 0 count=3 delay=10
+			  deposit   @rel 0 0 2
+			  unload    @rel 0 0 2 repeat=until_empty amount=max
+			  deploy    @rel 2 0 0 face=up
+			  attack    @abs 10 64 -3 face=north
+			  mine      @abs 10 64 -3 face=down
+			  use       @abs 10 64 -3 face=east
+			  use_sneak @abs 10 64 -3 face=west
+			  wait      5s
+			  wait_redstone on
+			  signal    recv on freq=iron_ingot + copper_ingot
+			  call      子任务 repeat=2
+			  break
+			task 子任务 loop=until_fail
+			  throw     "没材料了"
+			""");
+		corpus.put("收发信号三种模式", """
+			task main loop=forever
+			  signal recv on freq=iron_ingot + copper_ingot
+			  signal send_on place=0t freq=iron_ingot + copper_ingot
+			  signal send_off place=1s freq=redstone_torch + {}
+			""");
+		corpus.put("单位与时间", """
+			task main
+			  wait 100t
+			  wait 2m
+			  take @rel 0 0 0 timeout=5s fail=skip
+			  take @rel 0 0 0 timeout=3t fail=stop
+			""");
+		corpus.put("跳转落点两种", """
+			task main
+			  take @rel 0 0 0 ok=goto 收尾 fail=goto 2
+			  take @rel 0 0 0
+			task 收尾
+			  break
+			""");
+		corpus.put("多行备注", """
+			task main
+			  take @rel 0 0 0 /*第一行
+			第二行
+			  第三行有缩进*/
+			""");
+		corpus.put("含终止符的备注", "task main\n  take @rel 0 0 0 note=\"带 */ 的备注\\n第二行\"\n");
+		corpus.put("任务行尾 + 条目紧跟", """
+			task main /* 任务备注 */
+			  take @rel 0 0 0
+			  /* 紧跟着上一条 */
+			""");
+		// §12.3a 第 6 条（主代理 87②）：行尾一块 + 紧跟的独占行一块 ⇒ **合并**成一个备注，不报错
+		corpus.put("两块注释合并", """
+			task main
+			  take @rel 0 0 0 /* 行尾一句 */
+			  /* 紧接着再补一句 */
+			""");
+		// §12.3a 第 7 条：`task` 行之后、第一条条目之前的独占注释 ⇒ 归**这个任务**
+		corpus.put("task 行后的注释归任务", """
+			task main
+			  /* 这是任务说明 */
+			  take @rel 0 0 0
+			""");
+		// §12.3 末尾（主代理 87①）：程序头就是坐标空间，`@abs` 这份走的是另一条分支
+		corpus.put("绝对坐标表", """
+			@abs
+			task main
+			  take @abs 10 64 -3
+			  deposit @abs 12 64 -3
+			""");
+		corpus.put("完整 SNBT 物品", """
+			task main
+			  take @rel 0 0 0 icon={id:"minecraft:black_banner",count:1,components:{"minecraft:base_color":"black"}}
+			  take @rel 0 0 0 icon=minecraft:leather_helmet#C41E3A
+			""");
+		corpus.put("空物品槽", """
+			task main
+			  signal recv on freq={} + iron_ingot
+			""");
+		return java.util.Collections.unmodifiableMap(corpus);
+	}
+
+	/** 注释归属的用例（§12.3a 表格的四行各一条：程序头 / task 行尾 / 条目前后）。 */
+	private static final String SCRIPT_NOTES_SAMPLE = """
+		/*程序备注
+		第二行*/
+		task main /*任务备注*/
+		  take @rel 0 0 0 /*条目备注
+		第二行*/
+		  deposit @rel 0 0 2
+		""";
+
+	/** {@code note="…"} 保底写法；与 {@link #SCRIPT_NOTES_SAMPLE} 的条目备注必须是**同一个字符串**。 */
+	private static final String SCRIPT_QUOTED_NOTE_SAMPLE = "task main\n  take @rel 0 0 0 note=\"条目备注\\n第二行\"\n";
+
+	/**
+	 * §12.3a 第 6 条（主代理 87②）：**同一个归属对象上的两块注释合并**成一个备注（换行连接），
+	 * **不报错**。行尾一块 + 紧跟其后的独占行一块 —— 玩家"再补一句注释"就是这个写法。
+	 */
+	private static final String SCRIPT_MERGED_NOTE_SAMPLE = "task main\n"
+		+ "  take @rel 0 0 0 /* 行尾一句 */\n"
+		+ "  /* 紧接着再补一句 */\n";
 
 }
 
