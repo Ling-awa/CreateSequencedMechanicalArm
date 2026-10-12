@@ -12,6 +12,7 @@ import com.simibubi.create.Create;
 import com.simibubi.create.api.contraption.transformable.TransformableBlockEntity;
 import com.simibubi.create.content.contraptions.StructureTransform;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.kinetics.belt.BeltBlockEntity;
 import com.simibubi.create.content.kinetics.deployer.DeployerFakePlayer;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
@@ -345,6 +346,20 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		return Vec3.atCenterOf(worldPosition.offset(movingOffset));
 	}
 
+	/**
+	 * 把正在被 pin 的**传送带**同步一次给客户端（置物台不需要：它没有"客户端自己模拟位移"这回事）。
+	 *
+	 * <p>为什么每 tick 都发：客户端那份物品数据里的 {@code lockedExternally} 被消费一次就清掉，
+	 * 所以只有"每 tick 都告诉它一次"才能让它这一段也停住。代价只有带子那一个小包（物品表），
+	 * 而且只在取物/组装伸过去的那几十 tick 里发。
+	 */
+	private void syncPinnedBelt() {
+		if (level == null || movingPoint == null)
+			return;
+		if (level.getBlockEntity(worldPosition.offset(movingOffset)) instanceof BeltBlockEntity belt)
+			belt.sendData();
+	}
+
 	@Nullable
 	private IItemHandler handlerAt(BlockPos pos) {
 		if (level == null)
@@ -667,8 +682,14 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		// 而不是只看 `chasedPointProgress < 1` —— 旧写法会在**刚好到位**那一 tick 停掉续锁，
 		// 而真正取物就发生在那之后 ⇒ 物品在最后一步被带子带走（用户第二十七轮续二十三实测）。
 		// 另外带子每 tick 都会把 `lockedExternally` 消费掉（`BeltInventory:119-127`），所以必须每 tick 重设。
-		if (level != null && !level.isClientSide && movingPoint != null && runtime.shouldPinTarget(this))
+		if (level != null && !level.isClientSide && movingPoint != null && runtime.shouldPinTarget(this)) {
 			movingPoint.keepAlive();
+			// 客户端也要"看起来"停住：`lockedExternally` 只是**服务端**标记，客户端的带子模拟位移时
+			// 只看它自己那份物品数据，而且那个分支在客户端同样会跑、用完立刻清（`BeltInventory:119-127`）。
+			// 不把带子的物品表同步过去，玩家看到的就是"**幽灵贴图继续往前跑**、实际位置其实被定住了"
+			// —— 用户第二十七轮续二十四实测（他/她还能从正确位置取走物品，说明服务端一直是对的）。
+			syncPinnedBelt();
+		}
 
 		if (level == null || level.isClientSide)
 			return;
