@@ -120,6 +120,14 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 
 	@Nullable
 	private ArmInteractionPoint movingPoint;
+	/**
+	 * 这次移动要不要**锁住目标上的物品**（取物 / 组装 = 是；投放类 = 否）。
+	 *
+	 * <p>锁的动作是 {@link ArmInteractionPoint#keepAlive()}（对传送带就是 `lockedExternally = true`），
+	 * 而带子**每 tick 会把标记消费掉**（`BeltInventory:119-127`：这一 tick 不动，然后清标记），
+	 * 所以必须每 tick 续锁 —— 见 {@link #tick()}。
+	 */
+	private boolean pinTarget;
 	/** 通用目标（攻击/使用任意方块）时爪子从哪一面够过去；客户端插值也要用，所以进同步 NBT。 */
 	@Nullable
 	public Direction movingFace;
@@ -215,6 +223,18 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	 * @param face 玩家录下来的点击面；是 Create 交互点时忽略（交互点自己知道从哪侧接）
 	 */
 	public boolean beginMove(BlockPos offset, @Nullable Direction face) {
+		return beginMove(offset, face, false);
+	}
+
+	/**
+	 * {@code pin=true}：目标上的物品**立刻**锁一次，并在整条条目期间每 tick 续锁（见 {@link #tick()}）。
+	 *
+	 * <p>⚠️ 为什么必须**在这里**先锁一次，而不是等下一 tick 的 {@link #tick()}：定目标发生在
+	 * {@code runtime.tick()} **内部**，而 {@link #tick()} 里的续锁跑在它**之前** —— 等下一 tick 再锁
+	 * 就晚了整整一个 tick（16 rpm 的带子一 tick 也能挪出可取窗口），实测表现正是
+	 * **"被定住的时候物品已经跑出去了"**（用户第二十七轮续二十三）。
+	 */
+	public boolean beginMove(BlockPos offset, @Nullable Direction face, boolean pin) {
 		if (level == null)
 			return false;
 		BlockPos target = worldPosition.offset(offset);
@@ -227,6 +247,9 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		movingOffset = offset;
 		movingFace = face;
 		movingPoint = point;
+		pinTarget = pin;
+		if (pin && !level.isClientSide)
+			point.keepAlive(); // 同一 tick 先锁一次（理由见上面那段注释）
 		movingHandlerOwner = level.isClientSide ? null : level.getBlockEntity(target);
 		movingHandler = level.isClientSide ? null : handlerAt(target);
 		chasedPointProgress = 0;
@@ -279,6 +302,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		if (phase == Phase.IDLE && movingPoint == null)
 			return;
 		movingPoint = null;
+		pinTarget = false;
 		movingHandler = null;
 		movingHandlerOwner = null;
 		chasedPointIndex = -1;
@@ -637,10 +661,13 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		super.tick();
 		tickMovementProgress();
 
-		// 移动途中锁住目标上的物品（上游 `ArmBlockEntity:133-140`）：置物台/传送带上的物品会被
-		// `keepAlive()` 标记为 `lockedExternally`。少了这一步，前置检查（动身前）与真正取物（几 tick 后）
-		// 之间那段时间里，带子完全有可能已经把物品送走 —— 表现就是"从传送带取物偶尔取空"。
-		if (level != null && !level.isClientSide && chasedPointProgress < 1 && movingPoint != null)
+		// 取物/组装期间每 tick 续锁目标上的物品（上游 `ArmBlockEntity:133-140` 的同一机制）。
+		//
+		// ⚠️ 判据由**运行时**给（`shouldPinTarget()`：当前条目是不是"从目标取东西"的那类），
+		// 而不是只看 `chasedPointProgress < 1` —— 旧写法会在**刚好到位**那一 tick 停掉续锁，
+		// 而真正取物就发生在那之后 ⇒ 物品在最后一步被带子带走（用户第二十七轮续二十三实测）。
+		// 另外带子每 tick 都会把 `lockedExternally` 消费掉（`BeltInventory:119-127`），所以必须每 tick 重设。
+		if (level != null && !level.isClientSide && movingPoint != null && runtime.shouldPinTarget(this))
 			movingPoint.keepAlive();
 
 		if (level == null || level.isClientSide)

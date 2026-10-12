@@ -626,9 +626,41 @@ public class SmartArmSelfTest {
 			arm.runtime.tick(arm);                          // ③ **只跑一个 tick**
 			String afterInsert = arm.runtime.getLastFailure();
 			boolean cleared = afterInsert == null;
+			// ③ 之后程序已经 `beginMove` ⇒ 取物类应当处于"要续锁"的窗口里
+			boolean pinWhileTaking = arm.runtime.shouldPinTarget(arm);
+			// 反例（挖掘）的结果：见 ④
+			boolean otherRan = false;
+			boolean otherPins = true;
 
-			LOGGER.info("[selftest] 前置检查重试节流: 空载具报因={} 放物品后下一 tick 就放行={} 间隔常量={}",
-				sawFailure, cleared, ProgramRuntime.PRECHECK_RETRY_TICKS);
+			// ④ 反例：**"要取东西"之外的有目标条目不该锁**（一次投放/挖掘不该把整条带子停住几秒）。
+			//    用「挖掘」当反例：它同样有目标、同样会伸过去，但不需要锁目标上的物品；
+			//    换成「投放」要多两件夹具（手上得有东西 + 目标得放得下），第一版就是这么失败的
+			//    —— 而且夹具一坏就变成"没跑起来"，所以宁可选夹具最少的那个反例。
+			BlockState depotOldState = level.getBlockState(depotPos);
+			BlockState stoneState = stateOf("minecraft:stone");
+			if (stoneState == null) {
+				LOGGER.error("[selftest] 锁物品窗口反例**没跑起来**：找不到 minecraft:stone");
+			} else {
+				level.setBlockAndUpdate(depotPos, stoneState);
+				ArmProgram mineProgram = new ArmProgram();
+				ArmProgramTask mineTask = new ArmProgramTask();
+				mineTask.name = "自检挖掘";
+				ArmProgramEntry mineEntry = new ArmProgramEntry();
+				mineEntry.op = OperationType.MINE;
+				mineEntry.offset = depotPos.subtract(armPos);
+				mineEntry.face = Direction.UP;
+				mineTask.entries.add(mineEntry);
+				mineProgram.tasks.add(mineTask);
+				arm.setProgram(mineProgram);
+				arm.runtime.tick(arm);
+				otherRan = arm.runtime.getLastFailure() == null;
+				otherPins = arm.runtime.shouldPinTarget(arm);
+				level.setBlockAndUpdate(depotPos, depotOldState);
+			}
+
+			LOGGER.info("[selftest] 前置检查重试节流: 空载具报因={} 放物品后下一 tick 就放行={} 间隔常量={} "
+				+ "锁窗口: 取物移动中={} 挖掘移动中={}（挖掘跑起来了={}）", sawFailure, cleared,
+				ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, otherPins, otherRan);
 			if (!sawFailure)
 				LOGGER.error("[selftest] 重试节流自检**没跑起来**：空载具时没报出失败原因（{}）—— 等于没测",
 					text(emptyFailure));
@@ -637,6 +669,14 @@ public class SmartArmSelfTest {
 			else if (!cleared)
 				LOGGER.error("[selftest] 前置检查**不是每 tick 重查**（放了物品后一个 tick 仍报「{}」）—— "
 					+ "传送带上会表现为「取不到 + 物品溜走」，对齐上游必须每 tick 查", afterInsert);
+			if (!pinWhileTaking)
+				LOGGER.error("[selftest] 取物/组装在移动途中**没有续锁**目标物品 —— 传送带会把物品带走"
+					+ "（上游 `ArmBlockEntity:133-140` 是每 tick 锁；到位那一 tick 也要锁）");
+			if (!otherRan)
+				LOGGER.error("[selftest] 锁窗口反例（挖掘）**没跑起来**（{}）—— 这条反例等于没测",
+					text(arm.runtime.getLastFailure()));
+			else if (otherPins)
+				LOGGER.error("[selftest] 非取物类（挖掘）也在续锁目标物品 —— 会把不该停的带子停住");
 		} catch (Throwable t) {
 			LOGGER.error("[selftest] 重试节流自检抛异常：{}", t.toString());
 		} finally {

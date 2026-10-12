@@ -404,7 +404,9 @@ public class ProgramRuntime {
 		// 不能留到条目成功或下一轮开始才清（实测：补货后手臂已经继续干活了，护目镜还挂着旧提示）。
 		lastFailure = null;
 
-		if (!arm.beginMove(offset, entry.face)) {
+		// 取物/组装：从**定下目标的那一刻**就锁住目标上的物品（同一 tick 先锁一次，之后每 tick 续锁）。
+		boolean pinsTarget = entry.op == OperationType.TAKE || entry.op == OperationType.DEPLOY;
+		if (!arm.beginMove(offset, entry.face, pinsTarget)) {
 			handleFailure(arm, task, entry, "目标无效或不属于 Create 交互点");
 			return;
 		}
@@ -885,6 +887,30 @@ public class ProgramRuntime {
 	}
 
 	/**
+	 * 现在要不要**每 tick 续锁**目标上的物品（给 {@code SmartArmBlockEntity.tick()} 用）。
+	 *
+	 * <p>只对"从目标取东西"的条目（{@code TAKE} / {@code DEPLOY}）为真：这两类在**手臂伸过去的那段时间里**
+	 * 目标上的物品必须留在原地（传送带会把它带走）。投放类**不锁** —— 别为了一次投放把整条带子停住几秒。
+	 *
+	 * <p>状态判据是 {@code MOVING + EXECUTING}：到位那一 tick 直到真正取物之间也要锁，
+	 * 这正是旧写法（只看 {@code chasedPointProgress < 1}）漏掉的那一格。
+	 */
+	public boolean shouldPinTarget(SmartArmBlockEntity arm) {
+		if (state != EntryState.MOVING && state != EntryState.EXECUTING)
+			return false;
+		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
+		return entry != null && (entry.op == OperationType.TAKE || entry.op == OperationType.DEPLOY);
+	}
+
+	@Nullable
+	private ArmProgramEntry currentEntryOrNull(ArmProgram program) {
+		ArmProgramTask task = program.task(taskIndex);
+		if (task == null || entryIndex < 0 || entryIndex >= task.entries.size())
+			return null;
+		return task.entries.get(entryIndex);
+	}
+
+	/**
 	 * 一次不成功。§7.7 v2 的核心：<b>"失败"不是独立分支，而是"还没成功"</b> ——
 	 * 原地重试（每 {@link #PRECHECK_RETRY_TICKS} 重跑一次前置检查，不空跑也不抖动画），
 	 * 直到「失败后」的时限（{@link ArmProgramEntry#timeoutTicks()}，{@code -1} = 一直重试）到点；到点后走 {@code onTimeout}。
@@ -893,10 +919,15 @@ public class ProgramRuntime {
 	 * 已在 {@code ArmProgramEntry.load} 里迁移成 time/onTimeout。
 	 */
 	private void handleFailure(SmartArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, String reason) {
+		// ⚠️ **同步节流**：重试本身是每 tick 的（对齐上游），但"每 tick 都发一次方块实体同步"纯属浪费 ——
+		// 客户端每 tick 收到一次同步会让手臂动画看起来一顿一顿（用户实测："尝试定住物品的瞬间动画会变慢"）。
+		// 所以只有**状态或失败原因真的变了**才发。
+		boolean changed = state != EntryState.RETRY || !reason.equals(lastFailure);
 		lastFailure = reason;
 		if (entry.timeoutTicks() < 0 || waitElapsed <= entry.timeoutTicks()) {
 			state = EntryState.RETRY; // 阻塞重试（前摇不重跑；计时在 RETRY 分支按 tick 累加）
-			arm.markProgramDirty();
+			if (changed)
+				arm.markProgramDirty();
 			return;
 		}
 		applySkip(arm, task, entry, entry.onTimeout, reason + "（重试了 " + entry.failAmount + entry.failUnit.name() + "）");
