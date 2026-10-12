@@ -250,13 +250,6 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	public boolean beginMove(BlockPos offset, @Nullable Direction face, boolean pin) {
 		if (level == null)
 			return false;
-		// ★ **已经在位就别重播伸展动画**：前置检查失败时我们不再立刻收臂（见运行时里的宽限期），
-		//   所以"等到物品了"这一刻手臂往往还伸在目标上 —— 此时若照常 `chasedPointProgress = 0` + `moveSeq++`，
-		//   客户端会把动画从头再放一遍（观感就是"抖一下/闪一下"）。
-		//   判据是"同一目标 + 已经到位"：直接返回 true，运行时下一 tick 就会 `hasArrived()` ⇒ 立刻执行。
-		if (phase == Phase.MOVING && movingPoint != null && chasedPointProgress >= 1 && offset.equals(movingOffset)
-			&& face == movingFace)
-			return true;
 		BlockPos target = worldPosition.offset(offset);
 		BlockState state = level.getBlockState(target);
 		ArmInteractionPoint point = pointAt(target, state, face);
@@ -498,6 +491,17 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		if (perTick < 1e-4f)
 			return TRANSIENT_BLOCK_DEFAULT_TICKS;
 		return Mth.clamp((int) Math.ceil(1f / perTick) + 1, TRANSIENT_BLOCK_MIN_TICKS, TRANSIENT_BLOCK_MAX_TICKS);
+	}
+
+	/**
+	 * 伸出去 / 收回来**一趟**大约要几 tick（与 {@link #tickMovementProgress()} 的公式一致）。
+	 *
+	 * <p>用途：条目结束后要收回手臂，而收回是客户端插值出来的动画 —— 给它等长的待机时间，
+	 * 收回才走得完整（否则下一条会在收回刚开始时把它截断，看起来只"抖一下"）。
+	 * 速度越高越快：16rpm ⇒ 64 tick（3.2 秒），256rpm ⇒ 4 tick。
+	 */
+	public int swingTicks() {
+		return Math.max(1, 1024 / Mth.clamp((int) Math.abs(getSpeed()), 1, 256));
 	}
 
 	/** 没有带速可算时的保守值（约半秒）。 */

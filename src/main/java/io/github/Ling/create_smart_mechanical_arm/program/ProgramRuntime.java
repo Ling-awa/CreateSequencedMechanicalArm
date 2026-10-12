@@ -967,6 +967,15 @@ public class ProgramRuntime {
 		// 成功了就说明之前那条失败提示已经过时（覆盖"到位后执行失败 → 重试成功"这条路径）
 		lastFailure = null;
 
+		// ★ **每条条目结束后收回手臂**（回到待机位），下一条要动手时再伸出去 —— 这才是
+		//   "一个物品一次完整的伸→加工→收"的节奏。不收的话，连续条目会**一直停在目标上**连续加工：
+		//   用户第二十七轮续三十四实测（256rpm 带 + 16rpm 臂）：它会一直加工、动画卡在加工姿势，
+		//   加工速率只受"物品到货速度 / 有没有输出空间"限制，而不是受手臂动作限制。
+		//   收回本身要时间（与伸展同一公式）⇒ 顺手给一个**等长的待机**让收回真的走完；
+		//   否则下一条会在收回刚开始时就把它截断，看起来只是"抖一下"。
+		arm.cancelMove();
+		setIdleCooldown(arm.swingTicks());
+
 		if (entry.onSuccess == SkipAction.SKIP_TO && !entry.successTarget.isBlank()) {
 			lastFailure = "成功 → 跳转 " + entry.successTarget;
 			resetEntryCounters();
