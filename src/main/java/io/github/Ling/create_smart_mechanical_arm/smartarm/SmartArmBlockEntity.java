@@ -729,9 +729,13 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		//
 		// ⚠️ 判据由**运行时**给（`shouldPinTarget()`），而不是只看 `chasedPointProgress < 1` ——
 		// 旧写法会在**刚好到位**那一 tick 停掉续锁，而真正取物就发生在那之后（用户第二十七轮续二十三实测）。
-		boolean pinning = level != null && !level.isClientSide && movingPoint != null && canPinTarget();
+		// ⚠️ 判据**不能**用 `movingPoint != null`：读盘路径会把它显式清成 null（只留存盘的 `phase`/`Offset`），
+		// 而"退出重进"正是走读盘这条路 ⇒ 用缓存当判据会在重登后**静默松手**（用户第二十七轮续二十六实测）。
+		// 所以改用 {@link #pinPoint()}：先看缓存，缓存没了就按 `movingOffset` 重建。
+		ArmInteractionPoint pinPoint = pinPoint();
+		boolean pinning = level != null && !level.isClientSide && pinPoint != null && canPinTarget();
 		if (pinning)
-			movingPoint.keepAlive();
+			pinPoint.keepAlive();
 		if (pinning != clientHoldApplied)
 			applyBeltClientHold(pinning);
 
@@ -743,6 +747,21 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 				return;
 		}
 		runtime.tick(this);
+	}
+
+	/**
+	 * 要续锁的那个交互点：优先用移动中缓存的 {@link #movingPoint}，**缓存没了就按 {@link #movingOffset} 重建**。
+	 *
+	 * <p>为什么必须能重建：读盘时 `movingPoint` 被显式清成 null（只留 `phase`/`Offset` 两个存盘字段），
+	 * 而"退出重进"走的就是读盘 ⇒ 只看缓存的写法会在重登后静默松手，把已经定住的物品放回传送带上
+	 * （用户第二十七轮续二十六实测：重进后被定住的物品又被释放了）。
+	 */
+	@Nullable
+	public ArmInteractionPoint pinPoint() {
+		ArmInteractionPoint point = currentPoint();
+		if (point == null && movingOffset != null && level != null && !level.isClientSide)
+			point = resolvePoint(movingOffset);
+		return point;
 	}
 
 	/** 推进移动进度；客户端顺带做角度插值（照抄 ArmBlockEntity.tickMovementProgress 的语义）。 */

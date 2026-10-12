@@ -634,6 +634,17 @@ public class SmartArmSelfTest {
 			arm.setSpeed(0);
 			boolean pinWithoutStress = arm.canPinTarget();
 			arm.setSpeed(32); // 还原，后面的反例还要它伸过去
+
+			// ⑥ **退出重进后仍然续锁**：读盘会把 `movingPoint` 清成 null（只留 phase/Offset），
+			//    旧实现拿缓存当判据 ⇒ 重登即松手（用户第二十七轮续二十六实测：重进后物品被释放了）。
+			//    这里真存一份 NBT、读进一个新 BE（同一坐标，目标是世界里那个真载具），断言仍然续锁。
+			CompoundTag snapshot = arm.saveWithoutMetadata(server.registryAccess());
+			SmartArmBlockEntity reloaded = new SmartArmBlockEntity(SmartArmRegistration.SMART_ARM_BE.get(), armPos,
+				SmartArmRegistration.SMART_ARM.get()
+					.defaultBlockState());
+			reloaded.setLevel(level);
+			reloaded.read(snapshot.copy(), server.registryAccess(), false);
+			boolean pinAfterReload = reloaded.canPinTarget() && reloaded.pinPoint() != null;
 			// 反例（挖掘）的结果：见 ④
 			boolean otherRan = false;
 			boolean otherPins = true;
@@ -665,8 +676,8 @@ public class SmartArmSelfTest {
 			}
 
 			LOGGER.info("[selftest] 前置检查重试节流: 空载具报因={} 放物品后下一 tick 就放行={} 间隔常量={} "
-				+ "锁窗口: 取物移动中={} 断应力后={} 挖掘移动中={}（挖掘跑起来了={}）", sawFailure, cleared,
-				ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, pinWithoutStress, otherPins, otherRan);
+				+ "锁窗口: 取物移动中={} 断应力后={} 重登后={} 挖掘移动中={}（挖掘跑起来了={}）", sawFailure, cleared,
+				ProgramRuntime.PRECHECK_RETRY_TICKS, pinWhileTaking, pinWithoutStress, pinAfterReload, otherPins, otherRan);
 			if (!sawFailure)
 				LOGGER.error("[selftest] 重试节流自检**没跑起来**：空载具时没报出失败原因（{}）—— 等于没测",
 					text(emptyFailure));
@@ -678,6 +689,9 @@ public class SmartArmSelfTest {
 			if (!pinWhileTaking)
 				LOGGER.error("[selftest] 取物/组装在移动途中**没有续锁**目标物品 —— 传送带会把物品带走"
 					+ "（上游 `ArmBlockEntity:133-140` 是每 tick 锁；到位那一 tick 也要锁）");
+			if (!pinAfterReload)
+				LOGGER.error("[selftest] 退出重进后**不再续锁**目标物品（读盘会把 `movingPoint` 清空，"
+					+ "判据必须能按 `movingOffset` 重建）—— 已经定住的物品会被放回传送带");
 			if (!pinWithoutStress)
 				LOGGER.error("[selftest] 断掉应力后**不再**续锁目标物品 —— 与原版（`ArmBlockEntity:133-140`）"
 					+ "不一致：停机臂应当继续占住物品（用户确认过这是期望行为）");
