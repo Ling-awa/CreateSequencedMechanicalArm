@@ -397,7 +397,12 @@ public class ProgramRuntime {
 		// 前置检查先跑：不通过就**不伸过去**（空载具时手臂原地待机，用户明确要求的行为）
 		String blocked = preCheckFailure(arm, entry, offset);
 		if (blocked != null) {
-			arm.cancelMove(); // 折回静止位待机；客户端靠相位变化做平滑插值
+			// ★ **短暂阻塞不收臂**：最常见的短暂阻塞是"我们刚加工出来的产物还占着判定窗口"，
+			//   几 tick 它就走。立刻 `cancelMove()` 的话会变成"收回→再伸出去"的空转，观感就是卡顿
+			//   （用户第二十七轮续三十三）。所以给它一个**宽限期**（时长按带速算，见 transientBlockTicks）；
+			//   超过还没等到才折回待机 —— "空载具时原地待机"的语义不变，只是不再为一次短暂占用抖动画。
+			if (waitElapsed >= arm.transientBlockTicks())
+				arm.cancelMove(); // 折回静止位待机；客户端靠相位变化做平滑插值
 			setIdleCooldown(PRECHECK_RETRY_TICKS);
 			handleFailure(arm, task, entry, blocked);
 			return;
@@ -858,16 +863,15 @@ public class ProgramRuntime {
 		finishDeploy(arm, task, entry, level, recipeRef[0], processedRef[0]);
 	}
 
-	/** 组装成功后的共同收尾：结算手持应用物 → 音效粒子 → **等产物离开判定窗口** → 记成功。 */
+	/** 组装成功后的共同收尾：结算手持应用物 → 音效粒子 → 记成功。 */
 	private void finishDeploy(SmartArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
 		RecipeHolder<? extends Recipe<?>> recipe, ItemStack processed) {
 		arm.consumeHeldItem(DeployRecipes.keepsHeldItem(recipe.value()));
 		ArmEffects.deploy(level, arm.getBlockPos(), arm.getEffectorPosition(), processed,
 			recipe.value() instanceof SandPaperPolishingRecipe);
-		// ★ 产物是在**加工位置原地**生成的，它会短暂占着我们的判定窗口 ⇒ 紧接着的前置检查看到的是产物、
-		//   匹配不到配方 ⇒ 失败 ⇒ 收臂 ⇒ 再伸出去 ⇒ 观感"每次组装完都会变慢一下"
-		//   （用户第二十七轮续三十二实测）。这里主动等它走开（时长按带速算，见 SmartArmBlockEntity#productClearTicks）。
-		setIdleCooldown(arm.productClearTicks());
+		// ⚠️ 这里**不再**主动等待产物离开：那会让手臂站着不动一段时间（用户第二十七轮续三十三：
+		//    "每次组装都会卡顿一会"）。产物占住判定窗口这件事改由 `beginEntry` 的**宽限期**处理
+		//    —— 短暂阻塞不收臂、停在原地每 tick 重查，产物一走、原料进来立刻加工。
 		succeed(arm, task, entry);
 	}
 

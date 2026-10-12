@@ -131,7 +131,6 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	 * 而带子**每 tick 会把标记消费掉**（`BeltInventory:119-127`：这一 tick 不动，然后清标记），
 	 * 所以必须每 tick 续锁 —— 见 {@link #tick()}。
 	 */
-	private boolean pinTarget;
 	/**
 	 * 当前被我们按住的那件带子物品（**按对象**认领，不靠位置窗口）。
 	 *
@@ -251,6 +250,13 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	public boolean beginMove(BlockPos offset, @Nullable Direction face, boolean pin) {
 		if (level == null)
 			return false;
+		// ★ **已经在位就别重播伸展动画**：前置检查失败时我们不再立刻收臂（见运行时里的宽限期），
+		//   所以"等到物品了"这一刻手臂往往还伸在目标上 —— 此时若照常 `chasedPointProgress = 0` + `moveSeq++`，
+		//   客户端会把动画从头再放一遍（观感就是"抖一下/闪一下"）。
+		//   判据是"同一目标 + 已经到位"：直接返回 true，运行时下一 tick 就会 `hasArrived()` ⇒ 立刻执行。
+		if (phase == Phase.MOVING && movingPoint != null && chasedPointProgress >= 1 && offset.equals(movingOffset)
+			&& face == movingFace)
+			return true;
 		BlockPos target = worldPosition.offset(offset);
 		BlockState state = level.getBlockState(target);
 		ArmInteractionPoint point = pointAt(target, state, face);
@@ -261,7 +267,6 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		movingOffset = offset;
 		movingFace = face;
 		movingPoint = point;
-		pinTarget = pin;
 		if (pin && !level.isClientSide)
 			point.keepAlive(); // 同一 tick 先锁一次（理由见上面那段注释）
 		movingHandlerOwner = level.isClientSide ? null : level.getBlockEntity(target);
@@ -320,7 +325,6 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		if (phase == Phase.IDLE && movingPoint == null)
 			return;
 		movingPoint = null;
-		pinTarget = false;
 		movingHandler = null;
 		movingHandlerOwner = null;
 		chasedPointIndex = -1;
@@ -480,31 +484,26 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	/**
-	 * 组装的产物走出"臂的判定窗口"大约需要几 tick。
+	 * 判定窗口被**短暂占住**大约会持续几 tick（按带速算：走完一整格需要多久）。
 	 *
-	 * <p>为什么需要这个等待：产物是**在加工位置原地生成**的，它会短暂占着我们的判定窗口
-	 * （带子上要几 tick 才走出这一格；置物台上它就停在那儿）⇒ 紧接着的前置检查看到的是**产物**
-	 * —— 它通常匹配不到配方（或者匹配到的是"再加工一次"那条路）⇒ 检查失败 ⇒ 收臂 ⇒ 几 tick 后又伸出去
-	 * ⇒ 观感就是"每次组装完都会变慢一下"（用户第二十七轮续三十二实测）。
-	 * 所以组装成功后主动等一小会儿，让产物先离开。
-	 *
-	 * <p>时长按**带速**算（走完一整格需要多久），没有带子/带速为 0 时用保守常数；两端都夹住，
-	 * 免得极慢的带子把臂卡住太久、极快的带子又不够。
+	 * <p>用途：前置检查失败时**不必立刻收臂** —— 最常见的短暂阻塞是"我们刚加工出来的产物还占着判定窗口"，
+	 * 几 tick 它就走了。收回→再伸出去既费时又难看（用户第二十七轮续三十三："每次组装都会卡顿一会"）。
+	 * 所以运行时拿这个值当**宽限期**：超过它还没等到，才折回待机（"空载具时原地待机"的语义不变）。
 	 */
-	public int productClearTicks() {
+	public int transientBlockTicks() {
 		BeltBlockEntity belt = beltBlock();
 		if (belt == null)
-			return PRODUCT_CLEAR_DEFAULT_TICKS;
+			return TRANSIENT_BLOCK_DEFAULT_TICKS;
 		float perTick = Math.abs(belt.getBeltMovementSpeed());
 		if (perTick < 1e-4f)
-			return PRODUCT_CLEAR_DEFAULT_TICKS;
-		return Mth.clamp((int) Math.ceil(1f / perTick) + 1, PRODUCT_CLEAR_MIN_TICKS, PRODUCT_CLEAR_MAX_TICKS);
+			return TRANSIENT_BLOCK_DEFAULT_TICKS;
+		return Mth.clamp((int) Math.ceil(1f / perTick) + 1, TRANSIENT_BLOCK_MIN_TICKS, TRANSIENT_BLOCK_MAX_TICKS);
 	}
 
-	/** 没有带速可算时的保守等待（约半秒）。 */
-	private static final int PRODUCT_CLEAR_DEFAULT_TICKS = 10;
-	private static final int PRODUCT_CLEAR_MIN_TICKS = 2;
-	private static final int PRODUCT_CLEAR_MAX_TICKS = 40;
+	/** 没有带速可算时的保守值（约半秒）。 */
+	private static final int TRANSIENT_BLOCK_DEFAULT_TICKS = 10;
+	private static final int TRANSIENT_BLOCK_MIN_TICKS = 2;
+	private static final int TRANSIENT_BLOCK_MAX_TICKS = 40;
 
 	/**
 	 * 现在要不要**续锁**目标上的物品：运行时说"这一条正在从目标取东西"（`TAKE`/`DEPLOY` 且已开始/正在执行）。
