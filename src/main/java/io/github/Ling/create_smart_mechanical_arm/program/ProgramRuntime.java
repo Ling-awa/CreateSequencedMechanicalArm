@@ -522,11 +522,16 @@ public class ProgramRuntime {
 				ItemStack applicator = arm.getHeldItem();
 				if (applicator.isEmpty())
 					return "手上没有应用物";
-				int slot = firstNonEmptySlot(handler);
-				if (slot < 0)
-					return "载具上没有可加工的物品";
-				if (DeployRecipes.find(level, handler.extractItem(slot, 1, true), applicator) == null)
-					return "没有匹配的 deploying / item_application 配方";
+				// ★ **逐件找**，不是"只看第一件"（用户第二十七轮续三十六实测："组装的时候臂会空一轮"）：
+				//   目标格里最靠前的那件往往就是**我们刚加工出来的产物** —— 它当然不匹配配方，
+				//   旧写法于是报"没有匹配的配方"、手臂干脆不伸出去，而它后面那件**能加工的原料**
+				//   就永远等不到机会（带子一直被产物占着判定窗口）。
+				//   这与真正加工时的判据必须**同源**：`deployOnBelt` 是逐件 it 的，
+				//   上游机械手（Deployer）也是**逐件回调**、不匹配的直接 `PASS`
+				//   （`BeltDeployerCallbacks:38-63`，`:58-59` 就是这一条的出处）——
+				//   所以上游根本不存在"产物挡住原料"这个问题。
+				if (!anyProcessable(level, arm, entry, handler, applicator))
+					return "这一格没有可加工的原料（没有匹配 deploying / item_application 配方的物品）";
 			}
 			default -> {
 			}
@@ -540,6 +545,44 @@ public class ProgramRuntime {
 				.isEmpty())
 				return slot;
 		return -1;
+	}
+
+	/**
+	 * 目标上有没有**这条条目加工得了**的物品 —— 「组装」的前置检查用它，判据与真正加工时**同源**。
+	 *
+	 * <p>传送带：直接用带子自己的加工迭代（{@code handleProcessingOnAllItems}，与
+	 * {@link #deployOnBelt} 同一个调用、同一个范围：格子中心 ±.51），回调返回 {@code doNothing()}
+	 * 所以是**只读探测**（`BeltInventory.applyToEachWithin:466-467`：结果没变化就 continue，不改任何东西）。
+	 * <br>普通容器：**逐槽找**（上游动力臂取物也是遍历所有槽位，`ArmBlockEntity:385-402`）。
+	 *
+	 * <p><b>为什么必须是"逐件"而不是"第一件"</b>：带子那一格里最靠前的通常是我们刚加工出来的**产物**，
+	 * 它不匹配配方；只看第一件就会得出"没有匹配的配方"⇒ 手臂不伸出去 ⇒ 后面那件**原料**永远等不到
+	 * （用户第二十七轮续三十六：<i>"组装的时候臂会空一轮"</i>）。上游没有这个问题，因为它是**逐件回调**、
+	 * 不匹配的直接放行（`BeltDeployerCallbacks:58-59`）。
+	 *
+	 * <p>⚠️ 与 {@link #canWorkOn} 的分工：这里是"**这一格有没有**能加工的东西"（给前置检查），
+	 * 那里是"**这一件**能不能加工"（给认领逐件用）。两者都调 {@link DeployRecipes#find}，
+	 * **不要**在这里另写一套配方判据（决策 68/91：判据写两份必然分叉）。
+	 */
+	private static boolean anyProcessable(Level level, SmartArmBlockEntity arm, ArmProgramEntry entry,
+		IItemHandler handler, ItemStack applicator) {
+		TransportedItemStackHandlerBehaviour transport = beltBehaviourAt(level, arm, entry);
+		if (transport != null) {
+			boolean[] found = { false };
+			transport.handleProcessingOnAllItems(t -> {
+				if (!found[0] && !t.stack.isEmpty()
+					&& DeployRecipes.find(level, t.stack.copyWithCount(1), applicator) != null)
+					found[0] = true;
+				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+			});
+			return found[0];
+		}
+		for (int slot = 0; slot < handler.getSlots(); slot++) {
+			ItemStack in = handler.extractItem(slot, 1, true);
+			if (!in.isEmpty() && DeployRecipes.find(level, in.copyWithCount(1), applicator) != null)
+				return true;
+		}
+		return false;
 	}
 
 	/**
@@ -972,14 +1015,18 @@ public class ProgramRuntime {
 		//   "一个物品一次完整的伸→加工→收"的节奏。不收的话，连续条目会**一直停在目标上**连续加工：
 		//   用户第二十七轮续三十四实测（256rpm 带 + 16rpm 臂）：它会一直加工、动画卡在加工姿势，
 		//   加工速率只受"物品到货速度 / 有没有输出空间"限制，而不是受手臂动作限制。
-		//   收回本身要时间（与伸展同一公式）⇒ 顺手给一个**等长的待机**让收回真的走完；
-		//   否则下一条会在收回刚开始时就把它截断，看起来只是"抖一下"。
 		//
 		// ⚠️ 用 `retract()` 而不是 `cancelMove()`：收回**不等于松手**。认领的寿命归程序意图管
 		//   （`pinOffset()`），这里一松手、下一 tick 又认领回来，物品会在带上被放开一格再拽回来
 		//   （用户第二十七轮续三十五："又变成无法定住被加工的物品了"）。
+		//
+		// ⚠️⚠️ **不要再加"等收回动画走完"的待机**（曾经写成 `setIdleCooldown(swingTicks())`，
+		//   用户第二十七轮续三十六实测："组装的时候臂会空一轮"）：`chasedPointProgress` 一个 0→1
+		//   本来就是"先折回静止位（0→.5）再伸向目标（.5→1）"（见 `tickMovementProgress` 与
+		//   `SmartArmAngleTarget`），**收回已经包含在下一次动作里**；额外的待机只是让运行时**变聋**：
+		//   `tick()` 在 `idleCooldown > 0` 时直接返回 ⇒ 前置检查不跑、认领虽在但没有下一件可动，
+		//   16rpm 下 64 tick 的聋窗刚好等于"一件物品走完一整格"的时间 ⇒ **每件物品漏掉一件**。
 		arm.retract();
-		setIdleCooldown(arm.swingTicks());
 
 		if (entry.onSuccess == SkipAction.SKIP_TO && !entry.successTarget.isBlank()) {
 			lastFailure = "成功 → 跳转 " + entry.successTarget;

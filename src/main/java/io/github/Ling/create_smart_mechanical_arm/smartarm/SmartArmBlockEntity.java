@@ -438,8 +438,12 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			for (TransportedItemStack candidate : items) {
 				if (candidate.stack.isEmpty())
 					continue;
-				if (candidate.beltPosition < belt.index || candidate.beltPosition >= belt.index + 1)
-					continue; // 只认目标格
+				// ⚠️ 范围必须与**带子自己的加工范围逐字相同**（`handleProcessingOnAllItems` ⇒
+				//    `handleCenteredProcessingOnAllItems(.51f, …)` ⇒ `applyToEachWithin(index + .5f, .51f, …)`，
+				//    见 `BeltBlockEntity:405-413`、`BeltInventory:456-464`）：否则会出现
+				//    "前置检查放行了、但到那儿一看没有可认领的物品" ⇒ 白伸一趟（决策 68/91：判据写两份必然分叉）。
+				if (Math.abs(candidate.beltPosition - center) >= .51f)
+					continue; // 只认目标格中心 ±.51
 				if (!runtime.canWorkOn(this, candidate.stack))
 					continue; // 产物 / 加工不了的东西：不按（否则会堵住带子）
 				float distance = Math.abs(candidate.beltPosition - center);
@@ -537,17 +541,6 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		if (perTick < 1e-4f)
 			return TRANSIENT_BLOCK_DEFAULT_TICKS;
 		return Mth.clamp((int) Math.ceil(1f / perTick) + 1, TRANSIENT_BLOCK_MIN_TICKS, TRANSIENT_BLOCK_MAX_TICKS);
-	}
-
-	/**
-	 * 伸出去 / 收回来**一趟**大约要几 tick（与 {@link #tickMovementProgress()} 的公式一致）。
-	 *
-	 * <p>用途：条目结束后要收回手臂，而收回是客户端插值出来的动画 —— 给它等长的待机时间，
-	 * 收回才走得完整（否则下一条会在收回刚开始时把它截断，看起来只"抖一下"）。
-	 * 速度越高越快：16rpm ⇒ 64 tick（3.2 秒），256rpm ⇒ 4 tick。
-	 */
-	public int swingTicks() {
-		return Math.max(1, 1024 / Mth.clamp((int) Math.abs(getSpeed()), 1, 256));
 	}
 
 	/** 没有带速可算时的保守值（约半秒）。 */

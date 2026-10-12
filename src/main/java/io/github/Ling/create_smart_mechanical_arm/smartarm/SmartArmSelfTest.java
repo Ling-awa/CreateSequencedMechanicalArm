@@ -9,6 +9,7 @@ import java.util.function.Supplier;
 
 import com.mojang.logging.LogUtils;
 import com.simibubi.create.AllDataComponents;
+import com.simibubi.create.AllRecipeTypes;
 import com.simibubi.create.Create;
 import com.simibubi.create.content.contraptions.StructureTransform;
 import com.simibubi.create.content.equipment.clipboard.ClipboardContent;
@@ -75,6 +76,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.DyedItemColor;
+import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.level.Level;
@@ -146,6 +148,7 @@ public class SmartArmSelfTest {
 		checkTakeGateEndToEnd(server);
 		checkPrecheckRetryIsPerTick(server);
 		checkClaimFollowsIntent(server);
+		checkDeployPrecheckScansAllSlots(server);
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
@@ -718,9 +721,156 @@ public class SmartArmSelfTest {
 		}
 	}
 
+	/**
+	 * 「组装的前置检查要**逐件找**，不能被产物挡住」（用户第二十七轮续三十六实测）。
+	 *
+	 * <p><b>为什么要有这条断言</b>：前置检查原来只看"第一个非空槽/那一格最靠前的一件"。
+	 * 而在传送带上，最靠前的那件往往正是**刚加工出来的产物** —— 它不匹配配方，于是
+	 * 前置检查报"没有匹配的配方"、手臂**干脆不伸出去**，后面那件能加工的**原料**永远等不到机会
+	 * （用户原话："组装的时候臂会空一轮"）。上游没有这个问题：机械手（Deployer）是**逐件回调**的，
+	 * 不匹配的直接放行（`BeltDeployerCallbacks:58-59`）。
+	 *
+	 * <p><b>判据为什么能分辨</b>：夹具是"产物在前、原料在后"的两格容器。
+	 * ① 前置检查**必须放行**（说明它在逐件找）；把它改回"只看第一件" ⇒ 立刻报"没有匹配的配方" ⇒ 红。
+	 * ② 反例：把原料拿走、只留产物 ⇒ 必须**报错**（否则说明这条断言永远绿、等于没测）。
+	 * 夹具的两件物品都是**运行时从配方表里发现的**（不写死物品 id，避免配方改名/换包就失效）。
+	 */
+	private static void checkDeployPrecheckScansAllSlots(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 80, 200, spawn.getZ() + 80);
+		BlockPos targetPos = armPos.offset(2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldTarget = level.getBlockState(targetPos);
+		try {
+			// ① 运行时找一份真实的 item_application 配方，问出"哪件是被加工物、哪件是手上的应用物"
+			ItemStack raw = ItemStack.EMPTY;
+			ItemStack applicator = ItemStack.EMPTY;
+			for (RecipeHolder<?> holder : level.getRecipeManager()
+				.getAllRecipesFor(AllRecipeTypes.ITEM_APPLICATION.getType())) {
+				List<Ingredient> ingredients = holder.value()
+					.getIngredients();
+				if (ingredients.size() < 2)
+					continue;
+				for (ItemStack a : ingredients.get(0)
+					.getItems()) {
+					for (ItemStack b : ingredients.get(1)
+						.getItems()) {
+						if (DeployRecipes.find(level, a, b) != null) {
+							raw = a.copy();
+							applicator = b.copy();
+						} else if (DeployRecipes.find(level, b, a) != null) {
+							raw = b.copy();
+							applicator = a.copy();
+						}
+						if (!raw.isEmpty())
+							break;
+					}
+					if (!raw.isEmpty())
+						break;
+				}
+				if (!raw.isEmpty())
+					break;
+			}
+			if (raw.isEmpty()) {
+				LOGGER.error("[selftest] 组装前置检查自检**没跑起来**：配方表里找不到任何 item_application 配方");
+				return;
+			}
+			// ② "产物" = 一件**问过配方系统确认不匹配**的物品（不靠猜）
+			ItemStack product = ItemStack.EMPTY;
+			for (ItemStack candidate : List.of(new ItemStack(Items.DIRT), new ItemStack(Items.STONE),
+				new ItemStack(Items.OAK_PLANKS), new ItemStack(Items.GRAVEL))) {
+				if (DeployRecipes.find(level, candidate, applicator) == null) {
+					product = candidate;
+					break;
+				}
+			}
+			if (product.isEmpty()) {
+				LOGGER.error("[selftest] 组装前置检查自检**没跑起来**：找不到一件不匹配配方的「产物」");
+				return;
+			}
+			// ③ 目标方块：挑一个"至少 2 格、且是 Create 交互点"的容器（产物占前排、原料在后排）
+			IItemHandler handler = null;
+			for (String id : new String[] { "create:packager", "create:repackager", "create:chute",
+				"create:basin", "create:depot" }) {
+				BlockState candidate = stateOf(id);
+				if (candidate == null)
+					continue;
+				level.setBlockAndUpdate(targetPos, candidate);
+				IItemHandler probe = level.getCapability(Capabilities.ItemHandler.BLOCK, targetPos, Direction.UP);
+				if (probe != null && probe.getSlots() >= 2) {
+					handler = probe;
+					break;
+				}
+			}
+			if (handler == null) {
+				LOGGER.error("[selftest] 组装前置检查自检**没跑起来**：找不到一个 ≥2 格且属于 Create 交互点的容器");
+				return;
+			}
+			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 组装前置检查自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32);
+			arm.setHeldItem(applicator.copy());
+			ArmProgram program = new ArmProgram();
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "自检组装";
+			ArmProgramEntry entry = new ArmProgramEntry();
+			entry.op = OperationType.DEPLOY;
+			entry.offset = targetPos.subtract(armPos);
+			task.entries.add(entry);
+			program.tasks.add(task);
+
+			// ④ 产物在前、原料在后 ⇒ 必须放行
+			handler.insertItem(0, product.copy(), false);
+			boolean fedRaw = handler.insertItem(1, raw.copyWithCount(1), false)
+				.isEmpty();
+			arm.setProgram(program);
+			arm.runtime.tick(arm);
+			String afterBoth = arm.runtime.getLastFailure();
+			boolean passedWithProductInFront = afterBoth == null;
+
+			// ⑤ 反例：只剩产物 ⇒ 必须报错（证明"放行"不是因为判据永远为真）
+			ItemStack takenBack = handler.extractItem(1, 64, false);
+			arm.runtime.resetToStart(arm);
+			arm.runtime.tick(arm);
+			String afterProductOnly = arm.runtime.getLastFailure();
+
+			LOGGER.info("[selftest] 组装前置检查逐件找: 产物={} 原料={} 应用物={} "
+				+ "（产物在前也放行={} 只剩产物就报错={}）",
+				product.getHoverName()
+					.getString(),
+				raw.getHoverName()
+					.getString(),
+				applicator.getHoverName()
+					.getString(),
+				passedWithProductInFront, afterProductOnly != null);
+
+			if (!fedRaw)
+				LOGGER.error("[selftest] 组装前置检查自检**没跑起来**：原料没能放进第二格 —— 等于没测");
+			else if (!takenBack.is(raw.getItem()) && !takenBack.is(raw.getItem()
+				.getCraftingRemainingItem()))
+				LOGGER.error("[selftest] 组装前置检查自检**没跑起来**：反例那步没能把原料取回来 —— 等于没测");
+			if (!passedWithProductInFront)
+				LOGGER.error("[selftest] 「组装」前置检查被**前面那件产物**挡住了（报出「{}」）—— "
+					+ "手臂于是不伸出去，而后面那件能加工的原料永远等不到机会（用户实测：臂会空一轮）。"
+					+ "上游是逐件回调、不匹配就放行（`BeltDeployerCallbacks:58-59`），判据必须与真正加工时同源",
+					text(afterBoth));
+			if (afterProductOnly == null)
+				LOGGER.error("[selftest] 「组装」前置检查**只剩产物也放行** —— 这条断言永远绿、等于没测");
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 组装前置检查自检抛异常：{}", t.toString());
+		} finally {
+			level.setBlockAndUpdate(targetPos, oldTarget);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+	}
+
 	/** 走目标方块**自己的物品能力**放一个铁锭（不碰 BE 内部字段，与"世界里真的放了一个"一致）。 */
-	private static boolean putOneInto(ServerLevel level, BlockPos pos) {
-		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
+	private static boolean putOneInto(ServerLevel level, BlockPos pos) {		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
 		if (handler == null)
 			return false;
 		for (int slot = 0; slot < handler.getSlots(); slot++) {
@@ -823,9 +973,18 @@ public class SmartArmSelfTest {
 				}
 			}
 			boolean claimsWhileRetracting = arm.canPinTarget();
+			// ②b **不许有"聋窗"**：成功之后的**下一个** tick 就必须在跑前置检查了。
+			//     判据：第二条的目标（B）是空的 ⇒ 只要前置检查真的跑了，就会报出「目标为空」。
+			//     曾经在成功后会 `setIdleCooldown(swingTicks())`（16rpm = 64 tick 完全不 tick），
+			//     而 16rpm 下 64 tick 恰好是一件物品走完一整格的时间 ⇒ 用户实测"组装的时候臂会空一轮"。
+			//     反证：把那次待机加回去 ⇒ 这里立刻变红（`lastFailure` 还是 null）。
+			boolean noDeafWindow = false;
+
 			// ③ 接下来几 tick（收回 + 待机整段）都要继续认领，且认领的是**新**目标
 			boolean claimsThroughout = true;
 			boolean offsetFollowsSecond = true;
+			arm.runtime.tick(arm);
+			noDeafWindow = arm.runtime.getLastFailure() != null;
 			for (int i = 0; i < 40; i++) {
 				arm.runtime.tick(arm);
 				claimsThroughout &= arm.canPinTarget();
@@ -838,9 +997,10 @@ public class SmartArmSelfTest {
 			arm.setSpeed(32);
 
 			LOGGER.info("[selftest] 认领窗口跟程序意图: 未动身就认领={}（前置检查跑了={}） 目标跟着第1条={} "
-				+ "第1条成功后仍在认领={}（真的成功了={}） 收回+待机整段都认领={} 目标跟着第2条={} 停机仍认领={}",
+				+ "第1条成功后仍在认领={}（真的成功了={}） 收回+待机整段都认领={} 目标跟着第2条={} 停机仍认领={} "
+				+ "成功后下一 tick 就接着查={}",
 				claimsBeforeMoving, ran, offsetFollowsFirst, claimsWhileRetracting, succeeded, claimsThroughout,
-				offsetFollowsSecond, claimsWhileStopped);
+				offsetFollowsSecond, claimsWhileStopped, noDeafWindow);
 
 			if (!ran)
 				LOGGER.error("[selftest] 认领窗口自检**没跑起来**：空载具时前置检查没报出原因 —— 等于没测");
@@ -862,6 +1022,10 @@ public class SmartArmSelfTest {
 					claimsThroughout);
 			if (!claimsWhileStopped)
 				LOGGER.error("[selftest] 停机（无应力）后不再认领 —— 与原版不一致（`ArmBlockEntity:133-140`）");
+			if (!noDeafWindow)
+				LOGGER.error("[selftest] 条目成功之后**有一段时间不跑前置检查**（" + "下一个 tick 还没报出第二条的失败原因）"
+					+ " —— 那段'聋窗'会让传送带上的一件物品白白走过：16rpm 下 64 tick 恰好等于走完一整格，"
+					+ "用户实测就是'组装的时候臂会空一轮'");
 		} catch (Throwable t) {
 			LOGGER.error("[selftest] 认领窗口自检抛异常：{}", t.toString());
 		} finally {
