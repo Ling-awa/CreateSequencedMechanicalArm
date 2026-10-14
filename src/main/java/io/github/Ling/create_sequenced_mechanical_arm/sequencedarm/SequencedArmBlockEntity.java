@@ -420,10 +420,8 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 *       16rpm 下带速 1/64 格/tick ⇒ 容差 1/32 ⇒ 物品停在离中心 ≤1/32 格处，肉眼就是"中间"。</li>
 	 * </ul>
 	 *
-	 * <p>⚠️ 认领时**绝不移动物品**（不再有"拉到中心"那一步）：用户实测
-	 * <i>"它会捕获并定住物品，但是物品会立即瞬移到中间而不是留在原本的位置"</i>。
-	 * 两条路都不需要定心：取物走 {@code BeltInventory.getStackAtOffset:394-406}（只看在不在这一格），
-	 * 组装走 {@code handleProcessingOnAllItems}（范围就是整格 ±.51）。
+	 * <p>⚠️ **取物不动物品**（用户实测：<i>"它会捕获并定住物品，但是物品会立即瞬移到中间而不是留在原本的位置"</i>）——
+	 * 取物停在原地、组装才归位，见 {@link #snapToWorkPosition}。
 	 */
 	public static float claimTolerance(boolean needsCentre, float beltStep) {
 		return needsCentre ? Math.max(1 / 32f, Math.abs(beltStep)) : CLAIM_RANGE;
@@ -431,6 +429,44 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 
 	/** 判定范围：与带子自己的加工范围一致（`handleProcessingOnAllItems` ⇒ 中心 ±.51）。 */
 	private static final float CLAIM_RANGE = .51f;
+
+	/**
+	 * **作业位**的精确坐标 —— 照抄本体把被 HOLD 的物品居中的那一行
+	 * （`BeltInventory:292`：{@code beltPosition = segment + .5f ± 1/512f}）。
+	 *
+	 * <p>为什么必须有这一格：本体**只在物品跨过格子中心的那一 tick** 才询问机器
+	 * （{@code BeltInventory:268-297}），并在那一刻把它**居中**。用户第二十七轮续四十一实测我们的偏差：
+	 * <i>"组装的时候，物品还没有运动到正中间，动力臂就已经组装了"</i> —— 结果产物在半路生成、挡住后面那件。
+	 */
+	public static float centreSnapPosition(int beltIndex, boolean movementPositive) {
+		return beltIndex + .5f + (movementPositive ? 1 / 512f : -1 / 512f);
+	}
+
+	/** 纯判据：某件物品是否已经在**作业位**上（离格子中心 < 容差）。所有"能不能动手"的判断都走它（决策 68）。 */
+	public static boolean atWorkPosition(float beltPosition, float centre, float tolerance) {
+		return Math.abs(beltPosition - centre) < tolerance;
+	}
+
+	/**
+	 * 这件物品在**目标带**上是否已走到作业位。
+	 *
+	 * <p>三处共用（认领 / 前置检查 / 真正加工）：组装必须等它到这里才动手 ——
+	 * 这也是"速度受传送带限制"的来源：产物没被送走时，后面那件到不了中心 ⇒ 我们收不到"有活干" ⇒ 自然降速。
+	 */
+	public boolean isAtWorkPosition(TransportedItemStack item) {
+		BeltBlockEntity belt = beltBlock();
+		if (belt == null)
+			return false;
+		return atWorkPosition(item.beltPosition, belt.index + .5f,
+			claimTolerance(true, belt.getBeltMovementSpeed()));
+	}
+
+	/** 把物品搬到作业位（照抄本体的 HOLD 居中）。**只在"组装"认领时调用**，位移 ≤ 一个 tick 的带速。 */
+	private void snapToWorkPosition(BeltBlockEntity belt, TransportedItemStack item) {
+		float snapped = centreSnapPosition(belt.index, belt.getDirectionAwareBeltMovementSpeed() > 0);
+		item.beltPosition = snapped;
+		item.prevBeltPosition = snapped;
+	}
 
 	/**
 	 * 认领要按住的那件物品：上次那件还在就继续用它，否则按**当前条目的位置条件**在目标格里挑一件
@@ -450,13 +486,20 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			return null;
 		}
 		List<TransportedItemStack> items = inventory.getTransportedItems();
+		boolean needsCentre = runtime.claimNeedsCentre(this);
+		float centre = belt.index + .5f;
+		float tolerance = claimTolerance(needsCentre, belt.getBeltMovementSpeed());
 		// ① 保留：上一次认领的那件**还在带子上**就继续按着（它被我们按住、不会漂走）。
 		TransportedItemStack item = pinnedBeltItem != null && items.contains(pinnedBeltItem)
 			&& !pinnedBeltItem.stack.isEmpty() ? pinnedBeltItem : null;
+		// ①b 组装：**已经不在作业位的那件不再保留** —— 否则会把一件我们永远不会加工的物品按死在那里
+		//     （它的位置条件已经不满足，松手让带子把它送走，下一件走到中心再认领）。
+		if (item != null && needsCentre && !atWorkPosition(item.beltPosition, centre, tolerance)) {
+			releaseBeltHold();
+			item = null;
+		}
 		// ② 认领：目标格里"这条条目加工得了"、且满足**位置条件**的一件。
 		if (item == null) {
-			float centre = belt.index + .5f;
-			float tolerance = claimTolerance(runtime.claimNeedsCentre(this), belt.getBeltMovementSpeed());
 			float bestDistance = Float.MAX_VALUE;
 			for (TransportedItemStack candidate : items) {
 				if (candidate.stack.isEmpty())
@@ -477,10 +520,14 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			return null;
 		}
 		pinnedBeltItem = item;
-		// ★ **不动物品**：它停在自己现在的位置。`locked` 才是"按住"的那个标记
-		//   （带子服务端 `BeltInventory:161-162` 与客户端 `:119-121` 都会因此跳过移动，且都不会清掉它），
-		//   `lockedExternally` 每 tick 由 `holdBeltItem()` 重设，挡住带子自己的清理。
+		// ③ 按住它。`locked` 才是"按住"的那个标记（带子服务端 `BeltInventory:161-162` 与客户端
+		//    `:119-121` 都会因此跳过移动，且都不会清掉它）；`lockedExternally` 每 tick 由
+		//    `holdBeltItem()` 重设，挡住带子自己的清理。
+		//    **组装**在按住的同时把它搬到作业位 —— 照抄本体 HOLD 的居中（`BeltInventory:292`），
+		//    位移 ≤ 一个 tick 的带速（"它到了"），不是从格子边缘拽过来。**取物不搬**。
 		if (item != clientHoldItem || !item.locked) {
+			if (needsCentre)
+				snapToWorkPosition(belt, item);
 			item.locked = true;
 			clientHoldItem = item;
 			syncBeltController();

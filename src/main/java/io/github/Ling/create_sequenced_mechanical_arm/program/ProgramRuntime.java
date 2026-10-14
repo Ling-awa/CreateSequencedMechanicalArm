@@ -572,6 +572,10 @@ public class ProgramRuntime {
 	 * <p>⚠️ 与 {@link #canWorkOn} 的分工：这里是"**这一格有没有**能加工的东西"（给前置检查），
 	 * 那里是"**这一件**能不能加工"（给认领逐件用）。两者都调 {@link DeployRecipes#find}，
 	 * **不要**在这里另写一套配方判据（决策 68/91：判据写两份必然分叉）。
+	 *
+	 * <p>★ **还要求"已经在作业位上"**（{@code arm.isAtWorkPosition}）：本体只在物品**跨过格子中心**的那一 tick
+	 * 才询问机器（`BeltInventory:268-297`），而 {@code handleProcessingOnAllItems} 的范围是整格（±.51）——
+	 * 不额外加这一条，手臂就会在半路动手（用户第二十七轮续四十一实测："物品还没有运动到正中间，动力臂就已经组装了"）。
 	 */
 	private static boolean anyProcessable(Level level, SequencedArmBlockEntity arm, ArmProgramEntry entry,
 		IItemHandler handler, ItemStack applicator) {
@@ -579,7 +583,7 @@ public class ProgramRuntime {
 		if (transport != null) {
 			boolean[] found = { false };
 			transport.handleProcessingOnAllItems(t -> {
-				if (!found[0] && !t.stack.isEmpty()
+				if (!found[0] && arm.isAtWorkPosition(t) && !t.stack.isEmpty()
 					&& DeployRecipes.find(level, t.stack.copyWithCount(1), applicator) != null)
 					found[0] = true;
 				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
@@ -869,6 +873,10 @@ public class ProgramRuntime {
 	 * {@code convertToAndLeaveHeld(collect, left)}（有产物 ⇒ 产物上带、原件余量留在带上）。
 	 * **不 extract、不 insert** —— 记账全部交给带子（产物进 `toInsert`、原件进 `toRemove`），
 	 * 于是不会撞上 `canInsertAt`/"那格被自己占住"的坑，物品位置也不会跳。
+	 *
+	 * <p>★ **只加工"已经在作业位上"的那件**（与前置检查同一条判据，见 {@code anyProcessable}）：
+	 * 本体在 HOLD 时会把物品**居中**（`BeltInventory:292`），我们也照做（认领时 `snapToWorkPosition`），
+	 * 所以产物一定在格子中心出生、不会提前半格挡在原料前面（用户第二十七轮续四十一实测）。
 	 */
 	private void deployOnBelt(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
 		TransportedItemStackHandlerBehaviour transport, ItemStack applicator) {
@@ -876,7 +884,7 @@ public class ProgramRuntime {
 		RecipeHolder<? extends Recipe<?>>[] recipeRef = new RecipeHolder<?>[1];
 		ItemStack[] processedRef = new ItemStack[1];
 		transport.handleProcessingOnAllItems(t -> {
-			if (handled[0])
+			if (handled[0] || !arm.isAtWorkPosition(t))
 				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
 			RecipeHolder<? extends Recipe<?>> recipe = DeployRecipes.find(level, t.stack, applicator);
 			if (recipe == null)

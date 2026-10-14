@@ -1125,9 +1125,22 @@ public class SequencedArmSelfTest {
 		boolean deployWaitsForCentre = deploySlow < takeRange && Math.abs(deploySlow - 1 / 32f) < tol;
 		boolean deployKeepsUpOnFastBelts = Math.abs(deployFast - fastStep) < tol;
 
+		// ★ 「作业位」判据（用户第二十七轮续四十一实测：组装**必须等物品走到中间**才动手）：
+		//   本体只在物品跨过格子中心那一 tick 才询问机器（`BeltInventory:268-297`），并在那一刻把它**居中**
+		//   （`:292`：`segment + .5f ± 1/512f`）。所以离中心 0.1 格**不算**到位 ——
+		//   这正是旧写法（认整格 ±.51）出错的地方：手臂在半路就动手 ⇒ 产物提前半格出生 ⇒ 挡住后面那件。
+		float slowTol = SequencedArmBlockEntity.claimTolerance(true, slowStep);
+		boolean oneTenthOffIsNotAtWorkPosition = !SequencedArmBlockEntity.atWorkPosition(.5f + .1f, .5f, slowTol);
+		boolean centreIsAtWorkPosition = SequencedArmBlockEntity.atWorkPosition(.5f, .5f, slowTol);
+		boolean oldWholeSegmentRuleWouldHaveAccepted = SequencedArmBlockEntity.atWorkPosition(.5f + .1f, .5f, .51f);
+		boolean snapIsVanillaLine = Math.abs(SequencedArmBlockEntity.centreSnapPosition(3, true) - (3.5f + 1 / 512f)) < tol
+			&& Math.abs(SequencedArmBlockEntity.centreSnapPosition(3, false) - (3.5f - 1 / 512f)) < tol;
+
 		LOGGER.info("[selftest] 认领位置条件: 取物容差={}（整格） 组装容差·慢带={}（16rpm，应当 1/32） "
-			+ "组装容差·快带={}（应当 ≥ 一个 tick 的带速 {}）",
-			takeRange, deploySlow, deployFast, fastStep);
+			+ "组装容差·快带={}（应当 ≥ 一个 tick 的带速 {}） ｜ 作业位: 离中心 .1 格不算到位={} 正中算={} "
+			+ "（旧的整格判据会误判为到位={}） 居中坐标照抄本体={}",
+			takeRange, deploySlow, deployFast, fastStep, oneTenthOffIsNotAtWorkPosition, centreIsAtWorkPosition,
+			oldWholeSegmentRuleWouldHaveAccepted, snapIsVanillaLine);
 
 		if (!takeTakesWholeSegment)
 			LOGGER.error("[selftest] 「取物」的认领范围不是整格（{}，应当 .51 = 带子自己的加工范围）—— "
@@ -1139,10 +1152,20 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 快带子上「组装」的容差**没有跟着带速走**（{}，应当等于一个 tick 的位移 {}）"
 				+ "—— 比它小则每 tick 直接跨过窗口、永远认领不到；比它大则等于「一进范围就按住」", deployFast,
 				fastStep);
+		if (!oneTenthOffIsNotAtWorkPosition || !centreIsAtWorkPosition)
+			LOGGER.error("[selftest] 「作业位」判据不对（离中心 .1 格算到位={}，正中算到位={}）—— "
+				+ "组装必须只在物品**走到格子中心**后才动手（本体 `BeltInventory:268-297`）；"
+				+ "否则手臂在半路加工、产物提前半格出生挡住后面那件（用户第二十七轮续四十一实测）",
+				oneTenthOffIsNotAtWorkPosition, centreIsAtWorkPosition);
+		if (!snapIsVanillaLine)
+			LOGGER.error("[selftest] 「居中」坐标与本体的 HOLD 不一致（{}，应当 index + .5 ± 1/512）—— "
+				+ "本体在 HOLD 那一刻就是这么居中的（`BeltInventory:292`）",
+				SequencedArmBlockEntity.centreSnapPosition(3, true));
 	}
 
 	/** 走目标方块**自己的物品能力**放一个铁锭（不碰 BE 内部字段，与"世界里真的放了一个"一致）。 */
-	private static boolean putOneInto(ServerLevel level, BlockPos pos) {		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
+	private static boolean putOneInto(ServerLevel level, BlockPos pos) {
+		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
 		if (handler == null)
 			return false;
 		for (int slot = 0; slot < handler.getSlots(); slot++) {
