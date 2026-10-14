@@ -283,7 +283,7 @@ ScheduleEntry { ScheduleInstruction instruction; List<List<ScheduleWaitCondition
 
 ---
 
-## 10. 我们（智能动力臂）与它的对应关系
+## 10. 我们（可编程动力臂）与它的对应关系
 
 **用户已定的落地方式**（2026-10-06）：尽量小的改动，尽量只用时刻表的贴图。
 

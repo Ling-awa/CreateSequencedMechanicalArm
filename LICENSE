@@ -28,6 +28,6 @@ This mod is an addon for Create (https://github.com/Creators-of-Create/Create),
 which is licensed under the MIT License, Copyright (c) simibubi and contributors.
 
 The two-segment inverse-kinematics angle values in
-src/main/java/io/github/Ling/create_smart_mechanical_arm/smartarm/SmartArmAngleTarget.java
+src/main/java/io/github/Ling/create_sequenced_mechanical_arm/sma/SequencedArmAngleTarget.java
 match Create's com.simibubi.create.content.kinetics.mechanicalArm.ArmAngleTarget
 (arm lengths 14/16 and 15/16), used under the MIT License with attribution.

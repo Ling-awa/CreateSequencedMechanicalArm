@@ -53,7 +53,7 @@ neoForge {
             // 自检完自动退出：`gradlew runServer -PsmaSelfTest=exit`
             // 为什么要它：服务器不会自己停，`runServer` 就只能挂到超时被杀 —— 每次迭代白等约两分钟，
             // 而且"被超时杀掉"（exit 1）与"编译失败"看起来一样。打开后约 15 秒拿到全部自检日志。
-            systemProperty 'create_smart_mechanical_arm.selftest.exit', (project.findProperty('smaSelfTest') ?: 'false').toString()
+            systemProperty 'create_sequenced_mechanical_arm.selftest.exit', (project.findProperty('smaSelfTest') ?: 'false').toString()
         }
 
         // This run config launches GameTestServer and runs all registered gametests, then exits.

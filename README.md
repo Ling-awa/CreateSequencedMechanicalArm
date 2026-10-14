@@ -1,4 +1,4 @@
-# 智能动力臂 · Create Smart Mechanical Arm
+# 可编程动力臂 · Create Sequenced Mechanical Arm
 
 给 [机械动力（Create）](https://github.com/Creators-of-Create/Create) 加一种**可编程的机械臂**：
 在「操作表」上写好一串操作，插进臂里，它就会一条一条地执行 —— 取物、放入、卸货、组装、攻击、挖掘、
@@ -14,7 +14,7 @@
 
 原版动力臂只能"从 A 拿到 B"。这条臂多了一张**可编辑的操作表**：
 
-1. 合成/拿到「智能动力臂」放好（需要给它转速，和原版动力臂一样）；
+1. 合成/拿到「可编程动力臂」放好（需要给它转速，和原版动力臂一样）；
 2. 手持「操作表」**潜行右键**进入编辑模式，对着方块右键把目标位置录进去，滚轮选动作；
 3. 把操作表插进臂里，臂就会按条目一步步执行，护目镜能看它跑到哪一步、以及失败原因。
 
@@ -47,7 +47,7 @@
 ## 构建
 
 ```bash
-./gradlew build        # 产物在 build/libs/create_smart_mechanical_arm-<版本>.jar
+./gradlew build        # 产物在 build/libs/create_sequenced_mechanical_arm-<版本>.jar
 ./gradlew runClient    # 起一个带 Create 的开发客户端（首次会下载依赖）
 ./gradlew runServer -PsmaSelfTest=true   # 无头自检：跑完断言后自动关服
 ```
@@ -68,20 +68,23 @@
 - 依赖并面向 **[Create（机械动力）](https://github.com/Creators-of-Create/Create)**，其许可为 MIT，
   版权归 simibubi 及其贡献者所有。
 - 手臂的两节 IK 角度解算数值与 Create 的 `ArmAngleTarget` 一致（见
-  `SmartArmAngleTarget` 的类注释），依据 MIT 许可使用并注明来源。
+  `SequencedArmAngleTarget` 的类注释），依据 MIT 许可使用并注明来源。
 
 ---
 
 ## English
 
-An addon for **Create** that adds a **programmable mechanical arm**. Write a list of operations on an
+An addon for **Create** that adds a **sequenced mechanical arm**. Write a list of operations on an
 *operation table*, insert it into the arm, and the arm performs them step by step: take, deposit,
 unload, deploy, attack, mine, use, sneak-use, wait, wait-for-redstone, send/receive a redstone-link
 signal, call a subtask, return, throw.
+
+> The Chinese name is **可编程动力臂**, following Create's own wording for the Sequenced Gearshift
+> (「可编程齿轮箱」); the English name follows Create's English convention (*Sequenced*).
 
 - **Requires**: Minecraft 1.21.1, NeoForge 21.1.251, Create 6.0.10-280, Java 21.
 - **Build**: `./gradlew build` → jar in `build/libs/`.
 - **Design note**: this addon deliberately adds nothing beyond the arm itself — no new block families,
   no cross-mod integration.
 - **License**: MIT. Create is MIT, © simibubi and contributors; the arm's two-segment IK numbers match
-  Create's `ArmAngleTarget` (see the class comment in `SmartArmAngleTarget`).
+  Create's `ArmAngleTarget` (see the class comment in `SequencedArmAngleTarget`).
