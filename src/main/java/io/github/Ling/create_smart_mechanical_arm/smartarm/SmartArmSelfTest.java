@@ -149,6 +149,7 @@ public class SmartArmSelfTest {
 		checkPrecheckRetryIsPerTick(server);
 		checkClaimFollowsIntent(server);
 		checkDeployPrecheckScansAllSlots(server);
+		checkRetractBeforeNextMove(server);
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
@@ -865,6 +866,137 @@ public class SmartArmSelfTest {
 			LOGGER.error("[selftest] 组装前置检查自检抛异常：{}", t.toString());
 		} finally {
 			level.setBlockAndUpdate(targetPos, oldTarget);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+	}
+
+	/**
+	 * 「收回属于**这一次**操作：折返没走完就不动身」（用户第二十七轮续三十七实测，对照原版动力臂动画）。
+	 *
+	 * <p><b>用户的原话（对照两条臂一步一步看出来的）</b>：
+	 * <pre>
+	 *   原版：旋转&amp;伸出 → 拿取 → **收回** → 旋转&amp;伸出 → 放入 → 收回
+	 *   我们：旋转&amp;伸出 → 拿取 → **收回&amp;旋转&amp;伸出** → 放入 → 收回
+	 * </pre>
+	 * 即我们把"收回"并进了**下一次**动作的前半段 ⇒ 折回的同时就在转向新目标。
+	 * 正确的语义：{@code progress} 走到 1.00 只是"伸出到位"；而**收回**是这一条操作的最后一段。
+	 *
+	 * <p><b>判据为什么能分辨</b>：第二条目标（B）里**放着东西**，所以第一条成功后前置检查必然放行 ——
+	 * 于是"有没有动身"就完全取决于那道 {@code isAtRest()} 闸门：
+	 * ① 折返这一段（进度停在 0）里必须**一直待机**、且**不报失败**（说明它看得见、只是不动身）；
+	 * ② 折返走完（进度过 .5）后必须**立刻**动身（不许卡死）；
+	 * ③ 最后第二条要真的把物品取到（端到端，证明这段等待没把程序卡住）。
+	 * 把闸门去掉 ⇒ ①立刻变红（第一条成功的下一 tick 就 `beginMove` 了）。
+	 */
+	private static void checkRetractBeforeNextMove(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 90, 200, spawn.getZ() + 90);
+		BlockPos depotA = armPos.offset(2, 0, 0);
+		BlockPos depotB = armPos.offset(-2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldA = level.getBlockState(depotA);
+		BlockState oldB = level.getBlockState(depotB);
+		try {
+			BlockState depotState = stateOf("create:depot");
+			if (depotState == null) {
+				LOGGER.error("[selftest] 收回时序自检**没跑起来**：找不到 create:depot");
+				return;
+			}
+			level.setBlockAndUpdate(armPos, SmartArmRegistration.SMART_ARM.get()
+				.defaultBlockState());
+			level.setBlockAndUpdate(depotA, depotState);
+			level.setBlockAndUpdate(depotB, depotState);
+			if (!(level.getBlockEntity(armPos) instanceof SmartArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 收回时序自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32); // 一个单位 = 1024/32 = 32 tick，折返到位 = 16 tick
+			ArmProgram program = new ArmProgram();
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "自检收回";
+			for (BlockPos target : new BlockPos[] { depotA, depotB }) {
+				ArmProgramEntry entry = new ArmProgramEntry();
+				entry.op = OperationType.TAKE;
+				entry.offset = target.subtract(armPos);
+				task.entries.add(entry);
+			}
+			program.tasks.add(task);
+			arm.setProgram(program);
+
+			boolean fedA = putOneInto(level, depotA);
+			boolean fedB = putOneInto(level, depotB);
+			// ① 跑到第一条成功（A 被取空）。自检不跑运动学，每轮把进度当作"已到位"。
+			boolean firstDone = false;
+			for (int i = 0; i < 200 && !firstDone; i++) {
+				arm.chasedPointProgress = 1f;
+				arm.runtime.tick(arm);
+				firstDone = isEmpty(level, depotA);
+			}
+			// 此刻 `succeed()` 里的 `retract()` 刚把进度清零 ⇒ 手臂正在折返，绝不该算"可以动身"
+			boolean restingFlagRightAfter = arm.isAtRest();
+
+			// ② 折返这一段：**不推进进度**（时间在走、动画在折），只 tick —— 必须"看得见但不动身"
+			boolean stayedHome = true;
+			boolean noFailureWhileRetracting = true;
+			for (int i = 0; i < 12; i++) {
+				arm.runtime.tick(arm);
+				stayedHome &= arm.phase == SmartArmBlockEntity.Phase.IDLE;
+				noFailureWhileRetracting &= arm.runtime.getLastFailure() == null;
+			}
+			boolean stillHoldingB = !isEmpty(level, depotB);
+
+			// ③ 折返走完（进度到静止位）⇒ 必须立刻动身，而且**从静止位起手**：
+			//    进度应当是 **.5**（这一次动作只有"旋转+伸出"），不是 0（那会把折返再播一遍）。
+			boolean movedAfterRest = false;
+			boolean startedFromRest = false;
+			float progressAtMoveStart = -1f;
+			for (int i = 0; i < 40 && !movedAfterRest; i++) {
+				arm.chasedPointProgress = 1f; // 模拟折返走完
+				arm.runtime.tick(arm);
+				movedAfterRest = arm.phase == SmartArmBlockEntity.Phase.MOVING;
+				if (movedAfterRest) {
+					progressAtMoveStart = arm.chasedPointProgress;
+					startedFromRest = Math.abs(progressAtMoveStart - .5f) < .01f;
+				}
+			}
+
+			// ④ 端到端：第二条也要真的取到
+			boolean secondDone = false;
+			for (int i = 0; i < 200 && !secondDone; i++) {
+				arm.chasedPointProgress = 1f;
+				arm.runtime.tick(arm);
+				secondDone = isEmpty(level, depotB);
+			}
+
+			LOGGER.info("[selftest] 收回属于本次操作: 折返途中可动身={}（应为 false） 折返途中一直待机={} "
+				+ "折返途中不报失败={}（B 还在={}） 折返走完立刻动身={} 从静止位起手={}（进度={}） 第2条真的取到={}",
+				restingFlagRightAfter, stayedHome, noFailureWhileRetracting, stillHoldingB, movedAfterRest,
+				startedFromRest, progressAtMoveStart, secondDone);
+
+			if (!fedA || !fedB)
+				LOGGER.error("[selftest] 收回时序自检**没跑起来**：物品没能放进两个载具 —— 等于没测");
+			else if (!firstDone)
+				LOGGER.error("[selftest] 收回时序自检**没跑起来**：第一条条目没成功 —— 等于没测");
+			if (restingFlagRightAfter)
+				LOGGER.error("[selftest] 条目成功后 `isAtRest()` 就是 true —— 说明**根本没有折返段**，"
+					+ "收回又被并进下一次动作了（原版是「旋转+伸出 → 动作 → 收回」）");
+			if (!stayedHome || !noFailureWhileRetracting)
+				LOGGER.error("[selftest] 折返途中**动身了**（待机={} 不报失败={}）—— 收回必须属于本次操作："
+					+ "折返没走完就开始下一次伸出，观感就是用户实测的「收回&旋转&伸出」", stayedHome,
+					noFailureWhileRetracting);
+			if (!movedAfterRest)
+				LOGGER.error("[selftest] 折返走完之后**没有动身** —— 那道「等折返」的闸门把程序卡死了");
+			if (movedAfterRest && !startedFromRest)
+				LOGGER.error("[selftest] 折返走完后的这次移动**不是从静止位起手**（进度={}，应当是 .5）—— "
+					+ "从 0 起手会把「折返」再播一遍，也就是把收回并进下一次动作", progressAtMoveStart);
+			if (!secondDone)
+				LOGGER.error("[selftest] 第二条条目最终没取到物品 —— 等待折返把程序卡住了");
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 收回时序自检抛异常：{}", t.toString());
+		} finally {
+			level.setBlockAndUpdate(depotA, oldA);
+			level.setBlockAndUpdate(depotB, oldB);
 			level.setBlockAndUpdate(armPos, oldArm);
 		}
 	}

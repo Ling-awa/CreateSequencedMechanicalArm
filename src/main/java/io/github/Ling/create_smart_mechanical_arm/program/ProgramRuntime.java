@@ -413,6 +413,15 @@ public class ProgramRuntime {
 		// 不能留到条目成功或下一轮开始才清（实测：补货后手臂已经继续干活了，护目镜还挂着旧提示）。
 		lastFailure = null;
 
+		// ★ **收回属于"这一次"操作：没走完就不动身**（用户第二十七轮续三十七实测，对照原版动力臂）。
+		//   一次完整的操作是「旋转+伸出 → 动作 → 收回」，收回不该被并进下一次动作的前半段
+		//   （并进去的话，折回的同时就开始转向新目标 ⇒ 看起来是"收回&旋转"）。
+		//   所以这里只是**把动作本身延后**：目标已经确认可以加工，就站在静止位等折返走完。
+		//   ⚠️ **不许用 `setIdleCooldown()` 来"等"** —— 那会让整个运行时停止 tick（前置检查不跑、
+		//     认领窗口空转），正是 §7.24 那个"每件物品漏一件"的聋窗。这里前置检查/认领照常每 tick 跑。
+		if (!arm.isAtRest())
+			return;
+
 		// 取物/组装：从**定下目标的那一刻**就锁住目标上的物品（同一 tick 先锁一次，之后每 tick 续锁）。
 		boolean pinsTarget = entry.op == OperationType.TAKE || entry.op == OperationType.DEPLOY;
 		if (!arm.beginMove(offset, entry.face, pinsTarget)) {

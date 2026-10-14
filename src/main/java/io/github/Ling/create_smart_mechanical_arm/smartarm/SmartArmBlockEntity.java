@@ -250,6 +250,13 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	public boolean beginMove(BlockPos offset, @Nullable Direction face, boolean pin) {
 		if (level == null)
 			return false;
+		// ★ **从静止位起手 ⇒ 这次动作只有"旋转+伸出"**（进度从 .5 起）：
+		//   收回是**上一次**操作的最后一段（`retract()` 起的那一段），不该在这里重播一遍。
+		//   用户第二十七轮续三十七实测（对照原版）：原版是"旋转&伸出 → 动作 → **收回**"，
+		//   我们曾经是"旋转&伸出 → 动作 → 收回&旋转&伸出"（收回并进了下一次动作）。
+		//   中途起手（例如挖掘的连挥 `restartMove`：手臂还伸在目标上）才走完整一个单位 ——
+		//   先折回（0→.5）再伸出（.5→1），那正是原版机械手反复挥击的观感。
+		boolean fromRest = isAtRest();
 		BlockPos target = worldPosition.offset(offset);
 		BlockState state = level.getBlockState(target);
 		ArmInteractionPoint point = pointAt(target, state, face);
@@ -264,7 +271,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			point.keepAlive(); // 同一 tick 先锁一次（理由见上面那段注释）
 		movingHandlerOwner = level.isClientSide ? null : level.getBlockEntity(target);
 		movingHandler = level.isClientSide ? null : handlerAt(target);
-		chasedPointProgress = 0;
+		chasedPointProgress = fromRest ? .5f : 0f;
 		chasedPointIndex = 0;
 		phase = Phase.MOVING;
 		moveSeq++;
@@ -940,9 +947,6 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		ArmInteractionPoint targeted = currentPoint();
 		SmartArmAngleTarget target = targeted == null ? SmartArmAngleTarget.RESTING : anglesFor(targeted);
 
-		baseAngle.setValue(AngleHelper.angleLerp(chasedPointProgress, previousBaseAngle,
-			target == SmartArmAngleTarget.RESTING ? previousBaseAngle : target.baseAngle));
-
 		SmartArmAngleTarget from = previousTarget;
 		if (chasedPointProgress < .5f)
 			target = SmartArmAngleTarget.RESTING; // 前半段：折回静止位
@@ -950,9 +954,36 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			from = SmartArmAngleTarget.RESTING; // 后半段：从静止位伸向目标
 		float progress = chasedPointProgress == 1 ? 1 : (chasedPointProgress % .5f) * 2;
 
+		// ★ **旋转只在"伸出"那半段发生**（用同一个 `progress`，不再用整段进度）—— 收回途中不转向新目标。
+		//   用户第二十七轮续三十七实测（对照原版动力臂的动画）：
+		//     原版：旋转&伸出 → 拿取 → **收回** → 旋转&伸出 → 放入 → 收回
+		//     我们：旋转&伸出 → 拿取 → **收回&旋转&伸出** → 放入 → 收回
+		//   原因有二，一起修：① 我们把"收回"并进了下一次动作的前半段（`beginMove` 从 0 起手），
+		//   于是折回的同时就在转向新目标；② 这里的旋转按**整段**进度插值（上游 `ArmBlockEntity:208`
+		//   就是整段）—— 上游那样写没问题（它折回那半段的目标是 NO_TARGET），我们不成立。
+		//   现在：折回（0→.5）只动臂、不转；伸出（.5→1）旋转与伸出同时进行 ✓
+		baseAngle.setValue(AngleHelper.angleLerp(progress, previousBaseAngle,
+			target == SmartArmAngleTarget.RESTING ? previousBaseAngle : target.baseAngle));
+
 		lowerArmAngle.setValue(Mth.lerp(progress, from.lowerArmAngle, target.lowerArmAngle));
 		upperArmAngle.setValue(Mth.lerp(progress, from.upperArmAngle, target.upperArmAngle));
 		headAngle.setValue(AngleHelper.angleLerp(progress, from.headAngle % 360, target.headAngle % 360));
+	}
+
+	/**
+	 * 手臂现在是不是**停在静止位、随时可以开始一次新的伸出**。
+	 *
+	 * <p>判据：相位是待机（没有目标）、且折返已经走到静止位（进度过半点 `.5`）。
+	 * "从没动过"（{@code moveSeq == 0}）也算静止位 —— 刚放下/刚读盘的臂就在静止位。
+	 *
+	 * <p><b>用途</b>：运行时靠它决定"能不能动身"—— 一次完整的操作是
+	 * <b>旋转+伸出 → 动作 → 收回</b>，**收回属于这一次**，不是下一次动作的开头
+	 * （见 {@code ProgramRuntime.beginEntry} 与 §7.25）。
+	 */
+	public boolean isAtRest() {
+		if (phase != Phase.IDLE || movingPoint != null)
+			return false;
+		return chasedPointProgress >= .5f || moveSeq == 0;
 	}
 
 	// ————————————————————————— 红石 —————————————————————————
