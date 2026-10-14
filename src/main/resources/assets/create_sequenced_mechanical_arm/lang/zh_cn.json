@@ -23,7 +23,8 @@
   "create_sequenced_mechanical_arm.card.over_limit": "操作表超出规模上限",
   "create_sequenced_mechanical_arm.card.editor_saved": "操作表已保存：%s 个任务 / %s 条操作",
   "create_sequenced_mechanical_arm.card.editor_not_holding": "保存失败：主手已经没有操作表了",
-  "create_sequenced_mechanical_arm.card.editor_too_large": "保存失败：操作表体积异常（疑似被改坏）",
+  "create_sequenced_mechanical_arm.card.editor_too_large": "保存失败：程序太大，超过 %s 字节的上限（盘上存的是脚本 —— 把备注写短些、少用图标）",
+  "create_sequenced_mechanical_arm.card.editor_not_encodable": "保存失败：程序里有写不进脚本的物品（换掉那些条目的物品再试）",
   "create_sequenced_mechanical_arm.gui.arm.header": "可编程动力臂",
   "create_sequenced_mechanical_arm.gui.arm.no_program": "未装载操作表",
   "create_sequenced_mechanical_arm.gui.arm.task": "任务：%s",
@@ -213,7 +214,7 @@
   "create_sequenced_mechanical_arm.code.export_failed": "写文件失败：%s",
   "create_sequenced_mechanical_arm.code.import_need_card": "主手请拿一张操作表",
   "create_sequenced_mechanical_arm.code.import_over_limit": "规模超限（%s）—— 与编辑器同一条守卫，拒绝写入",
-  "create_sequenced_mechanical_arm.code.import_too_large": "程序太大：%s 字节 > %s",
+  "create_sequenced_mechanical_arm.code.import_too_large": "脚本太大：%s 字节 > 上限 %s 字节（盘上存的就是这串文本）",
   "create_sequenced_mechanical_arm.code.import_form_mismatch": "坐标形态不符：这张卡是 %s，脚本是 %s —— 不自动转换，请改用另一种操作表，或把脚本首行改成与卡一致的 @abs / @rel",
   "create_sequenced_mechanical_arm.code.import_ok": "已导入：%s"
 }

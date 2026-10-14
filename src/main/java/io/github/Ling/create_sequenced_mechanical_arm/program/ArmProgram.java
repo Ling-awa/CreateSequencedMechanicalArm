@@ -31,8 +31,9 @@ public class ArmProgram {
 	/**
 	 * 条目总数上限（配置项 {@code maxEntriesTotal}，默认 {@link SequencedArmConfig#DEFAULT_MAX_ENTRIES_TOTAL}）。
 	 *
-	 * <p>⚠️ 同上：运行期值。条目越多整份程序序列化越大，超过 {@code ArmProgramEditPacket.MAX_TAG_BYTES}
-	 * （128KB）会在保存时被整份拒绝。
+	 * <p>⚠️ 同上：运行期值。这是**名义**上限；盘上真正的天花板是
+	 * {@link ProgramText#MAX_BYTES}（整份程序转成脚本后的字节数，依据见 PLAN.md §17.4）——
+	 * 超了在保存时被整份拒绝（不静默截断），能放多少条见自检 {@code checkProgramSize} 的实测日志。
 	 */
 	public static int maxEntriesTotal() {
 		return SequencedArmConfig.maxEntriesTotal();
@@ -110,7 +111,7 @@ public class ArmProgram {
 		tag.putString("emode", editorMode);
 		tag.putInt("etask", editorTask);
 		// 非空才写（同 sigmode 的省字节做法，§12.3b）：程序备注是"大多数卡上都没有"的字段，
-		// 空字符串写进去只会让 128KB 预算里多占一份无用的键
+		// 空字符串写进去只会让脚本里多一行无用的键
 		if (!note.isEmpty())
 			tag.putString("note", note);
 		return tag;

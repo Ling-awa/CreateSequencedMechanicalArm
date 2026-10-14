@@ -23,7 +23,8 @@
   "create_sequenced_mechanical_arm.card.over_limit": "Operation table exceeds the size limit",
   "create_sequenced_mechanical_arm.card.editor_saved": "Operation table saved: %s task(s) / %s entr(ies)",
   "create_sequenced_mechanical_arm.card.editor_not_holding": "Save failed: the operation table is no longer in your hand",
-  "create_sequenced_mechanical_arm.card.editor_too_large": "Save failed: operation table is suspiciously large",
+  "create_sequenced_mechanical_arm.card.editor_too_large": "Save failed: the program exceeds the %s-byte script limit - shorten the notes or drop icons",
+  "create_sequenced_mechanical_arm.card.editor_not_encodable": "Save failed: the program holds an item that cannot be written as script (replace the item in those entries)",
   "create_sequenced_mechanical_arm.gui.arm.header": "Sequenced Mechanical Arm",
   "create_sequenced_mechanical_arm.gui.arm.no_program": "No operation table loaded",
   "create_sequenced_mechanical_arm.gui.arm.task": "Task: %s",
@@ -213,7 +214,7 @@
   "create_sequenced_mechanical_arm.code.export_failed": "Could not write the file: %s",
   "create_sequenced_mechanical_arm.code.import_need_card": "Hold an operation table in your main hand",
   "create_sequenced_mechanical_arm.code.import_over_limit": "Over the size limit (%s) - same guard as the editor, refused",
-  "create_sequenced_mechanical_arm.code.import_too_large": "Program too large: %s bytes > %s",
+  "create_sequenced_mechanical_arm.code.import_too_large": "Script too large: %s bytes > %s-byte limit (the stored form is this text)",
   "create_sequenced_mechanical_arm.code.import_form_mismatch": "Coordinate space mismatch: this card is %s, the script is %s - nothing is converted automatically; use the other operation table, or change the script's first line to match the card's @abs / @rel",
   "create_sequenced_mechanical_arm.code.import_ok": "Imported: %s"
 }

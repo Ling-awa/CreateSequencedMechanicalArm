@@ -15,8 +15,8 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
-import io.github.Ling.create_sequenced_mechanical_arm.network.ArmProgramEditPacket;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptResult;
 
@@ -126,6 +126,10 @@ public class SequencedArmCommands {
 		ItemStack card = new ItemStack((absolute ? SequencedArmRegistration.OPERATION_TABLE_ABSOLUTE
 			: SequencedArmRegistration.OPERATION_TABLE_RELATIVE).get());
 		CardProgramStorage.write(card, program, source.registryAccess());
+		if (!CardProgramStorage.hasProgram(card)) {
+			source.sendFailure(Component.literal("预设存不进卡片（转成脚本文本失败或超限）"));
+			return 0;
+		}
 		if (!player.getInventory()
 			.add(card))
 			player.drop(card, false);
@@ -160,7 +164,10 @@ public class SequencedArmCommands {
 			source.sendFailure(Component.literal("臂内的程序是相对坐标，请用相对坐标操作表承载"));
 			return 0;
 		}
-		CardProgramStorage.write(held, arm.getProgram(), source.registryAccess());
+		if (CardProgramStorage.write(held, arm.getProgram(), source.registryAccess()) != CardProgramStorage.StoreResult.OK) {
+			source.sendFailure(Component.literal("臂内程序转成脚本文本失败，没有写入卡片"));
+			return 0;
+		}
 		source.sendSuccess(() -> Component.literal("已把臂内操作表写入手中卡片"), false);
 		return 1;
 	}
@@ -212,7 +219,11 @@ public class SequencedArmCommands {
 			source.sendFailure(tr("code.export_empty"));
 			return 0;
 		}
-		String text = ScriptCompiler.decompile(program, source.registryAccess());
+		// 导出的是**卡上原文**（§17.6）：`/sma code import` 存进去的排版与注释原样还给作者；
+		// 只有 GUI 保存过的卡（文本由反编译生成）才会是规范形式 —— 两条路都对得上"盘上是什么，导出就是什么"。
+		// 兜底：文本缺失（理论上只在旧格式卡上出现）时才现反编译一份，不让导出功能整个失效。
+		String storedText = CardProgramStorage.readText(player.getMainHandItem());
+		String text = storedText != null ? storedText : ScriptCompiler.decompile(program, source.registryAccess());
 		source.sendSuccess(() -> tr("code.export_header", ScriptCompiler.summarize(program)), false);
 		// 一整份脚本一行一行发：聊天栏会自己折行，玩家能整段选中复制
 		text.lines()
@@ -266,8 +277,11 @@ public class SequencedArmCommands {
 	 * {@code /sma code import <名字>}：脚本文件 → 主手卡。
 	 *
 	 * <p><b>走的是同一套服务端校验</b>（§12.3c 明说"代码这条路不能绕过限制"）：
-	 * {@link ArmProgram#isWithinLimits()} 与 {@link ArmProgramEditPacket#MAX_TAG_BYTES} 的 128KB，
-	 * 都按编辑器保存那条路径的判据来；写得进卡才 {@link CardProgramStorage#write}。
+	 * {@link ArmProgram#isWithinLimits()} 与文本上限
+	 * （{@link ProgramText#MAX_BYTES}，依据见 §17.4 —— 以前这里判的是编译后 NBT 的 128KB，
+	 * 那个口径随存储形式一起换掉了，**判据仍只有一处**：{@link CardProgramStorage#writeText}）。
+	 *
+	 * <p>存进去的是**文件原文**（不是反编译结果）：作者的排版与注释要原样保住（§17.6）。
 	 */
 	private static int codeImport(CommandSourceStack source, String name) {
 		ServerPlayer player = source.getPlayer();
@@ -313,13 +327,12 @@ public class SequencedArmCommands {
 			source.sendFailure(tr("code.import_over_limit", ScriptCompiler.summarize(program)));
 			return 0;
 		}
-		int bytes = program.save(source.registryAccess())
-			.sizeInBytes();
-		if (bytes > ArmProgramEditPacket.MAX_TAG_BYTES) {
-			source.sendFailure(tr("code.import_too_large", bytes, ArmProgramEditPacket.MAX_TAG_BYTES));
+		// 落盘判据只有一处（`writeText` 里的 `ProgramText.withinLimit`）——
+		// 这里只负责把失败**说清楚**：多少字节、上限多少。
+		if (CardProgramStorage.writeText(held, text) != CardProgramStorage.StoreResult.OK) {
+			source.sendFailure(tr("code.import_too_large", ProgramText.utf8Length(text), ProgramText.MAX_BYTES));
 			return 0;
 		}
-		CardProgramStorage.write(held, program, source.registryAccess());
 		player.inventoryMenu.broadcastChanges();
 		source.sendSuccess(() -> tr("code.import_ok", ScriptCompiler.summarize(program)), false);
 		compiled.warnings()

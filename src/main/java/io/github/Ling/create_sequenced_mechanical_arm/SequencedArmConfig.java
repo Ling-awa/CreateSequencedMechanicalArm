@@ -24,8 +24,8 @@ public final class SequencedArmConfig {
 	public static final int DEFAULT_MAX_TASKS = 32;
 	/** 默认同时保持的信号条数上限。 */
 	public static final int DEFAULT_MAX_HELD_SIGNALS = 64;
-	/** 默认条目总数上限（全程序合计）。 */
-	public static final int DEFAULT_MAX_ENTRIES_TOTAL = 256;
+	/** 默认条目总数上限（全程序合计）。1024 = "60 KiB 文本上限先响之前够用"的档位（§17.4）。 */
+	public static final int DEFAULT_MAX_ENTRIES_TOTAL = 1024;
 
 	private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
 
@@ -50,22 +50,27 @@ public final class SequencedArmConfig {
 	/**
 	 * 条目总数上限（全程序合计）。
 	 *
-	 * <p>⚠️ 条目越多，整份程序序列化越大 —— 超过 {@code ArmProgramEditPacket.MAX_TAG_BYTES}（128KB）
-	 * 就会在保存时被拒（整份不落盘）。所以这个值不是"越大越好"。
+	 * <p>盘上存的是**脚本文本**（PLAN.md §17），所以真正的天花板不是"编译后 NBT 的体积"，
+	 * 而是"整份程序转成脚本后的字节数" —— 上限 {@code ProgramText.MAX_BYTES} = 60 KiB，
+	 * 依据是 **NBT 字符串的 16 位长度**（65535 字节，§17.4）：超过它不是"存得下但很大"，
+	 * 而是**区块存盘时会抛异常**。
 	 *
-	 * <p><b>实测（自检里那三行）</b>：MC 的 {@code tag.sizeInBytes()} 给**每个键**固定
-	 * {@code 64 + 2×键名长} 的开销，而一个条目**无条件写约 18 个键** ⇒
-	 * 单条最轻 **2216 字节**（只有 {@code op}）、典型 **≈2561**、最重 **3719**（满备注 128 字 + 图标 + 频率对）；
-	 * 于是 **128KB 的真实天花板 ≈ 35（重）~ 59（轻）条，典型 ≈51 条** —— 与这里填多少无关。
+	 * <p>所以这个值也不是"越大越好"：填得比文本上限装得下的条目数还大，多出来的部分在保存时
+	 * 会被明确拒绝（整份不落盘）。默认 <b>1024</b> 是"文本上限先响之前够用"的档位。
+	 *
+	 * <p><b>到底能放多少条由实测给</b>：启动自检的 {@code checkProgramSize} 每次都会打印
+	 * "一条的脚本字节数"与"60 KiB ÷ 每条"的条数区间 —— 那些数字随物品 id 长度、备注语言（汉字 3 字节/字）
+	 * 变化，写死在这里必然过期。
 	 */
 	public static final ModConfigSpec.IntValue MAX_ENTRIES_TOTAL = BUILDER
 		.comment("Maximum total number of entries across the whole program.",
-			"整份程序的条目总数上限（所有任务合计）。默认 256 —— 但见下面的实测。",
-			"MEASURED: the lightest possible entry is 2216 bytes, a typical one ~2561, the heaviest",
-			"(128-char note + icon + frequency pair) 3719. MAX_TAG_BYTES is 128 KB, so the REAL ceiling",
-			"is about 35 (heavy) to 59 (lean) entries, ~51 typical - regardless of this setting.",
-			"实测：单条最轻 2216 字节、典型 ≈2561、最重 3719 ⇒ 128KB 的真实天花板是 35（重）~59（轻）条、",
-			"典型 ≈51 条，与这个配置值无关。条目写得越朴素能放越多；超了会在保存时被明确拒绝（不是静默丢）。")
+			"整份程序的条目总数上限（所有任务合计）。默认 1024 —— 见下面的实测说明。",
+			"Storage note: a program is saved as .sma TEXT (not as compiled NBT), so the real ceiling is",
+			"the 60 KiB text limit (NBT strings are 16-bit: 65535 bytes). A setting larger than what the",
+			"text limit can hold simply gets refused at save time (the whole program is rejected, never",
+			"silently truncated). See the selftest log line for the measured entries-per-60KiB.",
+			"存储说明：盘上存的是 .sma 文本，所以真正的天花板是 60 KiB 的文本上限（NBT 字符串 16 位 = 65535 字节）。",
+			"填得比文本装得下的还大，多出来的部分在保存时会被整份拒绝（不是静默丢）。能放多少条见自检日志。")
 		.defineInRange("maxEntriesTotal", DEFAULT_MAX_ENTRIES_TOTAL, 1, 4096);
 
 	public static final ModConfigSpec SPEC = BUILDER.build();

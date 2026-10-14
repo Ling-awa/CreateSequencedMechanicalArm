@@ -46,6 +46,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.DeployRecipes;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramCoordinates;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptResult;
 
@@ -81,6 +82,7 @@ import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
@@ -167,6 +169,7 @@ public class SequencedArmSelfTest {
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
 		checkProgramSize(server);
+		checkTextStorage(server);
 		checkScriptRoundTrip(server);
 
 		for (Map.Entry<String, Supplier<ArmProgram>> preset : DevPresets.all()
@@ -251,25 +254,51 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 「整份程序序列化后有多大、128KB 能放多少条」的实测（用户问的就是这个）。
+	 * 「盘上那份东西有多大、上限能放多少条」的实测（用户问的就是这个）。
 	 *
-	 * <p><b>为什么必须实测、不能估</b>：MC 的 {@code CompoundTag.sizeInBytes()} 不是序列化字节数，
-	 * 而是<b>内存估算</b> —— 每个键固定 {@code 28 + 2×键名长 + 36}，再叠加值本身：
+	 * <p><b>★ 口径在 §17 换过一次，所以两种数都打</b>：
 	 * <ul>
-	 *   <li>{@code off}（BlockPos 的三个 int）单独一项就 ≈282 字节；</li>
-	 *   <li>{@link ArmProgramEntry#save} 无条件写 ~18 个键、条件写 6 个 ⇒ 光键名开销就 ≈1.5KB，
-	 *       于是"只有 op 的一条"也有 2KB 出头，而"塞满备注 + 图标 + 频率"的一条接近 4KB。</li>
+	 *   <li><b>现在</b>（盘上存 {@code .sma} 文本）：天花板是**脚本字节数** {@link ProgramText#MAX_BYTES}。
+	 *       硬约束不是网络包，而是 <b>NBT 字符串的 16 位长度 = 65535 字节</b>（§17.4）；</li>
+	 *   <li><b>以前</b>（盘上存编译结果，判 {@code sizeInBytes()}）：128 KiB 只放得下几十条。
+	 *       这行历史对照留在日志里，是为了说明**为什么要换存储形式**。</li>
 	 * </ul>
-	 * 凭直觉按"一条几十字节"估会差两个数量级：{@code maxEntriesTotal = 256} 这种值看起来毫无风险，
-	 * 实际会在保存那一刻被 {@code ArmProgramEditPacket.MAX_TAG_BYTES}（128KB）整份拒收
-	 * —— 而拒收的表现是"这一场编辑一个字都落不了盘"。这四行就是把它钉进日志。
 	 *
-	 * <p>⚠️ 这四行是<b>测量，不是断言</b>：数值随上游物品 id 长度与配置值变化，写死期望值只会变成噪音。
+	 * <p>⚠️ 这些是<b>测量，不是断言</b>：数值随上游物品 id 长度、备注语言（汉字 3 字节/字、ASCII 1 字节）变化，
+	 * 写死期望值只会变成噪音。**断言只钉结构**（盘上是不是文本、载入会不会编译）——见 {@link #checkTextStorage}。
 	 */
 	private static void checkProgramSize(MinecraftServer server) {
 		HolderLookup.Provider registries = server.registryAccess();
 
-		// ① 现有预设里条目最多的那一份 —— 一份真实会被存读的程序（不是人为造的最坏情况）
+		// ① 编辑器造得出的两端：一条最轻 / 一条最重（含满额备注），分别量脚本与编译后 NBT
+		ArmProgramEntry heaviest = heaviestEntry();
+		ArmProgramEntry lightest = new ArmProgramEntry();
+		int lightText = perEntryTextBytes(registries, lightest);
+		int heavyText = perEntryTextBytes(registries, heaviest);
+		int lightNbt = perEntryNbtBytes(registries, lightest);
+		int heavyNbt = perEntryNbtBytes(registries, heaviest);
+		LOGGER.info("[selftest] 单条体积: 脚本 最轻={} 最重={} 字节 ｜ 编译后 NBT 最轻={} 最重={} 字节（备注满 {} 字）",
+			lightText, heavyText, lightNbt, heavyNbt, ArmProgramEntry.NOTE_MAX);
+
+		// ② 换算：现在的口径（文本）与历史口径（128KB ÷ 编译后 NBT）
+		int textCap = ProgramText.MAX_BYTES;
+		int oldCap = 128 * 1024;
+		int configured = SequencedArmConfig.maxEntriesTotal();
+		LOGGER.info("[selftest] 脚本上限 {} 字节换算: 全按最轻≈{}条 全按最重≈{}条（典型在两者之间）｜ 配置上限={}条",
+			textCap, lightText == 0 ? 0 : textCap / lightText, heavyText == 0 ? 0 : textCap / heavyText, configured);
+		LOGGER.info("[selftest] （历史对照）旧口径 128KiB ÷ 编译后 NBT: 全按最轻≈{}条 全按最重≈{}条 —— 换存储形式就是为了这个",
+			lightNbt == 0 ? 0 : oldCap / lightNbt, heavyNbt == 0 ? 0 : oldCap / heavyNbt);
+		LOGGER.info("[selftest] 硬约束: NBT 单个字符串 16 位长度=65535 字节，脚本上限 {} 必须小于它（余量 {} 字节）",
+			textCap, 65535 - textCap);
+		// ④ 关系断言（§17.4）：脚本上限必须留在 NBT 字符串的 16 位长度之内。
+		//    这条不是"断言常量为真"式的自嗨 —— 它钉的是一条**跨系统的硬约束**：越过去不是"变慢/变大"，
+		//    而是**区块存盘时抛异常**（存档直接坏掉）。将来有人想把上限提到 64KB 以上，必须在这里撞墙。
+		//    反证：把 ProgramText.MAX_BYTES 改成 70000 ⇒ 这行立刻变红。
+		if (textCap >= 65535)
+			LOGGER.error("[selftest] 脚本上限 {} 不小于 NBT 字符串的 16 位长度上限 65535 —— 会写出存不下盘的存档",
+				textCap);
+
+		// ③ 一份真实预设（条目最多的那个）转成脚本有多大 —— 不是人为造的最坏情况
 		String widest = "无";
 		ArmProgram sample = null;
 		int entries = 0;
@@ -286,31 +315,56 @@ public class SequencedArmSelfTest {
 				sample = candidate;
 			}
 		}
-		int sampleBytes = sample == null ? 0 : sample.save(registries)
-			.sizeInBytes();
-		int perEntry = entries == 0 ? 0 : sampleBytes / entries;
-		LOGGER.info("[selftest] 程序体积: 条目={} 字节={} 每条≈{} （那是预设「{}」，条目最多的那份）", entries, sampleBytes,
-			perEntry, widest);
+		if (sample != null) {
+			int scriptBytes = ProgramText.utf8Length(ScriptCompiler.decompile(sample, registries));
+			LOGGER.info("[selftest] 真实预设「{}」{} 条 → 脚本 {} 字节（占上限 {}%，编译后 NBT {} 字节）", widest, entries,
+				scriptBytes, String.format(java.util.Locale.ROOT, "%.1f", scriptBytes * 100.0 / textCap),
+				sample.save(registries)
+					.sizeInBytes());
+		}
+	}
 
-		// ② 两端：编辑器造得出的最重一条 / 最轻一条
-		ArmProgramEntry heaviest = heaviestEntry();
-		int heavyBytes = heaviest.save(registries)
-			.sizeInBytes();
-		// 「最轻」= 除了 op 全是字段默认值 —— 注意 save() 里那 ~18 个键是**无条件**写的，
-		// 所以"一条什么都没有的操作"并不小，这是"能放多少条"的乐观上界。
-		int lightBytes = new ArmProgramEntry().save(registries)
-			.sizeInBytes();
-		LOGGER.info("[selftest] 单条最重={} 字节（备注满 {} 字 + 自定义图标 + 两个频率物品 + 发信号 + 所有属性非默认）",
-			heavyBytes, ArmProgramEntry.NOTE_MAX);
-		LOGGER.info("[selftest] 单条最轻={} 字节（只有 op，其余全是默认值）", lightBytes);
+	/** 一条操作**转成脚本**后的边际字节数（用 101 条与 1 条的差除掉表头那一份）。 */
+	private static int perEntryTextBytes(HolderLookup.Provider registries, ArmProgramEntry entry) {
+		return (scriptBytes(registries, entry, 101) - scriptBytes(registries, entry, 1)) / 100;
+	}
 
-		// ③ 换算：128KB ÷ 实测每条 = 能放多少条。给的是**区间**（真实程序里既有空操作也有塞满的，
-		// 单点估计必然两头都不准），以及"当前配置上限那一档（全按最重）实测多大"。
-		int cap = ArmProgramEditPacket.MAX_TAG_BYTES;
-		int configured = SequencedArmConfig.maxEntriesTotal();
-		LOGGER.info("[selftest] 128KB 换算: 全按最轻≈{}条 全按最重≈{}条 全按预设每条≈{}条 ｜ 配置上限={}条 全按最重实测={} 字节（守卫 {}）",
-			lightBytes == 0 ? 0 : cap / lightBytes, heavyBytes == 0 ? 0 : cap / heavyBytes,
-			perEntry == 0 ? 0 : cap / perEntry, configured, filledBytes(registries, heaviest, configured), cap);
+	/**
+	 * {@code count} 条同一个条目组成一份程序后**转成脚本**的字节数。
+	 *
+	 * <p>同一个 {@link ArmProgramEntry} 实例被反复放进列表：反编译只读字段，而"每条都一样"正是这里要的。
+	 */
+	private static int scriptBytes(HolderLookup.Provider registries, ArmProgramEntry entry, int count) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "size_probe";
+		for (int i = 0; i < count; i++)
+			task.entries.add(entry);
+		program.tasks.add(task);
+		return ProgramText.utf8Length(ScriptCompiler.decompile(program, registries));
+	}
+
+	/**
+	 * 一条操作编译成 NBT 后的**边际** {@code sizeInBytes()}（**只为历史对照**，新口径不看它）。
+	 *
+	 * <p>用边际值（101 条与 1 条的差 ÷100）而不是"单条程序"：单条程序里那份程序/任务表头会把
+	 * 每条摊高 900~1000 字节，于是历史数字会从 §15.4 记的 2216/3719 变成 3163/4666 —— 两个数都对，
+	 * 但混在一起就没人知道哪个该信。**同一件事只能有一个口径**（决策 68/85）。
+	 */
+	private static int perEntryNbtBytes(HolderLookup.Provider registries, ArmProgramEntry entry) {
+		return (nbtBytes(registries, entry, 101) - nbtBytes(registries, entry, 1)) / 100;
+	}
+
+	/** {@code count} 条同一个条目的程序编译成 NBT 后 {@code sizeInBytes()} 的大小。 */
+	private static int nbtBytes(HolderLookup.Provider registries, ArmProgramEntry entry, int count) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "size_probe";
+		for (int i = 0; i < count; i++)
+			task.entries.add(entry);
+		program.tasks.add(task);
+		return program.save(registries)
+			.sizeInBytes();
 	}
 
 	/** 编辑器造得出的"一条最重"：所有字段非默认 + 满额备注 + 自定义图标 + 一对频率。 */
@@ -346,20 +400,111 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 一份"条目塞满、且每条都按最重算"的真实程序有多大（回答"配置上限那一档会不会超 128KB"）。
+	 * ★ §17 的结构断言：**盘上只有文本**（卡片与臂本体都是），载入时编译，旧字段被丢弃。
 	 *
-	 * <p>同一个 {@link ArmProgramEntry} 实例被反复放进列表：{@code save()} 只读，而"每条都一样重"
-	 * 正是这里要的最坏情况。全按最重 ⇒ 结论是保守的（真实程序必然更小）。
+	 * <p>为什么必须是<b>结构</b>断言，而不是"读回来一样就算过"：存储形式可以悄悄退回旧格式 ——
+	 * 只要有人把 {@code program.save()} 再写回盘上，"读回来一样"照样成立（那条路上编译结果就是权威），
+	 * 而 §17 的全部收益（可读、可 diff、上限抬一个数量级）当场作废。所以这里直接看 tag 里**是什么类型**。
+	 *
+	 * <p><b>反证</b>（两条里任意一条都必须让这里变红）：
+	 * ① 把 {@link CardProgramStorage#write} 改回 {@code root.put("ArmProgram", program.save(...))}；
+	 * ② 把 {@code SequencedArmBlockEntity.write} 改回 {@code tag.put("Program", program.save(...))}。
 	 */
-	private static int filledBytes(HolderLookup.Provider registries, ArmProgramEntry entry, int count) {
-		ArmProgram program = new ArmProgram();
-		ArmProgramTask task = new ArmProgramTask();
-		task.name = "size_probe";
-		for (int i = 0; i < count; i++)
-			task.entries.add(entry);
-		program.tasks.add(task);
-		return program.save(registries)
-			.sizeInBytes();
+	private static void checkTextStorage(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		HolderLookup.Provider registries = server.registryAccess();
+		List<String> problems = new ArrayList<>();
+		ArmProgram program = DevPresets.mainWithSubTasks();
+
+		// ① 卡片：盘上是 ArmProgramText（String），没有旧的 ArmProgram（Compound）
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CardProgramStorage.StoreResult stored = CardProgramStorage.write(card, program, registries);
+		CustomData data = card.get(DataComponents.CUSTOM_DATA);
+		CompoundTag cardRoot = data == null ? new CompoundTag() : data.copyTag();
+		boolean cardIsText = stored == CardProgramStorage.StoreResult.OK
+			&& cardRoot.contains("ArmProgramText", Tag.TAG_STRING) && !cardRoot.contains("ArmProgram");
+		// 读回来 = 文本 → 编译：拿**规范形式**比，不要去比实现细节
+		boolean cardRoundTrip = ScriptCompiler.decompile(program, registries)
+			.equals(ScriptCompiler.decompile(CardProgramStorage.read(card, registries), registries));
+		LOGGER.info("[selftest] 卡片存储: 结果={} 盘上是文本={} 内容一致={} 脚本字节={}", stored, cardIsText, cardRoundTrip,
+			ProgramText.utf8Length(cardRoot.getString("ArmProgramText")));
+		if (!cardIsText)
+			problems.add("卡片没有把程序存成文本（tag=" + cardRoot + "）");
+		if (!cardRoundTrip)
+			problems.add("卡片上的文本编译回来与原文不一致");
+
+		// ② 旧格式的卡（编译结果在盘上）：**不许**被当成有程序
+		ItemStack legacyCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CompoundTag legacyRoot = new CompoundTag();
+		legacyRoot.put("ArmProgram", program.save(registries));
+		legacyCard.set(DataComponents.CUSTOM_DATA, CustomData.of(legacyRoot));
+		boolean legacyCardEmpty = !CardProgramStorage.hasProgram(legacyCard)
+			&& CardProgramStorage.read(legacyCard, registries).tasks.isEmpty();
+
+		// ③ 臂本体：存档 tag 里是 ProgramText、没有 Program；**另起一条全新的臂**读它（走 read 真实入口）
+		BlockPos armPos = new BlockPos(0, 200, 0);
+		BlockState oldState = level.getBlockState(armPos);
+		boolean armIsText = false;
+		boolean armCompileOnLoad = false;
+		boolean armLegacyDropped = false;
+		try {
+			CompoundTag tag = armTagWith(level, armPos, program, registries);
+			armIsText = tag != null && tag.contains("ProgramText", Tag.TAG_STRING) && !tag.contains("Program");
+			if (tag != null) {
+				SequencedArmBlockEntity fresh = freshArm(level, armPos);
+				if (fresh != null) {
+					fresh.read(tag, registries, false);
+					armCompileOnLoad = !fresh.getProgram()
+						.isEmpty()
+						&& ScriptCompiler.decompile(fresh.getProgram(), registries)
+							.equals(ScriptCompiler.decompile(program, registries));
+					// 旧字段：去掉文本、把编译结果塞回去 ⇒ 必须当空程序（用户选的"不兼容"，§17.3）
+					CompoundTag legacyTag = tag.copy();
+					legacyTag.remove("ProgramText");
+					legacyTag.put("Program", program.save(registries));
+					fresh.read(legacyTag, registries, false);
+					armLegacyDropped = fresh.getProgram()
+						.isEmpty();
+				}
+			}
+		} finally {
+			level.setBlockAndUpdate(armPos, oldState);
+		}
+		LOGGER.info("[selftest] 臂本体存储: 盘上是文本={} 载入即编译={} 旧字段被丢弃={} 旧格式卡当空={}", armIsText,
+			armCompileOnLoad, armLegacyDropped, legacyCardEmpty);
+		if (!armIsText)
+			problems.add("臂的存档 tag 里不是文本（或仍留着旧的 Program 字段）");
+		if (!armCompileOnLoad)
+			problems.add("臂载入时没有从文本编译出程序");
+		if (!armLegacyDropped)
+			problems.add("旧格式（编译结果）没有被丢弃，仍被当成程序");
+		if (!legacyCardEmpty)
+			problems.add("旧格式卡片仍被当成有程序");
+
+		if (!problems.isEmpty())
+			LOGGER.error("[selftest] 文本存储结构断言失败：{}", String.join("；", problems));
+	}
+
+	/** 放一条臂、装程序、写出存档 tag（null = 方块实体没建出来）。方块的恢复由调用方负责。 */
+	@Nullable
+	private static CompoundTag armTagWith(ServerLevel level, BlockPos armPos, ArmProgram program,
+		HolderLookup.Provider registries) {
+		SequencedArmBlockEntity arm = freshArm(level, armPos);
+		if (arm == null)
+			return null;
+		arm.setProgram(program);
+		CompoundTag tag = new CompoundTag();
+		arm.write(tag, registries, false);
+		return tag;
+	}
+
+	/** 在 {@code armPos} 放一条**全新**的臂（先清掉可能存在的旧方块实体）并返回它。 */
+	@Nullable
+	private static SequencedArmBlockEntity freshArm(ServerLevel level, BlockPos armPos) {
+		level.setBlockAndUpdate(armPos, Blocks.AIR.defaultBlockState());
+		level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+			.defaultBlockState());
+		return level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm ? arm : null;
 	}
 
 	/**
@@ -3824,25 +3969,24 @@ public class SequencedArmSelfTest {
 		if (!sugarKept)
 			problems.add("#RRGGBB 染色过不了往返");
 
-		// ⑦ 备注与 128KB 预算的量化（§12.3a 细则 4：注释不是免费的）
+		// ⑦ 备注与**脚本字节预算**的量化（§12.3a 细则 4：注释不是免费的）。
+		//    §17 起预算单位从"编译后 NBT"换成了"脚本字节"：注释就是备注、备注就是文本，量的正是它。
 		ArmProgram budgetProbe = new ArmProgram();
 		budgetProbe.note = "汉".repeat(ArmProgramEntry.NOTE_MAX);
 		ArmProgramTask budgetTask = new ArmProgramTask();
 		budgetTask.name = "预算";
 		budgetTask.note = "汉".repeat(ArmProgramEntry.NOTE_MAX);
 		budgetProbe.tasks.add(budgetTask);
-		int withNotes = budgetProbe.save(registries)
-			.sizeInBytes();
+		int withNotes = ProgramText.utf8Length(ScriptCompiler.decompile(budgetProbe, registries));
 		budgetProbe.note = "";
 		budgetTask.note = "";
-		int withoutNotes = budgetProbe.save(registries)
-			.sizeInBytes();
+		int withoutNotes = ProgramText.utf8Length(ScriptCompiler.decompile(budgetProbe, registries));
 		boolean noteCostSane = withNotes > withoutNotes;
-		LOGGER.info("[selftest] 脚本备注预算: 满备注程序 {} 字节 vs 无备注 {} 字节 ⇒ 两条满备注 ≈ {} 字节（128KB 的 {}%）",
-			withNotes, withoutNotes, withNotes - withoutNotes,
-			String.format(java.util.Locale.ROOT, "%.1f", (withNotes - withoutNotes) * 100.0 / ArmProgramEditPacket.MAX_TAG_BYTES));
+		LOGGER.info("[selftest] 脚本备注预算: 满备注 {} 字节 vs 无备注 {} 字节 ⇒ 两条满备注 ≈ {} 字节（占上限 {}%）", withNotes,
+			withoutNotes, withNotes - withoutNotes,
+			String.format(java.util.Locale.ROOT, "%.2f", (withNotes - withoutNotes) * 100.0 / ProgramText.MAX_BYTES));
 		if (!noteCostSane)
-			problems.add("备注没有参与 NBT 体积（预算讨论无从谈起）");
+			problems.add("备注没有进入脚本（预算讨论无从谈起）");
 
 		// ⑧ 程序头（§12.3 末尾，主代理 87①）：文本首行的坐标空间就是 ArmProgram.absolute。
 		//    反编译器**永远写**；编译器缺省按 rel；导入时与手持卡形态不符是命令层的硬错（游戏内人工确认）。

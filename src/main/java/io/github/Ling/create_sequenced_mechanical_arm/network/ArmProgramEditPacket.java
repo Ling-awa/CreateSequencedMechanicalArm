@@ -5,6 +5,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.ClipboardPlan;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.HolderLookup;
@@ -26,8 +27,11 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  * 就是整份 {@code Schedule} 一起传（{@code ScheduleItem.use} → 编辑 → 关闭时发），
  * 服务端只做"校验 + 落盘"。这套做法的好处是<b>状态只有一份权威</b>：客户端怎么改都行，
  * 服务端要么整体接受、要么整体拒绝，不会出现"增量补丁对不上底稿"的中间态。
- * 代价是包体大一点 —— 默认上限（条目总数 ≤ {@code maxEntriesTotal} = 256）的程序约几十 KB，
- * 相对 1 MB 的载荷上限可以忽略。
+ * 代价是包体大一点 —— 但这个代价<b>不构成天花板</b>：NeoForge 对注册载荷有
+ * {@code GenericPacketSplitter}（按 {@code CompressionDecoder.MAXIMUM_UNCOMPRESSED_LENGTH = 8388608} 自动分片），
+ * 载荷侧有约 8MB 余量；解出来的 {@code CompoundTag} 另有编解码器兜底（{@code ByteBufCodecs.COMPOUND_TAG} = 2MB accounter）。
+ * <b>真正的天花板是"转成脚本文本后的字节数"</b>（{@link CardProgramStorage#write} →
+ * {@link io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText#MAX_BYTES}，依据见 PLAN.md §17.4）。
  *
  * <p>{@code PLAN.md §5.2} 里原本写的是"增量编辑 + S2C 同步 + BE 并发编辑锁"，这里改成了
  * 全量提交，<b>原因有二</b>：
@@ -42,17 +46,15 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
 public record ArmProgramEditPacket(CompoundTag program) implements CustomPacketPayload {
 
 	/**
-	 * 防御性上限：默认配置（条目总数 ≤ {@code maxEntriesTotal} = 256）的合法程序实测在几十 KB 量级，
-	 * 128 KB 足够宽松。
+	 * 结果枚举。**每种失败都要有玩家看得见的话**：编辑器是"整份接受或整份拒绝"，
+	 * 静默失败等于"这一场编辑一个字都没落盘"。
 	 *
-	 * <p>与 {@code SequencedArmConfig.maxEntriesTotal} 的关系（**有意保留的兜底**）：条目上限<b>可调</b>，
-	 * 但**不削弱**这条守卫 —— 玩家把 maxEntriesTotal 拉高到几 KB 条目时，序列化可能超过 128 KB，
-	 * 那时保存会被这里整份拒收（{@code TOO_LARGE}，不落盘）。调这个配置项前先读它的注释。
+	 * <p>{@code TOO_LARGE} 的口径从 v0.1 起变了（PLAN.md §17.4）：以前判"编译后 NBT 的
+	 * {@code sizeInBytes() > 128KB}"，现在判"**转成脚本文本后的字节数 > 60KB**"——
+	 * 那才是盘上真正要写下去的东西，也是真正会卡住的那一层（实测换算见 §17.7）。
 	 */
-	public static final int MAX_TAG_BYTES = 128 * 1024;
-
 	public enum SaveResult {
-		OK, NOT_HOLDING, OVER_LIMIT, TOO_LARGE
+		OK, NOT_HOLDING, OVER_LIMIT, TOO_LARGE, NOT_ENCODABLE
 	}
 
 	public static final CustomPacketPayload.Type<ArmProgramEditPacket> TYPE =
@@ -86,7 +88,8 @@ public record ArmProgramEditPacket(CompoundTag program) implements CustomPacketP
 				}
 				case NOT_HOLDING -> feedback(player, "card.editor_not_holding", ChatFormatting.RED);
 				case OVER_LIMIT -> feedback(player, "card.over_limit", ChatFormatting.RED);
-				case TOO_LARGE -> feedback(player, "card.editor_too_large", ChatFormatting.RED);
+				case TOO_LARGE -> feedback(player, "card.editor_too_large", ChatFormatting.RED, ProgramText.MAX_BYTES);
+				case NOT_ENCODABLE -> feedback(player, "card.editor_not_encodable", ChatFormatting.RED);
 			}
 		});
 	}
@@ -99,8 +102,6 @@ public record ArmProgramEditPacket(CompoundTag program) implements CustomPacketP
 		ItemStack card = player.getMainHandItem();
 		if (!OperationTableItem.isTable(card))
 			return SaveResult.NOT_HOLDING;
-		if (tag.sizeInBytes() > MAX_TAG_BYTES)
-			return SaveResult.TOO_LARGE;
 
 		HolderLookup.Provider registries = player.level()
 			.registryAccess();
@@ -111,7 +112,12 @@ public record ArmProgramEditPacket(CompoundTag program) implements CustomPacketP
 		// 程序自己的坐标形态标记跟着卡片形态走：卡片是哪种形态，程序就自称哪种
 		// （条目级 absolute 才是运行语义，这个标记只用于"这份数据是什么"的可读性）
 		program.absolute = OperationTableItem.isAbsoluteForm(card);
-		CardProgramStorage.write(card, program, registries);
+		// 落盘这一步就是真正的天花板（§17.4）：程序先转成脚本文本才写得下。
+		// 失败**不落盘**，卡片上原来的文本保持不动。
+		CardProgramStorage.StoreResult stored = CardProgramStorage.write(card, program, registries);
+		if (stored != CardProgramStorage.StoreResult.OK)
+			return stored == CardProgramStorage.StoreResult.TOO_LARGE ? SaveResult.TOO_LARGE
+				: SaveResult.NOT_ENCODABLE;
 		// 编辑器里可能删过条目、改过备注 ⇒ 副手清单的勾按新程序重算（§5.5）
 		ClipboardPlan.syncTicks(player, program);
 		player.inventoryMenu.broadcastChanges();

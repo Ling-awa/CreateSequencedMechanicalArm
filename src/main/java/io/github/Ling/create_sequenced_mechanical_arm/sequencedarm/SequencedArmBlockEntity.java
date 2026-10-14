@@ -7,7 +7,9 @@ import java.util.List;
 import java.util.Map;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
 
+import com.mojang.logging.LogUtils;
 import com.simibubi.create.Create;
 import com.simibubi.create.api.contraption.transformable.TransformableBlockEntity;
 import com.simibubi.create.content.contraptions.StructureTransform;
@@ -33,6 +35,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramView;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 
 import net.createmod.catnip.animation.LerpedFloat;
 import net.createmod.catnip.data.Couple;
@@ -79,6 +82,8 @@ import net.neoforged.neoforge.items.IItemHandler;
  * 捕获不到的物品正常掉落到世界（PLAN.md §7.4）。
  */
 public class SequencedArmBlockEntity extends KineticBlockEntity implements TransformableBlockEntity {
+
+	private static final Logger LOGGER = LogUtils.getLogger();
 
 	public static final int MAX_OVERFLOW = 10;
 
@@ -1559,7 +1564,11 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		tag.put("HeldItem", heldItem.saveOptional(registries));
 		tag.put("Overflow", NBTHelper.writeItemList(overflow, registries));
 		if (!clientPacket) {
-			tag.put("Program", program.save(registries));
+			// ★ PLAN.md §17：盘上**只存文本**。编译结果（program 字段）只活在内存里，
+			// 写盘这一刻现生成一次脚本文本 —— 不缓存是为了"存下来的永远就是现在跑的那份"：
+			// `ProgramCoordinates.toRelative` / 命令都能在 setProgram 之后改模型，
+			// 缓存文本迟早会与程序对不上（那种不一致只在重进世界时才现形）。
+			tag.putString("ProgramText", programTextForSave(registries));
 			tag.put("Runtime", runtime.save());
 		} else {
 			// 客户端拿不到程序本体（最多 256 条，且每次条目切换都会同步，塞进去会刷爆包），
@@ -1568,6 +1577,35 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			tag.put("Hud", ArmProgramView.capture(program, runtime, registries)
 				.save(registries));
 		}
+	}
+
+	/**
+	 * 落盘用的脚本文本（PLAN.md §17）：内存里只有编译结果，**写盘这一刻**生成一次。
+	 *
+	 * <p>空串 = "这条臂没有程序"（新臂，或程序被换掉还没插新的）。
+	 *
+	 * <p>两种失败都**宁可不写**，也不写一份对不上的东西：
+	 * <ul>
+	 *   <li>反编译不出来（{@link ProgramText#toText} 已 WARN）——写个空串，别让重进世界后跑的是另一份程序；</li>
+	 *   <li>文本超过 {@link ProgramText#MAX_BYTES} —— 这个必须挡住：NBT 字符串是 <b>16 位长度</b>，
+	 *       硬塞进去会在<b>区块存盘时抛异常</b>（不是"存得下但很大"）。真正能进臂的程序在插卡那一刻已被限住，
+	 *       这条是给 `setProgram` 这类入口兜底的（§17.4）。</li>
+	 * </ul>
+	 */
+	private String programTextForSave(HolderLookup.Provider registries) {
+		if (program.isEmpty())
+			return "";
+		String text = ProgramText.toText(program, registries);
+		if (text == null) {
+			LOGGER.error("{} 上的程序无法转成脚本文本，本次不写入存档（重进世界后这条臂会没有程序）", worldPosition);
+			return "";
+		}
+		if (!ProgramText.withinLimit(text)) {
+			LOGGER.error("{} 上的程序转成脚本后有 {} 字节，超过上限 {}（NBT 字符串是 16 位长度）——本次不写入存档",
+				worldPosition, ProgramText.utf8Length(text), ProgramText.MAX_BYTES);
+			return "";
+		}
+		return text;
 	}
 
 	@Override
@@ -1604,11 +1642,28 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		overflow.addAll(NBTHelper.readItemList(tag.getList("Overflow", Tag.TAG_COMPOUND), registries));
 
 		if (!clientPacket) {
-			ArmProgram loaded = ArmProgram.load(tag.getCompound("Program"), registries);
+			// ★ PLAN.md §17：盘上只读文本，**载入时编译**（编译一次，不是每 tick）。
+			// `read` 是 `SmartBlockEntity.loadAdditional(CompoundTag, HolderLookup.Provider)` 转调进来的
+			// ⇒ 这里拿得到 `registries`，编译所需的注册表齐全（`ScriptParser` 解析物品要用它）。
+			String text = tag.getString("ProgramText");
+			if (text.isEmpty() && tag.contains("Program", Tag.TAG_COMPOUND)) {
+				// 旧存档（0.1.0 之前存的是编译结果）：用户定的"不兼容"——不当程序用，但要说一声，
+				// 不能让一条臂"程序凭空没了"却毫无痕迹（§17.3）。
+				LOGGER.warn("{} 上的操作表是旧格式（编译结果），本版本起不再读取：程序视为空（PLAN.md §17.3）", worldPosition);
+			}
+			ArmProgram loaded = ProgramText.fromText(text, registries);
 			program.tasks.clear();
-			program.tasks.addAll(loaded.tasks);
-			program.absolute = loaded.absolute;
-			runtime.load(tag.getCompound("Runtime"));
+			program.absolute = false;
+			if (loaded != null) {
+				program.tasks.addAll(loaded.tasks);
+				program.absolute = loaded.absolute;
+				runtime.load(tag.getCompound("Runtime"));
+			} else {
+				// 没有程序 / 文本编译不过：运行时状态必须跟着回到起点。
+				// 只复位 runtime（空标签 = 下标 0、IDLE、空调用栈）而**不**调 onProgramReplaced ——
+				// 后者会 clearTransmissions()，而信号表刚在上面读进来，那会把持久变量误删（§7.16e）。
+				runtime.load(new CompoundTag());
+			}
 			// ★ §7.16e：**加载时自动重新入网** —— 区块卸载时只退了网，字段与 NBT 都还在，
 			// 这一步把"断电 / 脉冲"原样接回世界（否则重新加载的臂看起来"发了但没通电"）。
 			rejoinNetwork();
