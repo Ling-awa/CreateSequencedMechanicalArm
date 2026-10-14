@@ -946,18 +946,21 @@ public class SmartArmSelfTest {
 			}
 			boolean stillHoldingB = !isEmpty(level, depotB);
 
-			// ③ 折返走完（进度到静止位）⇒ 必须立刻动身，而且**从静止位起手**：
-			//    进度应当是 **.5**（这一次动作只有"旋转+伸出"），不是 0（那会把折返再播一遍）。
+			// ③ 折返走完（进度到静止位）⇒ 必须立刻动身，而且**从整段的起点（0）起手**：
+			//    前半段是"站在静止位转身"（臂角度不变），后半段才伸出 ⇒ 伸出开始时旋转已过半。
+			//    用户第二十七轮续三十八实测的原版观感："转到一半才开始伸出（大约在角平分线上）"。
 			boolean movedAfterRest = false;
-			boolean startedFromRest = false;
+			boolean startedFromZero = false;
+			boolean atRestBeforeMove = false;
 			float progressAtMoveStart = -1f;
 			for (int i = 0; i < 40 && !movedAfterRest; i++) {
 				arm.chasedPointProgress = 1f; // 模拟折返走完
+				atRestBeforeMove = arm.isAtRest(); // 动身之前必须真的在静止位
 				arm.runtime.tick(arm);
 				movedAfterRest = arm.phase == SmartArmBlockEntity.Phase.MOVING;
 				if (movedAfterRest) {
 					progressAtMoveStart = arm.chasedPointProgress;
-					startedFromRest = Math.abs(progressAtMoveStart - .5f) < .01f;
+					startedFromZero = progressAtMoveStart == 0f;
 				}
 			}
 
@@ -969,10 +972,23 @@ public class SmartArmSelfTest {
 				secondDone = isEmpty(level, depotB);
 			}
 
+			// ③b **"伸出开始时旋转已过半"**（用户第二十七轮续三十八实测的原版观感）。
+			//     这是纯插值数学，直接问两个因子（渲染用的就是它们，同一份代码 —— 决策 68）：
+			//       `extensionFactor(.5) == 0` ⇒ 伸出正好从 .5 开始；
+			//       `rotationFactor(.5) == .5` ⇒ 那一刻旋转正好走完一半（视觉上接近角平分线）。
+			boolean rotateLeadsExtension = Math.abs(SmartArmBlockEntity.rotationFactor(.5f) - .5f) < 1e-4f
+				&& Math.abs(SmartArmBlockEntity.extensionFactor(.5f)) < 1e-4f;
+			boolean extensionEndsWithRotation = Math.abs(SmartArmBlockEntity.extensionFactor(1f) - 1f) < 1e-4f
+				&& Math.abs(SmartArmBlockEntity.rotationFactor(1f) - 1f) < 1e-4f;
+			boolean noRotationAtStart = Math.abs(SmartArmBlockEntity.rotationFactor(0f)) < 1e-4f
+				&& Math.abs(SmartArmBlockEntity.extensionFactor(0f)) < 1e-4f;
+
 			LOGGER.info("[selftest] 收回属于本次操作: 折返途中可动身={}（应为 false） 折返途中一直待机={} "
-				+ "折返途中不报失败={}（B 还在={}） 折返走完立刻动身={} 从静止位起手={}（进度={}） 第2条真的取到={}",
+				+ "折返途中不报失败={}（B 还在={}） 折返走完立刻动身={} 动身前在静止位={} 从 0 起手={}（进度={}） "
+				+ "第2条真的取到={} ｜ 旋转领先伸出={}（转动半程才开始伸） 伸出与旋转同时收尾={} 起手时都不动={}",
 				restingFlagRightAfter, stayedHome, noFailureWhileRetracting, stillHoldingB, movedAfterRest,
-				startedFromRest, progressAtMoveStart, secondDone);
+				atRestBeforeMove, startedFromZero, progressAtMoveStart, secondDone, rotateLeadsExtension,
+				extensionEndsWithRotation, noRotationAtStart);
 
 			if (!fedA || !fedB)
 				LOGGER.error("[selftest] 收回时序自检**没跑起来**：物品没能放进两个载具 —— 等于没测");
@@ -987,9 +1003,21 @@ public class SmartArmSelfTest {
 					noFailureWhileRetracting);
 			if (!movedAfterRest)
 				LOGGER.error("[selftest] 折返走完之后**没有动身** —— 那道「等折返」的闸门把程序卡死了");
-			if (movedAfterRest && !startedFromRest)
-				LOGGER.error("[selftest] 折返走完后的这次移动**不是从静止位起手**（进度={}，应当是 .5）—— "
-					+ "从 0 起手会把「折返」再播一遍，也就是把收回并进下一次动作", progressAtMoveStart);
+			if (movedAfterRest && (!startedFromZero || !atRestBeforeMove))
+				LOGGER.error("[selftest] 折返走完后的这次移动不是「动身前在静止位（{}）且从 0 起手（进度={}）」"
+					+ " —— 从 0 起手的前半段必须是原版的「站在静止位转身」，不能是折返", atRestBeforeMove,
+					progressAtMoveStart);
+			if (!rotateLeadsExtension)
+				LOGGER.error("[selftest] **旋转没有领先伸出**（rotationFactor(.5)={} extensionFactor(.5)={}）—— "
+					+ "原版是「转到一半才开始伸出」（旋转整段、伸出后半段，上游 `ArmBlockEntity:208` vs `:216`）；"
+					+ "两个因子都取半段就会变成「一开始转就伸出」（用户第二十七轮续三十八实测）",
+					SmartArmBlockEntity.rotationFactor(.5f), SmartArmBlockEntity.extensionFactor(.5f));
+			if (!extensionEndsWithRotation)
+				LOGGER.error("[selftest] 伸出与旋转**没有同时收尾**（ext(1)={} rot(1)={}）—— 到位那一刻两者都该是 1",
+					SmartArmBlockEntity.extensionFactor(1f), SmartArmBlockEntity.rotationFactor(1f));
+			if (!noRotationAtStart)
+				LOGGER.error("[selftest] 移动起手那一刻就有动作（rot(0)={} ext(0)={}）—— 应当是「先转身、臂不动」",
+					SmartArmBlockEntity.rotationFactor(0f), SmartArmBlockEntity.extensionFactor(0f));
 			if (!secondDone)
 				LOGGER.error("[selftest] 第二条条目最终没取到物品 —— 等待折返把程序卡住了");
 		} catch (Throwable t) {

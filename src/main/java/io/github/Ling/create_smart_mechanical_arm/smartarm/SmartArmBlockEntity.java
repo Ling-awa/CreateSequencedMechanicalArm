@@ -250,13 +250,12 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	public boolean beginMove(BlockPos offset, @Nullable Direction face, boolean pin) {
 		if (level == null)
 			return false;
-		// ★ **从静止位起手 ⇒ 这次动作只有"旋转+伸出"**（进度从 .5 起）：
-		//   收回是**上一次**操作的最后一段（`retract()` 起的那一段），不该在这里重播一遍。
-		//   用户第二十七轮续三十七实测（对照原版）：原版是"旋转&伸出 → 动作 → **收回**"，
-		//   我们曾经是"旋转&伸出 → 动作 → 收回&旋转&伸出"（收回并进了下一次动作）。
-		//   中途起手（例如挖掘的连挥 `restartMove`：手臂还伸在目标上）才走完整一个单位 ——
-		//   先折回（0→.5）再伸出（.5→1），那正是原版机械手反复挥击的观感。
-		boolean fromRest = isAtRest();
+		// ★ **从 0 起手（整段）**：前半段是原版的"站在静止位转身"（臂角度不变，因为起点与终点都是静止位），
+		//   后半段才是伸出 —— 于是"伸出开始时旋转已过半"（用户第二十七轮续三十八实测的原版观感）。
+		//   中途起手（挖掘连挥 `restartMove`：手臂还伸在目标上）走的是同一段：先折回、再伸出。
+		//   ⚠️ 之所以"从 0 起手"不会再出现"收回&旋转"：收回现在自成一段（`retract()` + 相位 IDLE，
+		//   那段里 `currentPoint()` 是 null ⇒ 旋转冻结），而运行时靠 `isAtRest()` 闸门保证
+		//   折返走完才开始这一段（见 {@code ProgramRuntime.beginEntry}）。⇒ 这半段一定是"原地转身"。
 		BlockPos target = worldPosition.offset(offset);
 		BlockState state = level.getBlockState(target);
 		ArmInteractionPoint point = pointAt(target, state, face);
@@ -271,7 +270,7 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			point.keepAlive(); // 同一 tick 先锁一次（理由见上面那段注释）
 		movingHandlerOwner = level.isClientSide ? null : level.getBlockEntity(target);
 		movingHandler = level.isClientSide ? null : handlerAt(target);
-		chasedPointProgress = fromRest ? .5f : 0f;
+		chasedPointProgress = 0f;
 		chasedPointIndex = 0;
 		phase = Phase.MOVING;
 		moveSeq++;
@@ -936,6 +935,27 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		return offset == null ? null : resolvePoint(offset);
 	}
 
+	/**
+	 * 插值进度 → **旋转**因子（照抄上游 `ArmBlockEntity:208`）：**整段** 0→1。
+	 *
+	 * <p>与 {@link #extensionFactor} 的差是这一整套观感的关键：旋转**先走**，
+	 * 因此伸出开始时旋转已经走完一半（用户第二十七轮续三十八实测：
+	 * <i>"原版动力臂似乎是转到一半才开始伸出（视觉上看大约是在角平分线上）"</i>）。
+	 */
+	public static float rotationFactor(float progress) {
+		return progress;
+	}
+
+	/**
+	 * 插值进度 → **伸出/折回**（臂角度）因子（照抄上游 `ArmBlockEntity:216`）：**半段** 0→1。
+	 *
+	 * <p>前半段（{@code progress < .5}）臂角度从"上一目标"折回静止位，后半段从静止位伸向目标。
+	 * 于是 {@code progress = .5} 是**伸出开始**的那一刻 —— 那一刻 {@link #rotationFactor} 正好是 .5。
+	 */
+	public static float extensionFactor(float progress) {
+		return progress == 1 ? 1 : (progress % .5f) * 2;
+	}
+
 	/** 推进移动进度；客户端顺带做角度插值（照抄 ArmBlockEntity.tickMovementProgress 的语义）。 */
 	private void tickMovementProgress() {
 		chasedPointProgress += Math.min(256, Math.abs(getSpeed())) / 1024f;
@@ -952,17 +972,15 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			target = SmartArmAngleTarget.RESTING; // 前半段：折回静止位
 		else
 			from = SmartArmAngleTarget.RESTING; // 后半段：从静止位伸向目标
-		float progress = chasedPointProgress == 1 ? 1 : (chasedPointProgress % .5f) * 2;
+		float progress = extensionFactor(chasedPointProgress);
 
-		// ★ **旋转只在"伸出"那半段发生**（用同一个 `progress`，不再用整段进度）—— 收回途中不转向新目标。
-		//   用户第二十七轮续三十七实测（对照原版动力臂的动画）：
-		//     原版：旋转&伸出 → 拿取 → **收回** → 旋转&伸出 → 放入 → 收回
-		//     我们：旋转&伸出 → 拿取 → **收回&旋转&伸出** → 放入 → 收回
-		//   原因有二，一起修：① 我们把"收回"并进了下一次动作的前半段（`beginMove` 从 0 起手），
-		//   于是折回的同时就在转向新目标；② 这里的旋转按**整段**进度插值（上游 `ArmBlockEntity:208`
-		//   就是整段）—— 上游那样写没问题（它折回那半段的目标是 NO_TARGET），我们不成立。
-		//   现在：折回（0→.5）只动臂、不转；伸出（.5→1）旋转与伸出同时进行 ✓
-		baseAngle.setValue(AngleHelper.angleLerp(progress, previousBaseAngle,
+		// ★ 旋转用**整段**因子（= 上游 `:208`），伸出用**半段**因子（= 上游 `:216`）——
+		//   两者都走的阶段是"后半段"，所以**旋转与伸出在最后半段同时进行，而旋转提前半段开始**。
+		//   用户第二十七轮续三十八实测对照：原版"转到一半才开始伸出"，我们曾经"一开始转就伸出"
+		//   （因为我上一轮把旋转也改成了半段因子 —— 那是为了消掉"收回时旋转"，
+		//   正确做法是让收回自成一段、且那一段不旋转，见 `retract()` 与 {@code ProgramRuntime.beginEntry} 的闸门）。
+		// ⚠️ 目标为静止位时旋转必须**冻结**（收回/等待期间不许转向新目标）。
+		baseAngle.setValue(AngleHelper.angleLerp(rotationFactor(chasedPointProgress), previousBaseAngle,
 			target == SmartArmAngleTarget.RESTING ? previousBaseAngle : target.baseAngle));
 
 		lowerArmAngle.setValue(Mth.lerp(progress, from.lowerArmAngle, target.lowerArmAngle));
