@@ -52,7 +52,31 @@
 
 ### 6. 基础内容
 
-目前**没有添加任何配方**。
+目前**没有添加任何配方**（只能在创造模式物品栏里拿到）。
+
+### 7. 程序的存储改为「以文本为准」（载入时编译）
+
+现在**盘上存的是编译结果**：卡里是 NBT 形式的程序，`.sma` 文本只是进出的中转格式。
+计划反过来 —— **以文本为准**，载入 / 插卡时**编译一次**进内存，运行时跑的仍是编译结果
+（不是每刻解析文本；解析一条是微秒级，性能从来不是这里的理由）。
+
+它不只是"换个格式"，而是和上面几条**撞在同一道墙上**：
+
+- **抬掉体积上限**：整份程序在保存时是**一个包**发出去的，硬上限 **128 KB**；而条目在 NBT 里很占地方 ——
+  单条 **2.2～3.7 KB**，同一份内容写成文本只有**几十字节**。于是现在一份程序**实测只能放 35～59 条**，
+  改成文本后这个上限事实上会消失（变成几百到上千条）。细节见下面的「现在就会遇到的限位」。
+- **脚本能随数据包分发**：数据包里的 `.sma` 能被扫描到并直接装载（内部待办里的 `/sma code apply`）。
+- 第 2 条「操作导入方块」和第 4 条「从臂中复制操作」要走的也是同一条路。
+
+> 待定：文本是"唯一真相"，还是与卡上的 NBT 并存 —— 前者要处理"文件被外部改了、而臂里还在跑"的情况。
+
+## 现在就会遇到的限位
+
+- **一份程序的条目上限 ≈ 35 ～ 59 条**，而不是配置里写的 256 条。真正的关卡是保存时的 **128 KB 体积守卫**
+  （整份程序一次性发出，超了整份拒收）；条目本身在 NBT 里很占地方，单条 2.2～3.7 KB。实测：
+  备注写满、图标多时**约 35 条**，一般写法**约 51 条**，备注写短、少用图标时**约 59 条**。
+- 超限时**明确报错**：不会静默丢条目，也不会只存一半。单个条目备注上限 **128 字**。
+- 想真正突破这一层只能换存储方式 —— 见上面第 7 条。
 
 ## 待定（可能不做）
 
@@ -95,6 +119,18 @@ This is a **plan, not a promise** — details are still being discussed and may 
 5. **Art** — there are no textures of our own yet (no `textures/` directory at all): the block
    reuses Create's mechanical arm model, the items reuse Create's and vanilla textures, and the UI
    has no textures. UI, item, block model and block textures are all still to be made.
+6. **Base content** — there are no recipes yet (the items are creative-inventory only).
+7. **Text-authoritative storage (compiled on load)** — today the card stores the *compiled* program as
+   NBT and `.sma` text is only an interchange format. The plan is to invert that: text is the source of
+   truth and is compiled once when loaded, with the runtime still executing the compiled form (perf was
+   never the reason — parsing one entry takes microseconds). Besides being readable and diffable, this
+   is what lifts the size ceiling (see below), and it is also the plumbing items 2 and 4 need.
+
+**Limits you will hit today:** a single program holds about **35–59 entries**, not the 256 the config
+nominally allows — the whole program is sent as one packet and capped at **128 KB** on save, and each
+entry costs 2.2–3.7 KB of NBT. Measured: ~35 with long notes and many icons, ~51 typical, ~59 with short
+notes and few icons. Exceeding it is a clear error, never a silent drop or a half-saved program; a single
+note is capped at 128 characters. Lifting this needs the storage change in item 7.
 
 **Undecided:** an in-game editor for `.sma` script text (may not happen — it overlaps with the GUI
 editor).
