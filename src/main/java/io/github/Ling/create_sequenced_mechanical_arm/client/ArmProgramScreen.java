@@ -1144,7 +1144,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 标题芯片带"这个动作的必填信息"：位置类的坐标 + 左右键的朝向、等待类的时长/极性、调用的目标。
 		// 这段文字与护目镜 HUD 的步骤第一行**共用** ArmEntryText.base —— 两边各写一份必然越走越远
 		// （用户上一轮看到的就是"HUD 说 USE rel-2,1,0 onSuccess=SKIP_TO(9)" vs 卡片说"使用 +-2,1,0"）。
-		return ArmEntryText.base(entry, program.origin);
+		return ArmEntryText.base(entry);
 	}
 
 	/**
@@ -2835,9 +2835,27 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		pushUndo();
 		int index = Mth.clamp(at, 0, task.entries.size());
-		task.entries.add(index, new ArmProgramEntry());
+		// ★ 新条目**必须给一个有意义的位置**（§19.6 用户实测踩到的坑）：偏移的含义是"相对程序原点"，
+		//   而新卡的原点是 (0,0,0) ⇒ 把偏移留成 0 就等于"目标 = 世界原点"（离臂几十上百格、必然超范围），
+		//   玩家看到的就是"臂在用绝对坐标"那种怪现象。默认取"你正看着的那个方块"，没看着就取你脚下 ——
+		//   与"录一条"的直觉一致（等价于当场录了一条只有位置、还没选动作的条目）。
+		ArmProgramEntry created = new ArmProgramEntry();
+		created.offset = defaultNewEntryWorldPos()
+			.subtract(program.origin);
+		task.entries.add(index, created);
 		pointerIndex = index;
 		openEditor(new Card(false, currentTask, index), null);
+	}
+
+	/** 新条目的默认世界位置：看向的方块 → 没有就用玩家脚下；都没有才退回原点（等价于偏移 0）。 */
+	private BlockPos defaultNewEntryWorldPos() {
+		net.minecraft.client.player.LocalPlayer player = minecraft == null ? null : minecraft.player;
+		if (player == null)
+			return program.origin;
+		if (minecraft.hitResult instanceof net.minecraft.world.phys.BlockHitResult hit
+			&& hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK)
+			return hit.getBlockPos();
+		return player.blockPosition();
 	}
 
 	private int totalEntries() {
@@ -4103,7 +4121,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		String tail = ArmEntryText.signalTailText(send).getString();
 		if (!"1t".equals(tail))
 			return "持续 1t 的尾巴应当是「1t」，实际「" + tail + "」";
-		String sendBase = ArmEntryText.base(send, BlockPos.ZERO).getString();
+		String sendBase = ArmEntryText.base(send).getString();
 		if (!sendBase.contains(sendHead) || !sendBase.contains(tail))
 			return "发送信号的第一行里缺短语或时间（" + sendBase + " vs " + sendHead + " + " + tail + "）";
 		if (sendBase.contains(recvHead) || sendBase.contains(cutHead))
@@ -4146,7 +4164,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				return "标题芯片宽 " + signalChipWidth(chip) + " 装不下文字 " + need;
 		}
 		String offWord = tr("entry.signal_wait_off").getString();
-		String recvText = ArmEntryText.base(recvOff, BlockPos.ZERO).getString();
+		String recvText = ArmEntryText.base(recvOff).getString();
 		if (!recvText.contains(recvHead) || !recvText.contains(offWord))
 			return "老卡（redpow=false）的接收信号没有写成「" + recvHead + " … " + offWord + "」：" + recvText;
 
