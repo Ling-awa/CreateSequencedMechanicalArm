@@ -94,3 +94,6 @@ signal, call a subtask, return, throw.
   no cross-mod integration.
 - **License**: MIT. Create is MIT, © simibubi and contributors; the arm's two-segment IK numbers match
   Create's `ArmAngleTarget` (see the class comment in `SequencedArmAngleTarget`).
+
+
+本篇README.md主要由AI生成。
