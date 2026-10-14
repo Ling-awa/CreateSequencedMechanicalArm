@@ -610,8 +610,11 @@ public class ProgramRuntime {
 	}
 
 	private static BlockPos offsetOf(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
-		// 臂内的程序在插卡那一刻已经被 `ProgramCoordinates.rebaseTo(program, arm.getBlockPos())`
-		// 重基过（原点 == 臂的位置，§19.2 第 1 条）⇒ 条目 offset 直接就是"相对臂的偏移"。
+		// ★ 条目 offset **永远相对执行它的那条臂**（PLAN.md §19.7 的用户口径）：
+		// 世界目标 = `arm.getBlockPos().offset(offset)`（见 preCheckFailure），卡上的 origin
+		// 不参与运行时 ⇒ 这里直接返回 offset，"插卡平移"那个函数（ProgramCoordinates.rebaseTo）已删。
+		// ⚠️ 谁要是想在这里加上 `program.origin` 之类的平移，请先看自检里那条
+		//    "同一张卡插进两条位置不同的臂，两次 offset 必须完全相同" —— 那条断言就是拦这个的。
 		return entry.offset;
 	}
 

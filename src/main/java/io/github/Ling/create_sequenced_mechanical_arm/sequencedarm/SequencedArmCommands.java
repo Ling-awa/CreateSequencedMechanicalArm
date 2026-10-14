@@ -51,8 +51,9 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
  *   /sma code import &lt;名字&gt; 读那个脚本文件，编译并写进主手卡（走同一套规模校验）
  * </pre>
  *
- * <p>坐标一律<b>相对程序原点</b>（文本头 {@code @origin x y z}，P1 起只有这一套语义）；
- * 插进臂时原点整体平移到臂的位置。卡片与 GUI 会在阶段 3 取代这套命令。
+ * <p>条目的坐标一律<b>相对执行这条程序的那条臂</b>（§19.7）：臂跑 {@code 臂位置 + 偏移}，
+ * 插卡<b>不做任何平移</b>。文本头 {@code @origin x y z} 是**可选的录制参考点**（没有这一行 ⇒
+ * 原点未设置，那张卡不能录制），它只服务录制与渲染。卡片与 GUI 会在阶段 3 取代这套命令。
  */
 @EventBusSubscriber(modid = Create_sequenced_mechanical_arm.MODID)
 public class SequencedArmCommands {
@@ -134,9 +135,10 @@ public class SequencedArmCommands {
 	/**
 	 * 把臂里现有的操作表写进主手的操作表（方便复制到别的臂或备份）。
 	 *
-	 * <p>P1 起没有"形态对不对"这道检查：臂内的程序原点就是臂的位置，导出（写文本）时原点随文本一起走
-	 * （§19.2 第 3 条："导出时必须把臂的位置写进原点"）—— 于是导出再插到另一条臂上时，
-	 * {@code rebaseTo} 会把世界位置原样搬过去。
+	 * <p>P1 起没有"形态对不对"这道检查。★ <b>导出的坐标是"相对执行它的那条臂"的偏移</b>
+	 * （§19.7）：导到另一条臂上时臂会照着<b>自己的位置</b>跑同一份相对坐标 ——
+	 * "搬一份程序到另一条臂"因此天然成立，不需要任何平移（曾经那步 {@code rebaseTo} 已删除）。
+	 * 臂内文本头里的 origin 是臂自己的位置（`read` 会把原点重置成自己），导出时随文本一起走。
 	 */
 	private static int export(CommandSourceStack source) {
 		ServerPlayer player = source.getPlayer();

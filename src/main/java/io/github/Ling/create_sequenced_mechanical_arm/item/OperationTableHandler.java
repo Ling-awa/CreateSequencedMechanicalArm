@@ -53,6 +53,8 @@ import java.util.Objects;
  *   <li><b>右键方块</b> → 录入一条（记的是<b>世界坐标 + 点击面</b>，进模型时按程序原点换算成偏移），
  *       录进"当前任务"</li>
  *   <li><b>潜行右键</b> → 主手卡 + 副手写好字的剪贴板 = 按序号写入备注；否则在"录入模式 / 编辑模式"之间切换</li>
+ *   <li><b>中键（选取方块）</b> → 把卡的原点设到指向的方块（指着空气就用玩家脚下）——
+ *       操作里写的全是相对坐标，没有原点就没法录制（§19.7）</li>
  *   <li><b>左键方块</b> → 撤销该方块上**最后录入的那一条**（一个方块可以绑多条操作）</li>
  *   <li>录过的目标实时画 AABB 轮廓</li>
  * </ul>
@@ -92,6 +94,14 @@ public class OperationTableHandler {
 	private static int currentTask;
 	/** 当前任务名；{@code null} = 卡上一条任务都还没有。 */
 	private static String currentTaskName;
+	/**
+	 * 主手那张卡当前的程序（每 tick 从卡上读一次，与画轮廓共用同一份）。
+	 *
+	 * <p>为什么留一份而不是每处现读：中键与右键两个输入分支都要看 {@link ArmProgram#hasOrigin}
+	 * （没设原点时不能录制，§19.7），而"这张卡有没有原点"必须与画轮廓、状态行读的是**同一份**卡；
+	 * 每处各读一次卡在"服务端刚写完、回包还没到"那一瞬间会给出不一样的说法。
+	 */
+	private static ArmProgram currentProgram = new ArmProgram();
 	private static ItemStack tracked = ItemStack.EMPTY;
 	/** 客户端 tick 计数 + 上次发删除包的时刻（见 {@link #REMOVE_INTERVAL}）。 */
 	private static int tickCounter;
@@ -121,6 +131,9 @@ public class OperationTableHandler {
 		ItemStack card = player.getMainHandItem();
 		if (!OperationTableItem.isTable(card)) {
 			tracked = ItemStack.EMPTY;
+			// 没拿卡 ⇒ "有没有原点"回到未知的默认（没设）：否则上一张卡的原点会让右键录制
+			// 在这里放行、到服务端才被拒（玩家看到的红字来源就对不上了）。
+			currentProgram = new ArmProgram();
 			OperationSelectionOverlay.INSTANCE.tick(false);
 			ClipboardChecklistOverlay.INSTANCE.hide();
 			return;
@@ -130,6 +143,7 @@ public class OperationTableHandler {
 		// 客户端那份缓存还停在"没有任务"，于是切模式仍然优先提示"没有任务"，直到开过一次面板才对上。
 		// 读程序本来就是每 tick 都要做的事（画轮廓），顺手比对，零额外开销。
 		ArmProgram program = CardProgramStorage.read(card, level.registryAccess());
+		currentProgram = program;
 		Mode cardMode = CardUiPacket.EDIT.equals(program.editorMode) ? Mode.EDITING : Mode.RECORDING;
 		int cardTask = program.tasks.isEmpty() ? -1
 			: Math.max(0, Math.min(program.editorTask, program.tasks.size() - 1));
@@ -203,6 +217,11 @@ public class OperationTableHandler {
 	 * <p>P1「坐标模型统一」（§19）：条目里存的是<b>相对原点的偏移</b>，所以世界位置要按
 	 * {@code program.origin.offset(entry.offset)} 算；同时"只画绝对条目"这道过滤也删了
 	 * —— 新模型里没有"绝对条目"这回事，所有带坐标的条目都该看得见（P2 才做原点的蓝框）。
+	 *
+	 * <p>⚠️ 这里画的**不是运行时的目标**（§19.7）：运行时条目相对的是<b>执行它的那条臂</b>
+	 * （{@code 臂位置 + 偏移}），而卡上的原点只是**录制参考系** —— 框画在
+	 * {@code origin + offset} 上是为了"在原地复现你录的那个位置"，与臂无关。
+	 * 原点没设（{@code hasOrigin=false}）时这条公式只是显示用的近似，且此时根本录不进新条目。
 	 */
 	private static void drawOutlines(Level level, ArmProgram program) {
 		ArmProgramTask task = currentTask < 0 ? null : program.task(currentTask);
@@ -267,9 +286,19 @@ public class OperationTableHandler {
 				instanceof SequencedArmBlock)
 			return;
 
-		// 选取方块（中键）会把手上这张卡拉走换掉 —— 手持操作表时直接吞掉
+		// 选取方块（中键）= **把卡的原点设到指向的位置**（PLAN.md §19.3、§19.7）。
+		//
+		// ⚠️ 必须**仍然 setCanceled(true)**：不取消的话原版会把手上这张卡换成指针下方的方块
+		//    （这正是它以前被"白白吞掉"的原因），玩家会当场丢掉手里的卡。
 		if (event.isPickBlock()) {
 			event.setCanceled(true);
+			// 指到真方块就用那个方块的位置；指着空气（BlockHitResult.miss）/ 实体就用玩家脚下 ——
+			// 与"新条目的默认位置"同一套退路（§19.6 第 3 条），玩家永远能得到一个原点。
+			BlockPos origin = realBlock && pos != null ? pos : player.blockPosition();
+			PacketDistributor.sendToServer(new CardUiPacket(CardUiPacket.RECORD, currentTask, true, origin));
+			// 反馈带坐标：中键设原点之后**卡上原来那些数字的含义就变了**，
+			// 不说清楚"基准现在在哪"玩家没法自己判断该录成什么样。
+			feedback(player, "card.origin_set", ChatFormatting.AQUA, origin.toShortString());
 			return;
 		}
 
@@ -346,16 +375,25 @@ public class OperationTableHandler {
 	 * <p><b>只有</b>需要跟方块交换物品的四类操作才要求目标是 Create 交互点；攻击 / 使用 / 潜行使用
 	 * 对**任意方块**都能试（用户第二轮反馈："对任意方块都可以尝试而不需要是 create 交互方块"）。
 	 * 这个判定与运行时用的是同一个 {@link OperationType#needsInteractionPoint()}，免得两处各写一份。
+	 *
+	 * <p>★ <b>没设原点时不发录制包</b>（§19.7）：操作里写的全是相对坐标，没有原点就没有相对坐标。
+	 * 服务端那条守卫（{@code card.need_origin}）是权威，这一条只是"在本地就说清楚"——
+	 * 否则玩家看到的会是一条过了半秒才回来的红字，而这一下右键到底录没录进去也看不出来。
+	 * 判据就是卡上的 {@link ArmProgram#hasOrigin} 本身（每 tick 读一次，与状态行同一份）。
 	 */
 	private static void record(LocalPlayer player, BlockPos pos, Direction face) {
+		if (!currentProgram.hasOrigin) {
+			feedback(player, "card.need_origin", ChatFormatting.RED);
+			return;
+		}
 		Level level = player.level();
 		if (currentOp().needsInteractionPoint()
 			&& !ArmInteractionPoint.isInteractable(level, pos, level.getBlockState(pos))) {
 			feedback(player, "card.not_interactable", ChatFormatting.RED);
 			return;
 		}
-		// 记的是**世界坐标**（客户端只报位置与面，服务端按卡上程序的原点换算成偏移，§19.2）；
-		// 原点的整体平移（"以这条臂为基准"）发生在插卡进臂那一刻。
+		// 记的是**世界坐标**（客户端只报位置与面，服务端按卡上程序的原点换算成偏移，§19.7）；
+		// 运行时的世界目标是"臂位置 + 偏移" —— **卡上的原点不参与**，插卡也不再做任何平移。
 		PacketDistributor.sendToServer(new CardEditPacket(CardEditPacket.Action.ADD_ENTRY, pos, face, currentOp()));
 	}
 

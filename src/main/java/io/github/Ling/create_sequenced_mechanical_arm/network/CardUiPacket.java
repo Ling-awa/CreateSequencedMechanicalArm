@@ -6,6 +6,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.item.ClipboardPlan;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
@@ -17,7 +18,7 @@ import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 /**
- * 录入会话状态（模式 / 正在编辑哪个任务）的 C2S 意图包（PLAN.md §5.1）。
+ * 录入会话状态（模式 / 正在编辑哪个任务）**以及"设原点"**的 C2S 意图包（PLAN.md §5.1、§19.3）。
  *
  * <p>为什么需要它：模式与"当前任务"必须是<b>卡上的状态</b>而不是客户端内存里的开关 —— 用户实测
  * "切换物品之后就回到录入模式"。客户端只发意图，服务端读了卡、改这两个字段、再广播权威副本回来
@@ -28,9 +29,13 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  * 存在卡上（`CardProgramStorage` 的 `ArmProgramMode` / `ArmProgramTaskIndex`），走的是同一套
  * 服务端权威写入 —— 这里的两行注释描述的机制没变，只是宿主换了。
  *
+ * <p>★ <b>{@code setOrigin} 那一支</b>（§19.3 的中键）：原点也是"卡上的状态"，同样只能由服务端
+ * 权威写。客户端只报坐标，服务端写卡（{@link ArmProgram#origin} + {@link ArmProgram#hasOrigin}）。
+ * 现有调用方（模式 / 任务切换）一律传 {@code setOrigin=false}，行为一个字都没变。
+ *
  * <p>服务端不校验"这个玩家该不该有编辑模式"：编辑的是他自己手上的卡，模式只是 UX 约定。
  */
-public record CardUiPacket(String mode, int task) implements CustomPacketPayload {
+public record CardUiPacket(String mode, int task, boolean setOrigin, BlockPos origin) implements CustomPacketPayload {
 
 	// 线上取值只有一处定义（`ArmProgram` 的模型常量）—— 这里只是别名，免得两边各写一个 "EDIT"
 	public static final String RECORD = ArmProgram.MODE_RECORD;
@@ -40,12 +45,32 @@ public record CardUiPacket(String mode, int task) implements CustomPacketPayload
 		new CustomPacketPayload.Type<>(
 			ResourceLocation.fromNamespaceAndPath(Create_sequenced_mechanical_arm.MODID, "card_ui"));
 
+	/**
+	 * 只改模式 / 当前任务（{@code setOrigin=false}）—— 现有两条调用路径用的就是这个。
+	 *
+	 * <p>留这个便捷构造是为了"调用方不用写两个没意义的参数"：`origin` 在
+	 * {@code setOrigin=false} 时**根本不参与编码**，写什么都不影响语义。
+	 */
+	public CardUiPacket(String mode, int task) {
+		this(mode, task, false, BlockPos.ZERO);
+	}
+
 	public static final StreamCodec<FriendlyByteBuf, CardUiPacket> STREAM_CODEC = StreamCodec.of(
 		(buf, packet) -> {
 			buf.writeUtf(packet.mode());
 			buf.writeVarInt(packet.task());
+			buf.writeBoolean(packet.setOrigin());
+			// 坐标只在真的设原点时才写：不设时多写 12 字节毫无意义，而且"线上有没有这个字段"
+			// 与语义严格对应（读的一侧照同一个判据读，两边不会错位）。
+			if (packet.setOrigin())
+				buf.writeBlockPos(packet.origin());
 		},
-		buf -> new CardUiPacket(buf.readUtf(), buf.readVarInt()));
+		buf -> {
+			String mode = buf.readUtf();
+			int task = buf.readVarInt();
+			boolean setOrigin = buf.readBoolean();
+			return new CardUiPacket(mode, task, setOrigin, setOrigin ? buf.readBlockPos() : BlockPos.ZERO);
+		});
 
 	@Override
 	public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
@@ -62,6 +87,13 @@ public record CardUiPacket(String mode, int task) implements CustomPacketPayload
 			HolderLookup.Provider registries = player.level()
 				.registryAccess();
 			ArmProgram program = CardProgramStorage.read(card, registries);
+			if (packet.setOrigin()) {
+				// ★ 中键设原点（§19.3）：只改参考点，**不动任何条目的 offset**。
+				// 为什么不平移条目：offset 的语义是"相对执行它的那条臂"，卡上的 origin 只是
+				// 录制 / 渲染的参考系 ⇒ 重设参考点不该让任何目标在世界里挪位置（§19.2 第 4 条）。
+				applyOrigin(player, card, program, registries, packet.origin());
+				return;
+			}
 			program.editorMode = EDIT.equals(packet.mode()) ? EDIT : RECORD;
 			// 两头都要夹：只夹下界的话，一个越界（或负数溢出成正数）的 int 会**原样写进卡的 NBT**，
 			// 读回来虽然会被 `ArmProgram.load` 再夹一次，但中间那段时间里谁按它取下标谁越界。
@@ -72,6 +104,27 @@ public record CardUiPacket(String mode, int task) implements CustomPacketPayload
 			ClipboardPlan.syncTicks(player, program);
 			player.inventoryMenu.broadcastChanges();
 		});
+	}
+
+	/**
+	 * 把原点设到 {@code origin}（PLAN.md §19.3 的中键路径）。
+	 *
+	 * <p>抽成 public static 是给**启动自检**用的（与 {@code CardEditPacket.addEntry} 同一个理由）：
+	 * 这里写的是"卡以后的坐标以哪为基准"，写错了在游戏里是**静默**的 ——
+	 * 玩家会看到自己录的坐标全部偏掉，而编译期一点提示都没有。
+	 *
+	 * <p>{@code hasOrigin} 必须一起置真：不然写进去的坐标永远不会被读到（录制会被
+	 * {@code card.need_origin} 拒绝）。
+	 */
+	public static void applyOrigin(ServerPlayer player, ItemStack card, ArmProgram program,
+		HolderLookup.Provider registries, BlockPos origin) {
+		program.origin = origin;
+		program.hasOrigin = true;
+		CardProgramStorage.write(card, program, registries);
+		// 与模式/任务那条路一样：写完把权威副本广播回去（程序变了 ⇒ 清单的勾可能跟着变；
+		// 原点本身客户端也要立刻看到，否则"再录一条"的换算还是旧的）
+		ClipboardPlan.syncTicks(player, program);
+		player.inventoryMenu.broadcastChanges();
 	}
 
 }

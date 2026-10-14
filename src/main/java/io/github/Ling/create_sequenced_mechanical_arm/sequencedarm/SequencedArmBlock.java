@@ -10,7 +10,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramCoordinates;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 
 import net.minecraft.ChatFormatting;
@@ -231,20 +230,23 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	}
 
 	/**
-	 * 装载卡片程序（PLAN.md §6、§19.2）。
+	 * 装载卡片程序（PLAN.md §6、§19.7）。
 	 *
 	 * <p>三个语义要点：
 	 * <ol>
-	 *   <li><b>重基一次</b>：程序里的坐标一律相对卡上的原点，插进臂时把原点整体平移到臂的位置
-	 *       （{@link ProgramCoordinates#rebaseTo}）—— 每一条的<b>世界位置逐条不变</b>，
-	 *       而臂内部因此恒有"原点 = 臂的位置"（§19.2 第 1 条）；</li>
+	 *   <li>★ <b>不做任何坐标平移</b>（§19.7 的用户口径）：条目的 {@code offset} 永远相对
+	 *       "执行它的那条臂"，插卡只是把这份程序搬进臂里。卡上的 {@code origin} 不参与运行时、
+	 *       也不参与插卡 —— 它只服务录制与渲染。曾经的 {@code ProgramCoordinates.rebaseTo}
+	 *       会把卡上的 {@code 0 0 0} 平移到臂的位置，于是"卡里写 0 0 0"在臂里变成"指向世界原点"
+	 *       （用户实测：想挖自己脚下，臂却跑去挖 (0,0,0)），那个函数已删除；</li>
 	 *   <li>卡片"是绝对卡还是相对卡"这件事已经<b>不存在</b>（P1 删掉了绝对坐标操作表），
 	 *       所以没有任何形态检查；</li>
 	 *   <li>卡片本身不被消耗（可反复插到多条臂上），需要清空有别的入口。</li>
 	 * </ol>
 	 *
-	 * <p>包可见（不是 private）是给启动自检用的：这条路上的"重基"是**静默**的 ——
+	 * <p>包可见（不是 private）是给启动自检用的：这条路上的"目标落在哪"是**静默**的 ——
 	 * 算错只会让臂搬到错的位置，编译期一点提示都没有（与 {@link #exchangeHeldItem} 同一个理由）。
+	 * 自检里那条"同一张卡插进两条位置不同的臂，两次的 offset 必须完全相同"就是钉这一条的。
 	 */
 	static ItemInteractionResult loadProgramFromCard(SequencedArmBlockEntity arm, ItemStack card, Player player,
 		Level level) {
@@ -259,7 +261,6 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 			feedback(player, "over_limit", ChatFormatting.RED);
 			return ItemInteractionResult.SUCCESS;
 		}
-		int converted = ProgramCoordinates.rebaseTo(program, arm.getBlockPos());
 		arm.setProgram(program);
 
 		// 装载时顺手报一下"有多少条超出这条臂的范围"（用户第十九轮）：
@@ -272,8 +273,11 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 			for (ArmProgramEntry entry : task.entries) {
 				if (!entry.op.requiresTarget())
 					continue;
-				// 世界目标 = 原点 + 偏移。重基之后原点就是臂的位置 ⇒ 与"相对臂的偏移"同值。
-				BlockPos target = program.origin.offset(entry.offset);
+				// ★ 世界目标 = **臂的位置 + 偏移**（卡上的 origin 不参与！§19.7）。
+				// 原来这里写的是 `program.origin.offset(entry.offset)`，那在"插卡不再重基"之后
+				// 只会在 origin 恰好被重置成臂位置时才碰巧对；现在按运行时的同一条公式算。
+				BlockPos target = arm.getBlockPos()
+					.offset(entry.offset);
 				if (!ProgramRuntime.withinArmRange(arm.getBlockPos(), target))
 					outOfRange++;
 			}
@@ -281,8 +285,7 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 		if (outOfRange > 0)
 			feedback(player, "loaded_out_of_range", ChatFormatting.YELLOW, program.tasks.size(), outOfRange, range);
 		else
-			feedback(player, converted > 0 ? "loaded_converted" : "loaded", ChatFormatting.GREEN, program.tasks.size(),
-				converted);
+			feedback(player, "loaded", ChatFormatting.GREEN, program.tasks.size());
 		return ItemInteractionResult.SUCCESS;
 	}
 

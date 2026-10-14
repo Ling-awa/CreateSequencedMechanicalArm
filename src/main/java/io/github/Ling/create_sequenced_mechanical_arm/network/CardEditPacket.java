@@ -125,6 +125,15 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 	 */
 	public static void addEntry(ServerPlayer player, ItemStack card, ArmProgram program,
 		HolderLookup.Provider registries, CardEditPacket packet) {
+		// ★ **没有原点就不能录制**（PLAN.md §19.7 的用户口径）：操作里写的坐标全是**相对坐标**，
+		// 而相对谁由原点决定 —— 没设原点时"减去原点"连该减什么都不知道。所以这里**拒绝**，
+		// 并把"怎么设原点"说在提示里（中键，见 OperationTableHandler 的选取方块分支）。
+		// ⚠️ 拒绝必须在**建任务之前**：否则玩家先被塞一个空任务，再看到"没有原点"，
+		// 那张卡的状态已经被这次失败的录制改过了。
+		if (!program.hasOrigin) {
+			feedback(player, "card.need_origin", ChatFormatting.RED);
+			return;
+		}
 		// 没有任务就先建一个默认任务：录完就能直接插进臂里跑
 		if (program.tasks.isEmpty()) {
 			ArmProgramTask created = new ArmProgramTask();
@@ -140,14 +149,13 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = packet.op();
-		// ★ P1「坐标模型统一」（PLAN.md §19）：条目坐标**一律相对程序原点**，
-		// 所以世界里录下来的位置要减去原点才进模型（原点 = (0,0,0) 时就是世界坐标本身）。
-		// 世界位置回显也按 `origin + offset` 算 —— 界面上给玩家看的必须是那个位置，
-		// 不是模型里那个偏移（两者在原点非零时不是同一个数）。
+		// ★ 条目坐标**一律相对执行它的那条臂**（PLAN.md §19.7），所以录制时用 origin 把世界位置
+		// 换算成偏移：`offset = 世界位置 − origin`。注意 origin 在这里是**纯录制参考点**，
+		// 它不参与运行时（运行时是 `臂位置 + offset`）。
+		// 世界位置回显也按 `origin + offset` 算 —— 界面上给玩家看的必须是那个位置。
 		//
-		// ⚠️ 已知边界（P1 不做，留给 P2 的中键设原点）：卡上的原点不会因为"插进过某条臂"而改变，
-		//    所以"插卡（臂内原点被重基）→ 再拿回卡上录几条"时，这几次录制仍按**卡上的**原点换算。
-		//    两者不一致时那不是算错，而是"这张卡的基准还是那个旧原点"——P2 会让它显式可见（蓝色框）。
+		// ⚠️ 卡上的原点不会因为"插进过某条臂"而改变（插卡不做任何平移了，§19.7）：它只由
+		//    "中键设原点"改（CardUiPacket 的 setOrigin 那一支）。要改基准就再中键一次。
 		BlockPos world = packet.pos();
 		entry.offset = world.subtract(program.origin);
 		entry.face = packet.face();
@@ -196,8 +204,9 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		ArmProgramTask task = program.tasks.get(index);
 		for (int i = task.entries.size() - 1; i >= 0; i--) {
 			ArmProgramEntry entry = task.entries.get(i);
-			// 比的是**世界位置**（P1，§19.4 风险那条）：条目里存的是"相对原点的偏移"，
+			// 比的是**世界位置**（§19.4 风险那条）：条目里存的是"相对原点的偏移"，
 			// 直接拿世界坐标去比 `entry.offset` 在原点非零时就一条都删不掉。
+			// （`origin + offset` 在"录制参考系"里仍然成立 —— 撤销与录制用的是同一个参考点。）
 			if (!entry.op.requiresTarget() || !program.origin.offset(entry.offset)
 				.equals(pos))
 				continue;

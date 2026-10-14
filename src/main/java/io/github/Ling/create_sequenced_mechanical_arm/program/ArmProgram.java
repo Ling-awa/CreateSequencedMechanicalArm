@@ -42,21 +42,39 @@ public class ArmProgram {
 	}
 
 	/**
-	 * <b>程序原点</b>：所有条目的 {@link ArmProgramEntry#offset} 都是相对这个方块位置的偏移
-	 * （PLAN.md §19 的坐标模型统一：一份程序一个原点，条目上不再有"绝对 / 相对"标记）。
+	 * <b>程序原点</b>：<b>可选的</b>参考点，只管两件事（PLAN.md §19.7 的用户口径）：
+	 * <ol>
+	 *   <li><b>录制</b>：把世界位置换算成相对坐标（{@code offset = 世界位置 − origin}，见
+	 *       {@code CardEditPacket.addEntry}）；</li>
+	 *   <li><b>渲染</b>：以后在世界里画目标框（{@code origin + offset}）。</li>
+	 * </ol>
 	 *
-	 * <p>它只是<b>卡上的参考点</b>（编辑 / 显示 / 导出用），<b>不是运行时的锚点</b>：
-	 * 插进臂时 {@code ProgramCoordinates.rebaseTo(program, arm.getBlockPos())} 把原点整体平移到臂的位置，
-	 * 臂内部因此恒有 {@code origin == 臂方块位置}（与上游 {@code ArmInteractionPoint.serialize(anchor)}
-	 * 一致，蓝图旋转/镜像也照旧成立）。
+	 * <p>★ <b>它不参与运行时、也不参与插卡</b>：条目的 {@link ArmProgramEntry#offset}
+	 * <b>永远相对"执行它的那条臂"</b>（世界目标 = {@code arm.getBlockPos().offset(offset)}，
+	 * 见 {@code ProgramRuntime.offsetOf} / {@code preCheckFailure}）。插卡时<b>不做任何平移</b>
+	 * —— 曾经的 {@code ProgramCoordinates.rebaseTo} 已删除：它会把卡上的 {@code 0 0 0}
+	 * 平移到臂的位置，于是"卡里写 0 0 0"在臂里变成"指向世界原点"，正是用户报的那个 bug。
 	 *
-	 * <p>为什么不能改成"运行时用 {@code origin + offset}"：那会让"搬臂"从"目标跟着走"变成
-	 * "目标锚死在原地"，是语义变化（§19.2 第 1 条、§17.5.2 已经写过一次）。
+	 * <p>因此 {@link #hasOrigin} 才必须存在：没有原点时 {@code offset} <b>没有参考系</b>
+	 * （操作里写的都是相对坐标），所以录制必须被拒绝（见 {@code CardEditPacket.addEntry}）。
 	 *
 	 * <p>进 `.sma` 文本头（{@code @origin x y z}）：§17 之后盘上只有文本，只写卡上等于
-	 * "导出 → 改 → 导入"一圈回来坐标就变了。
+	 * "导出 → 改 → 导入"一圈回来坐标就变了。<b>没设原点时不写这一行</b>。
 	 */
 	public BlockPos origin = BlockPos.ZERO;
+
+	/**
+	 * 原点是否<b>设置过</b>（PLAN.md §19.7：原点可选）。
+	 *
+	 * <p>为什么不能拿 {@code origin.equals(BlockPos.ZERO)} 当"没设"：玩家完全可能真的把原点设在
+	 * 世界原点 (0,0,0)，那时"设过"与"没设"是两件事 —— 前者能录制，后者不能。
+	 *
+	 * <p>落盘形态：设过 ⇒ 写 {@code origin} 键（{@code NbtUtils.writeBlockPos}，int[3]）；
+	 * 没设 ⇒ 不写这个键，读回来 {@code hasOrigin = false} + {@link #origin} 归零。
+	 * 文本形态：设过 ⇒ 首行 {@code @origin x y z}；没设 ⇒ 没有这一行。
+	 */
+	public boolean hasOrigin;
+
 	public final List<ArmProgramTask> tasks = new ArrayList<>();
 
 	/**
@@ -143,9 +161,13 @@ public class ArmProgram {
 
 	public CompoundTag save(HolderLookup.Provider registries) {
 		CompoundTag tag = new CompoundTag();
-		// 原点用 `NbtUtils.writeBlockPos`（写成 int[3]）：与 `arm` 方块实体里 `"Offset"` 的写法一致 ——
+		// 原点**只在设过时才写**（§19.7：原点是可选的）。
+		// 用 `NbtUtils.writeBlockPos`（写成 int[3]）：与 `arm` 方块实体里 `"Offset"` 的写法一致 ——
 		// 全工程只有这一种"方块坐标进 NBT"的形式，读的一侧才不会漏掉某个形状。
-		tag.put("origin", NbtUtils.writeBlockPos(origin));
+		// ⚠️ 没设时不写这个键（而不是写 (0,0,0)）：否则"设过原点 (0,0,0)"与"没设"落盘后就分不清了
+		// ⇒ 读回来 hasOrigin=true、玩家能录制，而卡上其实从没设过原点。
+		if (hasOrigin)
+			tag.put("origin", NbtUtils.writeBlockPos(origin));
 		ListTag list = new ListTag();
 		for (ArmProgramTask task : tasks)
 			list.add(task.save(registries));
@@ -161,8 +183,11 @@ public class ArmProgram {
 
 	public static ArmProgram load(CompoundTag tag, HolderLookup.Provider registries) {
 		ArmProgram program = new ArmProgram();
-		// 缺 origin 键（老 NBT）⇒ 缺省 (0,0,0)：旧模型的绝对条目 offset 直接沿用 ⇒ 世界位置完全不变（§19.2 第 3 条）
-		program.origin = tag.contains("origin") ? NbtUtils.readBlockPos(tag, "origin")
+		// ★ 原点按"**有没有 origin 键**"恢复（§19.7）：有 ⇒ 设过；没有 ⇒ 没设 + 坐标归零。
+		// 键比坐标更能表达"设过没有" —— (0,0,0) 是一个**合法的原点值**，不是"没设"的哨兵
+		// （玩家真的可能对着世界原点按中键）。
+		program.hasOrigin = tag.contains("origin");
+		program.origin = program.hasOrigin ? NbtUtils.readBlockPos(tag, "origin")
 			.orElse(BlockPos.ZERO) : BlockPos.ZERO;
 		program.editorMode = tag.contains("emode") ? tag.getString("emode") : MODE_RECORD;
 		program.editorTask = Math.max(0, tag.getInt("etask"));
@@ -180,9 +205,10 @@ public class ArmProgram {
 
 	public List<String> describe() {
 		List<String> out = new ArrayList<>();
-		// 原点放第一行（§19）：它是"这套坐标以哪为基准"，诊断时（`/sma info`）第一眼就要看到 ——
-		// 用户实测那次"看起来像绝对坐标"的排查，正是靠"原点 + 偏移"两个数一起看才定位到的。
-		out.add("原点 " + origin.toShortString());
+		// 原点放第一行（§19.6）：它决定"录制时的世界位置怎么换算成偏移"，诊断时（`/sma info`）
+		// 第一眼就要看到 —— 用户实测那次"看起来像绝对坐标"的排查，正是靠"原点 + 偏移"一起看才定位的。
+		// 没设就说"未设置"：这一行的存在意义就是让人一眼看出"这张卡还不能录制"。
+		out.add("原点 " + (hasOrigin ? origin.toShortString() : "未设置"));
 		for (ArmProgramTask task : tasks)
 			task.describeInto(out, i -> "  [" + i + "] ");
 		return out;

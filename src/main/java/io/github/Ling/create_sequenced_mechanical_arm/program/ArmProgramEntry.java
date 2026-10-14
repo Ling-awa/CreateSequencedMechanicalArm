@@ -31,12 +31,15 @@ public class ArmProgramEntry {
 
 	public OperationType op = OperationType.TAKE;
 	/**
-	 * 目标位置：<b>相对程序原点</b>（{@link ArmProgram#origin}）的偏移。
+	 * 目标位置：**永远相对"执行这条条目的那条臂"**的偏移（PLAN.md §19.7 的用户口径）。
 	 *
-	 * <p>P1「坐标模型统一」之前这里还有 {@code absolute} 字段（真 = 世界绝对坐标）—— 已删除：
-	 * 一份程序只有一个原点，条目的空间语义不再有第二种写法。插进臂时
-	 * {@code ProgramCoordinates.rebaseTo} 把原点改写成臂的位置，于是臂里这份的
-	 * {@code origin} 恒等于臂方块自身位置，与上游 {@code ArmInteractionPoint.serialize(anchor)} 一致。
+	 * <p>世界目标 = {@code arm.getBlockPos().offset(offset)}（§19.7）：所以卡里写 {@code 0 0 0}
+	 * 就是"挖臂自己脚下那一格"，与卡片在谁手里、卡上的原点在哪都无关。运行时不加任何东西。
+	 *
+	 * <p>卡上的 {@link ArmProgram#origin} 是**录制参考系**（{@code offset = 世界位置 − origin}）与
+	 * 以后渲染目标框用的；它不是运行时的锚点，插卡也<b>不做平移</b>（P1 那个
+	 * {@code ProgramCoordinates.rebaseTo} 已按 §19.7 删除）。P1 之前这里还有 {@code absolute}
+	 * 字段（真 = 世界绝对坐标），同样已删除 —— 条目坐标没有第二种语义了。
 	 */
 	public BlockPos offset = BlockPos.ZERO;
 

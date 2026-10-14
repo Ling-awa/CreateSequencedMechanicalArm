@@ -215,9 +215,11 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		clearTransmissions();
 		program.tasks.clear();
 		program.tasks.addAll(newProgram.tasks);
-		// 原点跟着一起走：插卡那条路已经把它重基成臂的位置（§19.2 第 1 条），
-		// 漏掉这一行会让臂内 origin 停在 (0,0,0) 而 offset 却是相对臂的 ⇒ 范围提示整体偏移一个臂位。
+		// 原点与"设过没有"跟着一起走（§19.7）：插卡**不做任何平移**，所以臂内那份与卡上那份
+		// 是同一个原点；漏掉这两行会让臂里的原点停在 (0,0,0)，而条目 offset 是玩家录的
+		// —— 将来要按"臂内 origin + offset"画框时那个数就错了。
 		program.origin = newProgram.origin;
+		program.hasOrigin = newProgram.hasOrigin;
 		runtime.onProgramReplaced(this); // 任务数可能变了：槽位与频率缓存都要重来
 	}
 
@@ -1480,8 +1482,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 * ⇒ 复制出来的程序全部指错方向。上游的做法就是对存下来的偏移调 `transform.applyWithoutOffset(pos)`
 	 *（只取旋转/镜像、不含结构平移）。数学上正确：旋转是线性的，`R(目标) − R(臂) = R(目标 − 臂)`。
 	 *
-	 * <p>相对偏移之外的情况这里不用管：P1「坐标模型统一」之后条目坐标只有一种语义（相对原点），
-	 * 而臂内的原点恒等于臂的位置（插卡时 {@code ProgramCoordinates.rebaseTo} 定的）。
+	 * <p>相对偏移之外的情况这里不用管：P1「坐标模型统一」之后条目坐标只有一种语义
+	 * （**相对执行它的那条臂**，§19.7；卡上的 origin 只服务录制与渲染），
+	 * 而臂内的那个 origin 只是"臂的位置"的一个便利副本（`read` 里重置，`setProgram` 里跟着卡走）。
 	 */
 	@Override
 	public void transform(BlockEntity be, StructureTransform transform) {
@@ -1568,7 +1571,7 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		if (!clientPacket) {
 			// ★ PLAN.md §17：盘上**只存文本**。编译结果（program 字段）只活在内存里，
 			// 写盘这一刻现生成一次脚本文本 —— 不缓存是为了"存下来的永远就是现在跑的那份"：
-			// `ProgramCoordinates.rebaseTo` / 命令都能在 setProgram 之后改模型，
+			// `/sma` 命令、编辑器菜单、蓝图 `transform` 都能在 `setProgram` 之后改模型，
 			// 缓存文本迟早会与程序对不上（那种不一致只在重进世界时才现形）。
 			tag.putString("ProgramText", programTextForSave(registries));
 			tag.put("Runtime", runtime.save());
@@ -1655,9 +1658,11 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			}
 			ArmProgram loaded = ProgramText.fromText(text, registries);
 			program.tasks.clear();
-			// 端点：臂内**恒有** origin == 臂的位置（§19.2 第 1 条）。臂本体盘上只存文本，
-			// 文本头里的 origin 是**卡上**那个参考点；进臂后它就等于臂自己 ⇒ 这里显式重置，
-			// 免得载入一份"原点在别处"的文本后，范围提示按错误的世界位置算。
+			// 端点：臂内的原点就是**臂自己**（§19.2 第 1 条）。臂本体盘上只存文本，文本头里的 origin
+			// 是**卡上**那个录制参考点；进臂后它没有第二个含义（运行时是"臂位置 + 偏移"，§19.7），
+			// 这里显式重置只是为了"以后要画臂内目标框时有个对的数"，免得载入一份原点在别处的文本后
+			// 那个数过期。⚠️ `hasOrigin` **不在这里置真**：它是"卡上设过录制基准没有"的状态，
+			// 与臂无关（臂里的程序压根不参与录制）；写盘时它照样过 `ArmProgram.save` 的往返。
 			program.origin = worldPosition;
 			if (loaded != null) {
 				program.tasks.addAll(loaded.tasks);

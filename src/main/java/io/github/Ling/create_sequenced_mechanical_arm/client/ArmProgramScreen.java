@@ -2513,8 +2513,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// 坐标框**接管**原来那个「坐标空间」选择框的位置（宽 42）：右沿仍与上面那个选择框
 				// （77..197）对齐。有「面」的操作用它原来的宽度（88..120），坐标框只占 77..109。
 				int coordW = face ? 32 : FIELD_W;
-				// 框里回显的是**世界位置**（= 原点 + 偏移），玩家在世界里看到的坐标就是它；
-				// 写回去时要减去原点：模型里存的永远是相对原点的偏移（§19.2 第 1 条，运行时的锚点是臂）。
+				// 框里回显的是**世界位置**（= 原点 + 偏移）：这个框编辑的是"我要打的那个世界位置"，
+				// 而模型里存的是相对**原点**（录制参考系）的偏移，所以写回去时要减去原点。
+				// ⚠️ 注意与运行时的区别（§19.7）：臂跑这条条目时用的是 `臂位置 + offset`，
+				//    卡上的 origin 不参与 —— 这个框只在"你还记得 origin 在哪"时才对得上世界位置
+				//    （原点没设时 origin=(0,0,0)，框里显示的就是裸偏移；这一点待用户拍板，见本轮报告）。
 				BlockPos world = program.origin.offset(entry.offset);
 				textField(FIELD_X, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
 					world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
@@ -2835,10 +2838,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		pushUndo();
 		int index = Mth.clamp(at, 0, task.entries.size());
-		// ★ 新条目**必须给一个有意义的位置**（§19.6 用户实测踩到的坑）：偏移的含义是"相对程序原点"，
-		//   而新卡的原点是 (0,0,0) ⇒ 把偏移留成 0 就等于"目标 = 世界原点"（离臂几十上百格、必然超范围），
-		//   玩家看到的就是"臂在用绝对坐标"那种怪现象。默认取"你正看着的那个方块"，没看着就取你脚下 ——
+		// ★ 新条目**必须给一个有意义的位置**（§19.6 用户实测踩到的坑）：条目 offset 是**相对录制原点**
+		//   的偏移（运行时的世界目标 = `臂位置 + offset`，§19.7），而新卡还没设原点（origin=(0,0,0)）
+		//   ⇒ 把偏移留成 0 就等于"目标 = 世界原点"（离臂几十上百格、必然超范围），玩家看到的就是
+		//   "臂在用绝对坐标"那种怪现象。默认取"你正看着的那个方块"，没看着就取你脚下 ——
 		//   与"录一条"的直觉一致（等价于当场录了一条只有位置、还没选动作的条目）。
+		//   ⚠️ 原点没设（`hasOrigin=false`）时这里写出的偏移只是"相对世界原点"的裸坐标，
+		//      而世界内录制是被 `card.need_origin` 拒绝的 —— 这一处待用户拍板（见本轮报告）。
 		ArmProgramEntry created = new ArmProgramEntry();
 		created.offset = defaultNewEntryWorldPos()
 			.subtract(program.origin);

@@ -39,11 +39,12 @@ import net.minecraft.world.item.ItemStack;
  *
  * <p>规范形式速查：
  * <ul>
- *   <li>第一行永远是程序头 {@code &#64;origin x y z}（原点，对应 {@link ArmProgram#origin}）；</li>
+ *   <li>程序头 {@code &#64;origin x y z}（原点）**只在设过原点时**出现（对应 {@link ArmProgram#hasOrigin}）；
+ *       没设就没有这一行（§19.7：原点可选，条目坐标永远相对执行它的那条臂）；</li>
  *   <li>物品：{@code stack.getComponents().isEmpty()} ⇒ 只写 id；唯一组件是染色 ⇒ {@code #RRGGBB}；
  *       其余 ⇒ 完整 SNBT（键顺序由原版 codec 决定，是确定的）；空栈 ⇒ {@code {}}；</li>
- *   <li>坐标：需要目标的操作**永远写** {@code x y z}（三个整数，相对原点 —— P1 起不再有任何空间记号）；
- *       不碰目标的操作只在 {@code offset != 0}（模型里的真字段）时才写；</li>
+ *   <li>坐标：需要目标的操作**永远写** {@code x y z}（三个整数，相对**执行这条程序的那条臂**
+ *       —— §19.7 起不再有任何空间记号）；不碰目标的操作只在 {@code offset != 0}（模型里的真字段）时才写；</li>
  *   <li>时间：{@code 5s / 200t / 2m}（不带单位只用于编译器容忍手写输入，规范形式永远带单位）；</li>
  *   <li>备注：条目 / 任务行**尾部**的块注释（{@code &ast;/…&ast;/}）；含注释终止符时退化为 {@code note="…"}
  *       （{@code \n} {@code \"} {@code \\} 转义）—— §12.3a 细则 3；</li>
@@ -78,12 +79,14 @@ public final class ScriptDecompiler {
 	}
 
 	private void write(ArmProgram program) {
-		// 程序头 = 原点（PLAN.md §19.2 第 2 条）：**永远是文件的第一个记号**（第一行）。
+		// 程序头 = 原点（PLAN.md §19.2 第 2 条），但**只在设过原点时才写**（§19.7：原点可选）。
 		// ⚠️ 顺序是硬要求：程序备注（块注释）也归"文件最前面"，两者若反过来，
 		//    编译器从第二行才看到 @origin，那条注释就会挂到"上一个拥有备注的东西"（= 上一个任务）上。
-		//    不写原点，"导出 → 改 → 导入"一圈回来所有坐标都会整体平移（§17 之后盘上只有文本）。
-		out.append(header(program))
-			.append('\n');
+		// 不写原点不会丢坐标：条目的 offset 永远相对**执行它的那条臂**，卡上的 origin 只服务
+		// 录制与渲染 ⇒ 没设原点的程序照样无损往返（这一行有没有，由 hasOrigin 记着）。
+		if (program.hasOrigin)
+			out.append(header(program))
+				.append('\n');
 		// 程序备注 = 程序头之后、第一条 task 之前的块注释（§12.3a 表格最后一行）
 		if (notBlank(program.note))
 			out.append(comment(program.note))
@@ -166,13 +169,13 @@ public final class ScriptDecompiler {
 		}
 	}
 
-	/** 程序头：{@code @origin 100 64 -3}（**永远写**，缺省值也写出来 —— 见 write 里的说明）。 */
+	/** 程序头：{@code @origin 100 64 -3}（**只在 {@link ArmProgram#hasOrigin} 时写**，见 write 里的说明）。 */
 	private static String header(ArmProgram program) {
 		return ScriptParser.HEADER + " " + program.origin.getX() + " " + program.origin.getY() + " "
 			+ program.origin.getZ();
 	}
 
-	/** 坐标：{@code 1 2 3}（三个整数，相对程序原点；P1 起不再有任何空间记号）。 */
+	/** 坐标：{@code 1 2 3}（三个整数，相对**执行这条程序的那条臂**；§19.7 起不再有任何空间记号）。 */
 	private static String position(ArmProgramEntry entry) {
 		return entry.offset.getX() + " " + entry.offset.getY() + " " + entry.offset.getZ();
 	}

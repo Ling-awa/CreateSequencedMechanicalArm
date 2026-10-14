@@ -95,11 +95,10 @@ public final class ArmEntryText {
 			}
 			default -> {
 				if (entry.op.requiresTarget())
-					// 显示的是**偏移**（模型里那个值），不是"原点 + 偏移"。用户定的口径（2026-10-14）：
-					// **臂运行时就是"臂坐标 + 偏移"**（{@code ProgramRuntime.offsetOf} 直接返回 offset），
-					// 所以臂里这一行读出来就是"相对这条臂的位置" —— `0,0,0` 就是臂自己。
-					// 卡上的原点只在**插卡那一刻**参与（把每条的世界位置平移过去，见 ProgramCoordinates.rebaseTo），
-					// 不参与运行时，所以显示世界位置反而会让人以为臂在用绝对坐标。
+					// 显示的是**偏移**（模型里那个值），不是"原点 + 偏移"。用户定的口径（§19.7）：
+					// **臂运行时就是"臂坐标 + 偏移"**（{@code ProgramRuntime.offsetOf} 直接返回 offset，
+					// 卡上的原点不参与运行时、插卡也不平移），所以这一行读出来就是"相对执行它的那条臂"
+					// —— `0,0,0` 就是那条臂自己。显示世界位置反而会让人以为臂在用绝对坐标（§19.6）。
 					suffix.append("  +")
 						.append(entry.offset.getX())
 						.append(',')

@@ -65,9 +65,10 @@ import net.minecraft.world.item.component.DyedItemColor;
  *     throw    "没材料"
  * </pre>
  *
- * <p>⚠️ <b>P1 坐标模型统一</b>（PLAN.md §19）：文本头是 {@code @origin x y z}（缺省 {@code 0 0 0}），
- * 条目坐标<b>不再带任何空间记号</b>，直接写三个整数。{@code @abs} / {@code @rel} 两个记号已删除：
- * 旧脚本不迁移（用户确认不做兼容），报错时会明确说"坐标一律相对程序原点"。
+ * <p>⚠️ <b>P1 坐标模型统一</b>（PLAN.md §19）：文本头是 {@code @origin x y z}，**可选**
+ * （没有这一行 ⇒ 原点未设置 {@code hasOrigin=false}，§19.7）；条目坐标<b>不再带任何空间记号</b>，
+ * 直接写三个整数，语义是"相对**执行这条程序的臂**"。{@code @abs} / {@code @rel} 两个记号已删除：
+ * 旧脚本不迁移（用户确认不做兼容），报错时会明确说"坐标一律相对执行它的那条臂"。
  *
  * <p>⚠️ 一处刻意的取舍（§12.3a 第 6 条）：条目行尾的块注释与紧跟其后的独占行块注释两者**合并**成一个
  * {@code note}（换行连接），不报错 —— 玩家想"再补一句注释"是很自然的事；三项合并（第三块）才报错。
@@ -78,7 +79,7 @@ public final class ScriptParser {
 	/** 坐标的合法范围。世界坐标与相对偏移都远在此内，超出必然是写错了。 */
 	public static final int COORD_LIMIT = 30_000_000;
 	/**
-	 * 程序头记号（PLAN.md §19.2 第 2 条）：{@code @origin x y z} —— 一份程序一个原点。
+	 * 程序头记号（PLAN.md §19.2 第 2 条）：{@code @origin x y z} —— 一份程序一个原点（可选）。
 	 *
 	 * <p>定义成常量而不是散落的字面量：解析、反编译、自检语料都要写它，
 	 * 三处各打一遍就会漂移（判据写两份必然漂移，决策 68/85）。
@@ -556,8 +557,9 @@ public final class ScriptParser {
 			error(line, "`#` 不再是注释写法 —— 请用 /* */（只保留一种注释语法）");
 			return;
 		}
-		// §19.2 第 2 条（主代理拍板）：程序头 = 文件首行的 `@origin x y z`（缺省 `0 0 0`）。
-		// 原点必须进文本：§17 之后盘上只有文本，只写卡上等于"导出 → 改 → 导入"一圈回来坐标就变了。
+		// §19.2 第 2 条（主代理拍板）：程序头 = 文件首行的 `@origin x y z`。**可选**（§19.7）：
+		// 没有这一行就是"原点未设置"（hasOrigin=false），于是这张卡不能录制 —— 而不是偷偷取 (0,0,0)。
+		// 原点必须进文本：§17 之后盘上只有文本，只写卡上等于"导出 → 改 → 导入"一圈回来就丢了。
 		if (keyword.equalsIgnoreCase(HEADER)) {
 			parseProgramHeader(ctx, tokens);
 			return;
@@ -575,12 +577,13 @@ public final class ScriptParser {
 
 	// ————————————————————————— 程序头：原点 —————————————————————————
 	/**
-	 * 程序头 {@code @origin x y z}（PLAN.md §19.2 第 2 条）：声明这份程序的原点，
-	 * 对应 {@link ArmProgram#origin}。反编译器**永远写**；编译器缺省 {@code 0 0 0}。
+	 * 程序头 {@code @origin x y z}（PLAN.md §19.2 第 2 条）：声明这份程序的<b>可选</b>原点，
+	 * 对应 {@link ArmProgram#origin}。解析到这一行 ⇒ {@link ArmProgram#hasOrigin} = true；
+	 * <b>没有这一行 ⇒ 未设置</b>（§19.7：没设原点时不能录制，因为操作里写的都是相对坐标）。
 	 *
-	 * <p>为什么原点必须是硬字段：条目的坐标一律相对原点，而原点<b>不写出来就没地方存</b>
-	 * —— §17 之后盘上只有文本，导出再导入一圈回来坐标就整体平移了。默认 {@code (0,0,0)}
-	 * 正好等于"没设过原点时的世界坐标"（§19.3），所以老脚本缺这一行仍读得进来。
+	 * <p>为什么原点必须是硬字段（写出来就要能读回去）：§17 之后盘上只有文本，只写卡上等于
+	 * "导出 → 改 → 导入"一圈回来坐标就变了。<b>但"没设"也必须能表达</b> —— 用一个哨兵坐标
+	 * （比如 (0,0,0)）表示"没设"是不行的：玩家真有可能把原点设在世界原点，那两者是不同的状态。
 	 *
 	 * <p>顺序硬要求：必须是文件里第一个记号（第一条 {@code task} 之前）。写在别处时，
 	 * 上面那段程序备注会先一步挂到"上一个拥有备注的东西"上（§12.3a）—— 报错而不静默接受。
@@ -607,6 +610,9 @@ public final class ScriptParser {
 			return;
 		ctx.sawHeader = true;
 		ctx.program.origin = new BlockPos(x, y, z);
+		// ★ 坐标与"设过没有"是两件事，一起写（§19.7）：少了这一行，任何一份设过原点的脚本
+		// 读回来都变成"未设置" ⇒ 玩家导出 → 导入一圈之后就再也录不进操作了。
+		ctx.program.hasOrigin = true;
 	}
 
 	// ————————————————————————— 注释 / 备注的归属 —————————————————————————
@@ -1221,8 +1227,8 @@ public final class ScriptParser {
 	// ————————————————————————— 小解析器 —————————————————————————
 
 	/**
-	 * 位置参数：<b>三个整数</b>（PLAN.md §19.2 第 2 条 —— 坐标一律相对程序原点，
-	 * {@code @abs} / {@code @rel} 两个记号已删除）。
+	 * 位置参数：<b>三个整数</b>（PLAN.md §19.7 —— 坐标是"相对**执行这条程序的那条臂**"的偏移，
+	 * 世界目标 = {@code 臂位置 + 偏移}；{@code @abs} / {@code @rel} 两个记号已删除）。
 	 *
 	 * <p>为什么原来那个记号必须删掉而不是"继续容忍"：它表达的是"这条坐标是绝对的还是相对的"，
 	 * 而新模型里这个区别<b>不存在</b> —— 留着它就会出现"同一个文件中两种语义"的读法，
@@ -1231,7 +1237,7 @@ public final class ScriptParser {
 	private boolean position(List<Token> rest, Parsed parsed, boolean required) {
 		if (rest.size() < 3) {
 			if (required)
-				error(parsed.line, "缺坐标：需要三个整数（坐标相对程序原点，例如 0 0 2）");
+				error(parsed.line, "缺坐标：需要三个整数（坐标相对执行它的那条臂，例如 0 0 2）");
 			return !required;
 		}
 		// 老写法（`@rel 1 2 3`）走到这里：报错说清"记号没了"，别让玩家对着"缺坐标"发呆。
@@ -1242,7 +1248,7 @@ public final class ScriptParser {
 				return true;
 			error(rest.get(0)
 				.line(), "坐标不再写 " + rest.get(0)
-					.text() + "：直接写三个整数即可（坐标一律相对程序原点）");
+					.text() + "：直接写三个整数即可（坐标一律相对执行它的那条臂）");
 			return false;
 		}
 		Integer x = intValue(rest.get(0), -COORD_LIMIT, COORD_LIMIT, "坐标 X");

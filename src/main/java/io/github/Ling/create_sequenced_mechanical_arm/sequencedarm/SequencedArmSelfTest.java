@@ -36,6 +36,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.mixin.ArmInteractionPointA
 import io.github.Ling.create_sequenced_mechanical_arm.network.ArmProgramEditPacket;
 import io.github.Ling.create_sequenced_mechanical_arm.network.CardEditPacket;
 import io.github.Ling.create_sequenced_mechanical_arm.network.CardNotesPacket;
+import io.github.Ling.create_sequenced_mechanical_arm.network.CardUiPacket;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmEntryText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmIcons;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
@@ -43,7 +44,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ClipboardChecklist;
 import io.github.Ling.create_sequenced_mechanical_arm.program.DeployRecipes;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramCoordinates;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
@@ -479,21 +479,27 @@ public class SequencedArmSelfTest {
 		boolean armCompileOnLoad = false;
 		boolean armLegacyDropped = false;
 		try {
-			// 臂内的程序**恒以臂的位置为原点**（§19.2 第 1 条），所以夹具也得是这个形态 ——
-			// 否则比的是"卡上原点的程序"，而臂读回来时会把原点重置成自己（这是对的：蓝图旋转/搬家后
-			// 文本头里的旧原点会过期）。第一版忘了这一点，于是两边文本头不同，这条断言假红。
+			// 臂内的程序：原点 == 臂的位置（插卡**不平移**，进臂后 `read` 只把原点重置成自己，
+			// §19.7），"设过没有"跟着卡走（`setProgram` 会一起搬）。所以夹具也得是这个形态 ——
+			// 否则比的是"卡上原点的程序"，而臂读回来时原点已经换成自己（这是对的：那只是臂内
+			// 的一个便利值，runtime 用的是"臂位置 + 偏移"）。第一版忘了这一点，于是两边文本头
+			// 不同、这条断言假红。
 			ArmProgram forArm = DevPresets.mainWithSubTasks();
 			forArm.origin = armPos;
+			forArm.hasOrigin = true;
 			CompoundTag tag = armTagWith(level, armPos, forArm, registries);
 			armIsText = tag != null && tag.contains("ProgramText", Tag.TAG_STRING) && !tag.contains("Program");
 			if (tag != null) {
 				SequencedArmBlockEntity fresh = freshArm(level, armPos);
 				if (fresh != null) {
 					fresh.read(tag, registries, false);
+					// 比的是**去掉 `@origin` 首行之后的正文**：臂内的 origin 是"臂自己"的便利副本
+					// （`read` 会把它重置成臂的位置；§19.7 它不参与运行时），拿完整文本比会因为这一行
+					// 的值不同而**假红** —— 这条断言的意图是"文本能编译回同一份程序"。
 					armCompileOnLoad = !fresh.getProgram()
 						.isEmpty()
-						&& ScriptCompiler.decompile(fresh.getProgram(), registries)
-							.equals(ScriptCompiler.decompile(forArm, registries));
+						&& stripOriginLine(ScriptCompiler.decompile(fresh.getProgram(), registries))
+							.equals(stripOriginLine(ScriptCompiler.decompile(forArm, registries)));
 					// 旧字段：去掉文本、把编译结果塞回去 ⇒ 必须当空程序（用户选的"不兼容"，§17.3）
 					CompoundTag legacyTag = tag.copy();
 					legacyTag.remove("ProgramText");
@@ -519,6 +525,12 @@ public class SequencedArmSelfTest {
 
 		if (!problems.isEmpty())
 			LOGGER.error("[selftest] 文本存储结构断言失败：{}", String.join("；", problems));
+	}
+
+	/** 去掉文本首行的 {@code @origin …}（没写这一行就原样返回）。 */
+	private static String stripOriginLine(String text) {
+		int newline = text.indexOf('\n');
+		return text.startsWith("@origin ") && newline >= 0 ? text.substring(newline + 1) : text;
 	}
 
 	/** 放一条臂、装程序、写出存档 tag（null = 方块实体没建出来）。方块的恢复由调用方负责。 */
@@ -2523,20 +2535,23 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 卡片与坐标语义的自检（P1「坐标模型统一」，PLAN.md §19）：
-	 * ① 程序写进物品再读回来必须无损（含<b>原点</b>）；
-	 * ② {@link ProgramCoordinates#rebaseTo} 换原点后，每一条的<b>世界位置逐条不变</b>；
-	 * ③ 插卡进臂之后臂内原点 == 臂的位置，且目标的世界位置与插卡前一致。
+	 * 卡片与坐标语义的自检（PLAN.md §19.7 的用户口径）：
+	 * ① 程序写进物品再读回来必须无损（含<b>原点与"设过没有"</b>）；
+	 * ② 卡上的原点只服务**录制**（`offset = 世界位置 − origin`），另一条自检 {@code 原点门禁} 钉它；
+	 * ③ ★ <b>插卡不做任何平移</b>：同一张卡分别插进两条位置不同的臂，两次得到的 {@code offset}
+	 * 必须**完全相同**，而世界目标按各自臂的位置算（{@code 臂位置 + offset}）。
 	 *
-	 * <p>这三条都是"编译通过但可能静默错"的东西 —— 坐标算错只会让臂搬错地方，不会报任何错。
-	 * 所以断言全部按**世界位置**比（世界位置 = {@code origin + offset}）：只比 offset 的话，
-	 * 把 {@code delta} 的符号写反、或者忘了同步 origin，都能"看起来绿"。
+	 * <p>③ 这条就是"防止有人把平移加回来"的守卫（曾经的 {@code ProgramCoordinates.rebaseTo} 干的正是
+	 * 平移）：它一旦回来，两次插卡读到的 offset 就会因为臂位置不同而不同 ⇒ 这条立刻红。
+	 * 只断言"offset 非空"是没用的 —— 平移之后 offset 照样非空。
 	 */
 	private static void checkCardAndCoordinates(MinecraftServer server) {
 		ServerLevel level = server.overworld();
 		HolderLookup.Provider registries = server.registryAccess();
 
 		ArmProgram source = DevPresets.depotAB();
+		source.hasOrigin = true;
+		source.origin = new BlockPos(12, 70, -34);
 		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
 		CardProgramStorage.write(card, source, registries);
 		boolean stored = CardProgramStorage.hasProgram(card);
@@ -2547,101 +2562,147 @@ public class SequencedArmSelfTest {
 		if (!stored || !lossless)
 			LOGGER.error("[selftest] 卡片 NBT 往返失败！stored={} lossless={}", stored, lossless);
 
-		// ——— ①② 重基：世界位置逐条不变 ———
-		ArmProgram program = DevPresets.depotAB();
-		BlockPos oldOrigin = new BlockPos(120, 70, -300);
-		program.origin = oldOrigin; // 装作"录的时候以 (120,70,-300) 为参考点"
-		List<BlockPos> targets = new ArrayList<>();
-		List<BlockPos> untargetedOffsets = new ArrayList<>();
-		int targetEntries = 0;
-		for (ArmProgramTask task : program.tasks) {
-			for (ArmProgramEntry entry : task.entries) {
-				if (entry.op.requiresTarget()) {
-					// 世界目标 = 原点 + 偏移（**一条断言引用的同一个公式**，见 §0.5）
-					targets.add(oldOrigin.offset(entry.offset));
-					targetEntries++;
-				} else {
-					// 不碰目标的操作没有位置语义 ⇒ 重基**不该**动它们的 offset
-					untargetedOffsets.add(entry.offset);
+		// 原点"设过没有"必须活过**真实落盘往返**（卡片存的是脚本文本 ⇒ 设过 = 首行 @origin，
+		// 没设 = 没有这一行，§19.7）。两条都要测：只测设过的那条，`hasOrigin` 在那条路上恒为真
+		// ⇒ 等于没测（§0.5"永远为真的断言"）。
+		boolean originTextWritten = CardProgramStorage.readText(card) != null
+			&& CardProgramStorage.readText(card)
+				.startsWith(ScriptParser.HEADER + " 12 70 -34\n");
+		boolean originKept = readBack.hasOrigin && readBack.origin.equals(source.origin);
+		ArmProgram noOrigin = DevPresets.depotAB();
+		ItemStack noOriginCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CardProgramStorage.write(noOriginCard, noOrigin, registries);
+		ArmProgram noOriginBack = CardProgramStorage.read(noOriginCard, registries);
+		boolean unsetKept = !noOriginBack.hasOrigin && noOriginBack.origin.equals(BlockPos.ZERO);
+		boolean unsetHeaderAbsent = CardProgramStorage.readText(noOriginCard) != null
+			&& !CardProgramStorage.readText(noOriginCard)
+				.startsWith(ScriptParser.HEADER);
+		LOGGER.info("[selftest] 原点落盘形态: 设过⇒写 @origin 首行={} 原点活过往返={} ｜ "
+			+ "未设⇒读回来仍未设={} 未设⇒不写 @origin 行={}", originTextWritten, originKept, unsetKept, unsetHeaderAbsent);
+		if (!originTextWritten)
+			LOGGER.error("[selftest] 设过原点时卡上的文本没有以 @origin 12 70 -34 开头 —— 原点（或「设过没有」）没进文本");
+		if (!originKept)
+			LOGGER.error("[selftest] 原点没能活过卡片落盘往返（读回来 hasOrigin={} origin={}）", readBack.hasOrigin,
+				readBack.origin.toShortString());
+		if (!unsetKept)
+			LOGGER.error("[selftest] 「没设原点」没能活过落盘往返（读回来 hasOrigin={}）—— 那会让玩家"
+				+ "在「没设」与「设在 (0,0,0)」之间被静默改状态", noOriginBack.hasOrigin);
+		if (!unsetHeaderAbsent)
+			LOGGER.error("[selftest] 没设原点时文本里仍然写了 @origin 行 —— 「设过没有」落盘后就分不清了");
+
+		// ——— ③ 插卡不做任何平移：两条位置不同的臂，offset 必须逐条相同 ———
+		BlockPos nearArm = new BlockPos(120, 70, -300);
+		BlockPos farArm = new BlockPos(-40, 12, 77);
+		boolean cardInserted = false;
+		boolean offsetsIdentical = false;
+		boolean worldFollowsArm = false;
+		int compared = 0;
+		String detail = "";
+
+		ItemStack loadable = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ArmProgram onCard = DevPresets.depotAB();
+		// 卡上的原点故意设成一个**与两条臂都不同**的位置：只要有人把"卡上原点"或"臂的位置"
+		// 掺进 offset，下面两条断言必红（原点设成 (0,0,0) 时"平移 0"看不出来 ⇒ 假绿）。
+		onCard.hasOrigin = true;
+		onCard.origin = new BlockPos(7, 64, -9);
+		CardProgramStorage.write(loadable, onCard, registries);
+
+		List<BlockPos> cardOffsets = new ArrayList<>();
+		for (ArmProgramTask task : onCard.tasks)
+			for (ArmProgramEntry entry : task.entries)
+				cardOffsets.add(entry.offset);
+
+		SequencedArmBlockEntity first = freshArm(level, nearArm);
+		SequencedArmBlockEntity second = freshArm(level, farArm);
+		if (first == null || second == null) {
+			detail = "有臂方块实体没建出来";
+		} else {
+			ServerPlayer probe = fakePlayer(level);
+			boolean firstOk = probe != null
+				&& SequencedArmBlock.loadProgramFromCard(first, loadable, probe, level) != null
+				&& !first.getProgram()
+					.isEmpty();
+			ItemStack secondCard = loadable.copy();
+			boolean secondOk = probe != null
+				&& SequencedArmBlock.loadProgramFromCard(second, secondCard, probe, level) != null
+				&& !second.getProgram()
+					.isEmpty();
+			cardInserted = firstOk && secondOk;
+
+			List<BlockPos> firstOffsets = new ArrayList<>();
+			List<BlockPos> secondOffsets = new ArrayList<>();
+			for (ArmProgramTask task : first.getProgram().tasks)
+				for (ArmProgramEntry entry : task.entries)
+					firstOffsets.add(entry.offset);
+			for (ArmProgramTask task : second.getProgram().tasks)
+				for (ArmProgramEntry entry : task.entries)
+					secondOffsets.add(entry.offset);
+
+			offsetsIdentical = cardInserted && firstOffsets.size() == cardOffsets.size()
+				&& secondOffsets.size() == cardOffsets.size();
+			if (offsetsIdentical) {
+				for (int i = 0; i < cardOffsets.size(); i++) {
+					if (!cardOffsets.get(i)
+						.equals(firstOffsets.get(i))
+						|| !cardOffsets.get(i)
+							.equals(secondOffsets.get(i))) {
+						offsetsIdentical = false;
+						detail = "第 " + i + " 条：卡上 " + cardOffsets.get(i)
+							.toShortString() + " / 近臂 " + firstOffsets.get(i)
+								.toShortString() + " / 远臂 " + secondOffsets.get(i)
+									.toShortString();
+						break;
+					}
 				}
 			}
+			// ★ 世界目标按**每条臂自己**算 —— 用**真实录制路径**证明，而不是拿公式自己跟自己比：
+			//   把原点设到近臂（这正是玩家"对着动力臂按中键"那一下）→ 录一条"近臂自己的位置"
+			//   （等价于卡里写 0 0 0）→ offset 必须恰好是 (0,0,0)，世界位置回到近臂，
+			//   而给远臂跑同一份程序时世界位置就是远臂自己。用户报的 bug 正是这一条：
+			//   以前"卡里写 0 0 0"读成"世界原点"，于是臂跑去挖 (0,0,0)。
+			worldFollowsArm = offsetsIdentical && probe != null;
+			if (worldFollowsArm) {
+				// ① 玩家那一下"对着动力臂按中键设原点" —— 直接走真实的服务端那一支
+				CardUiPacket.applyOrigin(probe, loadable, CardProgramStorage.read(loadable, registries), registries,
+					nearArm);
+				// ② 录一条"目标 = 近臂自己的位置"（= 卡里写 0 0 0）；MINE 不经交互点判定，换算才是被测的那一步
+				CardEditPacket.addEntry(probe, loadable, CardProgramStorage.read(loadable, registries), registries,
+					new CardEditPacket(CardEditPacket.Action.ADD_ENTRY, nearArm, Direction.UP, OperationType.MINE));
+				ArmProgram recorded = CardProgramStorage.read(loadable, registries);
+				ArmProgramTask recordedTask = recorded.task(0);
+				boolean gotIt = recordedTask != null && !recordedTask.entries.isEmpty();
+				BlockPos recordedOffset = gotIt ? recordedTask.entries.get(recordedTask.entries.size() - 1).offset : null;
+				boolean originIsThatArm = recorded.hasOrigin && recorded.origin.equals(nearArm);
+				boolean armItselfIsZero = gotIt && recordedOffset.equals(BlockPos.ZERO);
+				boolean worldBackToArm = gotIt && recorded.hasOrigin
+					&& recorded.origin.offset(recordedOffset)
+						.equals(nearArm);
+				// 同一份程序给远臂跑 ⇒ 世界目标换成远臂自己（目标跟着臂走，§19.7）
+				boolean otherArmRunsSomewhereElse = gotIt
+					&& !farArm.offset(recordedOffset)
+						.equals(nearArm.offset(recordedOffset));
+				worldFollowsArm = originIsThatArm && armItselfIsZero && worldBackToArm && otherArmRunsSomewhereElse;
+				detail = "中键设原点后录在臂上的 offset=" + (recordedOffset == null ? "无" : recordedOffset.toShortString());
+			} else {
+				detail = "假玩家不可用，录制往返没测";
+			}
+			compared = cardOffsets.size();
+
+			level.setBlockAndUpdate(nearArm, Blocks.AIR.defaultBlockState());
+			level.setBlockAndUpdate(farArm, Blocks.AIR.defaultBlockState());
 		}
 
-		BlockPos newOrigin = new BlockPos(-40, 12, 77);
-		int rebased = ProgramCoordinates.rebaseTo(program, newOrigin);
-		boolean originMoved = program.origin.equals(newOrigin);
-		boolean worldKept = true;
-		int index = 0;
-		for (ArmProgramTask task : program.tasks)
-			for (ArmProgramEntry entry : task.entries)
-				if (entry.op.requiresTarget() && !newOrigin.offset(entry.offset)
-					.equals(targets.get(index++)))
-					worldKept = false;
-		boolean untouchedKept = true;
-		int plain = 0;
-		for (ArmProgramTask task : program.tasks)
-			for (ArmProgramEntry entry : task.entries)
-				if (!entry.op.requiresTarget() && !entry.offset.equals(untargetedOffsets.get(plain++)))
-					untouchedKept = false;
-		// 原点本来就等于 newOrigin 时必须是"什么都没动"（delta 为 0 —— 符号写反时这一条不会红，
-		// 但上面那条 worldKept 会红；两条一起才能同时钉住"方向"与"空操作"）
-		int sameOriginRebased = ProgramCoordinates.rebaseTo(program, newOrigin);
-
-		LOGGER.info("[selftest] 坐标重基: 目标条目={} 实测平移={} 原点已改={} 世界位置不变={} "
-			+ "不碰目标的条目未动={} 原点相同时零改动={}", targetEntries, rebased, originMoved, worldKept, untouchedKept,
-			sameOriginRebased == 0);
-		if (targetEntries == 0)
-			LOGGER.error("[selftest] 夹具里没有一条需要目标的操作 —— 这条断言等于没测");
-		if (rebased != targetEntries || !originMoved || !worldKept || !untouchedKept)
-			LOGGER.error("[selftest] 重基坏了：targetEntries={} rebased={} originMoved={} worldKept={} untouchedKept={}",
-				targetEntries, rebased, originMoved, worldKept, untouchedKept);
-		if (sameOriginRebased != 0)
-			LOGGER.error("[selftest] 原点没变却平移了 {} 条（重基不是幂等空操作）", sameOriginRebased);
-
-		// ——— ③ 插卡进臂：臂内原点 == 臂的位置，且目标的世界位置不变 ———
-		BlockPos armPos = new BlockPos(120, 70, -300);
-		SequencedArmBlockEntity arm = freshArm(level, armPos);
-		ItemStack loadable = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
-		boolean cardInserted = false;
-		boolean originIsArm = false;
-		boolean armTargetsKept = false;
-		if (arm == null) {
-			LOGGER.warn("[selftest] 插卡自检跳过：({},{},{}) 上没建出臂方块实体", armPos.getX(), armPos.getY(),
-				armPos.getZ());
-		} else {
-			// 卡上的程序以"世界原点"为参考点（= 条目 offset 就是世界坐标）；插进臂之后
-			// 臂内的 offset 应该变成"相对臂的位置"，而 `origin + offset` 仍是同一个世界位置。
-			ArmProgram onCard = DevPresets.depotAB();
-			onCard.origin = BlockPos.ZERO;
-			CardProgramStorage.write(loadable, onCard, registries);
-			BlockPos worldBeforeInsert = null;
-			for (ArmProgramTask task : onCard.tasks)
-				for (ArmProgramEntry entry : task.entries)
-					if (worldBeforeInsert == null && entry.op.requiresTarget())
-						worldBeforeInsert = onCard.origin.offset(entry.offset);
-
-			ServerPlayer probe = fakePlayer(level);
-			cardInserted = probe != null
-				&& SequencedArmBlock.loadProgramFromCard(arm, loadable, probe, level) != null
-				&& !arm.getProgram()
-					.isEmpty();
-			ArmProgram inArm = arm.getProgram();
-			originIsArm = inArm.origin.equals(armPos);
-			BlockPos worldAfterInsert = null;
-			for (ArmProgramTask task : inArm.tasks)
-				for (ArmProgramEntry entry : task.entries)
-					if (worldAfterInsert == null && entry.op.requiresTarget())
-						worldAfterInsert = inArm.origin.offset(entry.offset);
-			armTargetsKept = worldBeforeInsert != null && worldBeforeInsert.equals(worldAfterInsert)
-				&& !targets.isEmpty();
-			level.setBlockAndUpdate(armPos, Blocks.AIR.defaultBlockState());
-		}
-
-		LOGGER.info("[selftest] 插卡重基: 插卡成功={} 臂内原点==臂的位置={} 目标世界位置不变={}", cardInserted, originIsArm,
-			armTargetsKept);
-		if (!cardInserted || !originIsArm || !armTargetsKept)
-			LOGGER.error("[selftest] 插卡没有把程序重基到臂的位置：cardInserted={} originIsArm={} armTargetsKept={}",
-				cardInserted, originIsArm, armTargetsKept);
+		LOGGER.info("[selftest] 插卡不平移: 插卡成功={} 两条臂上 offset 逐条相同={}（比了 {} 条）世界目标=臂位置+offset={} （{}）",
+			cardInserted, offsetsIdentical, compared, worldFollowsArm, detail);
+		if (!cardInserted)
+			LOGGER.error("[selftest] 插卡失败（前提不成立）：cardInserted={} {}", cardInserted, detail);
+		if (compared == 0 && cardInserted)
+			LOGGER.error("[selftest] 夹具里一条条目都没有 —— 这条断言等于没测");
+		if (!offsetsIdentical)
+			LOGGER.error("[selftest] ★ 插卡平移回来了：同一张卡插进两条位置不同的臂，offset 竟然不同（{}）"
+				+ " —— 条目坐标必须永远相对执行它的那条臂（PLAN.md §19.7）", detail);
+		if (!worldFollowsArm)
+			LOGGER.error("[selftest] 世界目标不再是「臂位置 + 偏移」（PLAN.md §19.7）");
 	}
 
 	/** 假玩家（自检里点界面的那些路径共用）；不可用时返回 null 并说一声，不把自检判红。 */
@@ -2681,8 +2742,9 @@ public class SequencedArmSelfTest {
 
 		// ① 正常保存：改动必须落到卡上，且往返无损
 		ArmProgram edited = DevPresets.mainWithSubTasks();
-		// 原点写一个非零值：不然下面那条"原点活过了落盘往返"是**永远为真**的断言（§0.5）
+		// 原点写一个非零值 + 标成"设过"：不然下面那条"原点活过了落盘往返"是**永远为真**的断言（§0.5）
 		edited.origin = new BlockPos(30, 66, -12);
+		edited.hasOrigin = true;
 		edited.tasks.get(0).entries.get(0).delay = 37;
 		edited.tasks.get(0).loopCount = 7;
 		edited.tasks.get(0).loop = ArmProgramTask.LoopType.COUNT;
@@ -2701,9 +2763,9 @@ public class SequencedArmSelfTest {
 			&& saved.tasks.get(0).loopCount == 7 && saved.tasks.get(0).loop == ArmProgramTask.LoopType.COUNT;
 		boolean lossless = saved.save(registries)
 			.equals(edited.save(registries));
-		// P1（§19）：`program.absolute` 那个"坐标空间"标记已删；这里改钉**原点**能过落盘往返
-		// （编辑器保存走 NBT → 文本 → 再编译，原点要在这一圈里活下来）
-		boolean formFlag = saved.origin.equals(edited.origin);
+		// P1（§19）：`program.absolute` 那个"坐标空间"标记已删；这里改钉**原点与"设过没有"**
+		// 能过落盘往返（编辑器保存走 NBT → 文本 → 再编译，两者都要在这一圈里活下来）
+		boolean formFlag = saved.origin.equals(edited.origin) && saved.hasOrigin == edited.hasOrigin;
 
 		// ② 超限必须整份拒绝，且不能把原来那张卡改坏
 		ArmProgram tooBig = new ArmProgram();
@@ -3473,6 +3535,10 @@ public class SequencedArmSelfTest {
 			probe.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()));
 			probe.setItemInHand(InteractionHand.OFF_HAND, clipboard);
 			ItemStack card = probe.getMainHandItem();
+			// ★ 这张卡的坐标基准 = 世界原点（§19.7 之前 P1 的默认口径）：**必须显式设**，
+			// 不然录制会被 `card.need_origin` 拒绝，下面这几条断言全都测不到东西。
+			// 顺便也是"原点设在 (0,0,0)"这种**合法值**与"没设"是两件事的活证据。
+			CardUiPacket.applyOrigin(probe, card, CardProgramStorage.read(card, registries), registries, BlockPos.ZERO);
 
 			ClipboardContent before = clipboard.get(AllDataComponents.CLIPBOARD_CONTENT);
 			record(probe, card, registries, new BlockPos(1, 2, 3));
@@ -4155,11 +4221,13 @@ public class SequencedArmSelfTest {
 		if (!noteCostSane)
 			problems.add("备注没有进入脚本（预算讨论无从谈起）");
 
-		// ⑧ 程序头（§19.2 第 2 条）：文本首行的 `@origin x y z` 就是 ArmProgram.origin。
-		//    反编译器**永远写**；编译器缺省 (0,0,0)；写晚了 / 写两遍 / 少坐标都报错。
-		//    ⚠️ 反证要点（§0.5）：断言必须能让"反编译器漏写原点"和"编译器不读原点"这两件事**分别**变红，
-		//    所以这里比的是**逐条世界位置**（origin + offset），不是只比那一个字段。
+		// ⑧ 程序头（§19.2 第 2 条）：文本首行的 `@origin x y z` 就是 ArmProgram.origin，**可选**（§19.7）。
+		//    设过 ⇒ 写这一行且读得回来；**没设 ⇒ 不写这一行，读回来仍未设**。
+		//    写晚了 / 写两遍 / 少坐标都报错。
+		//    ⚠️ 反证要点（§0.5）：断言必须能让"反编译器漏写原点"与"编译器不读原点"这两件事**分别**变红，
+		//    所以这里同时比**原点字段**与**逐条世界位置**（origin + offset）。
 		ArmProgram movedProgram = new ArmProgram();
+		movedProgram.hasOrigin = true;
 		movedProgram.origin = new BlockPos(10, 64, -3);
 		ArmProgramTask movedTask = new ArmProgramTask();
 		movedTask.name = "原点在别处";
@@ -4170,34 +4238,49 @@ public class SequencedArmSelfTest {
 		movedProgram.tasks.add(movedTask);
 		String movedText = ScriptCompiler.decompile(movedProgram, registries);
 		ScriptResult<ArmProgram> movedBack = ScriptCompiler.compile(movedText, registries);
-		boolean headerAlwaysWritten =
-			movedText.startsWith("@origin 10 64 -3\n") && itemText.startsWith("@origin 0 0 0\n");
+		// 设过 ⇒ 首行就是程序头；没设（itemProbe 没设原点）⇒ **不是**程序头（也不该凭空写出 (0,0,0)）
+		boolean headerWrittenWhenSet = movedText.startsWith("@origin 10 64 -3\n");
+		boolean headerAbsentWhenUnset = !itemText.startsWith(ScriptParser.HEADER);
 		boolean headerRoundTrip = false;
 		if (!movedBack.hasErrors() && !movedBack.value().tasks.isEmpty()
 			&& !movedBack.value().tasks.get(0).entries.isEmpty()) {
 			ArmProgram back = movedBack.value();
 			ArmProgramEntry backEntry = back.tasks.get(0).entries.get(0);
-			// 逐条世界位置：origin 或 offset 有一个读丢了/读错了，这一条就红
-			headerRoundTrip = back.origin.equals(movedProgram.origin) && backEntry.offset.equals(movedEntry.offset)
+			// 原点字段 + "设过没有" + 逐条世界位置：读丢任何一样这一条就红
+			headerRoundTrip = back.hasOrigin && back.origin.equals(movedProgram.origin)
+				&& backEntry.offset.equals(movedEntry.offset)
 				&& back.origin.offset(backEntry.offset)
 					.equals(movedProgram.origin.offset(movedEntry.offset));
 		}
-		//    缺省（不写程序头）= (0,0,0)：老脚本（除 `@abs` 记号外）与手写文本都吃得下
+		//    没写程序头 = **原点未设置**（不再是"缺省 (0,0,0)"）：
+		//    条目的 offset 永远相对执行它的那条臂，所以一份没设原点的脚本照样能跑，
+		//    只是这张卡**不能录制**（记不住"0 0 0 在哪"）
 		ScriptResult<ArmProgram> noHeader = ScriptCompiler.compile("task main\n  take 0 0 0\n", registries);
-		boolean headerDefaultsZero = !noHeader.hasErrors() && noHeader.value().origin.equals(BlockPos.ZERO);
+		boolean headerUnsetWhenMissing = !noHeader.hasErrors() && !noHeader.value().hasOrigin
+			&& noHeader.value().origin.equals(BlockPos.ZERO);
+		//    哨兵反证：显式写 `@origin 0 0 0`（合法值！）必须读成"设过"
+		ScriptResult<ArmProgram> zeroHeader = ScriptCompiler.compile("@origin 0 0 0\ntask main\n  take 0 0 0\n",
+			registries);
+		boolean zeroHeaderIsSet = !zeroHeader.hasErrors() && zeroHeader.value().hasOrigin
+			&& zeroHeader.value().origin.equals(BlockPos.ZERO);
 		boolean headerAfterTaskReported = reportsAt(registries, "task main\n  @origin 0 0 0\n", 2, "第一行");
 		boolean doubleHeaderReported =
 			reportsAt(registries, "@origin 0 0 0\n@origin 1 1 1\ntask main\n  take 0 0 0\n", 2, "只能有一行");
 		boolean headerIncompleteReported = reportsAt(registries, "@origin 10\ntask main\n  take 0 0 0\n", 1, "三个整数");
-		LOGGER.info("[selftest] 脚本程序头: 反编译永远写={} @origin往返={} 缺省=(0,0,0)={} 晚写报错={} 重复报错={} "
-			+ "坐标不全报错={}", headerAlwaysWritten, headerRoundTrip, headerDefaultsZero, headerAfterTaskReported,
-			doubleHeaderReported, headerIncompleteReported);
-		if (!headerAlwaysWritten)
-			problems.add("反编译器没有永远写出程序头 @origin x y z（导出再导入坐标会整体平移）");
+		LOGGER.info("[selftest] 脚本程序头: 设过才写={} 未设不写={} @origin往返={} 缺省=未设置={} "
+			+ "@origin 0 0 0 算设过={} 晚写报错={} 重复报错={} 坐标不全报错={}", headerWrittenWhenSet, headerAbsentWhenUnset,
+			headerRoundTrip, headerUnsetWhenMissing, zeroHeaderIsSet, headerAfterTaskReported, doubleHeaderReported,
+			headerIncompleteReported);
+		if (!headerWrittenWhenSet)
+			problems.add("设过原点时反编译器没有写出程序头 @origin x y z（导出再导入就丢了基准）");
+		if (!headerAbsentWhenUnset)
+			problems.add("没设原点时反编译器仍然写出了 @origin 行（把「没设」伪装成「设在 (0,0,0)」）");
 		if (!headerRoundTrip)
-			problems.add("@origin 程序头过不了往返（原点的世界位置变了）");
-		if (!headerDefaultsZero)
-			problems.add("不写程序头时没有缺省成 (0,0,0)");
+			problems.add("@origin 程序头过不了往返（原点 / 设过没有 / 世界位置变了）");
+		if (!headerUnsetWhenMissing)
+			problems.add("不写程序头时不是「未设置」（hasOrigin 为真或原点非零）");
+		if (!zeroHeaderIsSet)
+			problems.add("@origin 0 0 0 没有被读成「设过原点」—— 哨兵值把合法值吞了");
 		if (!headerAfterTaskReported)
 			problems.add("程序头写在 task 之后没有报错");
 		if (!doubleHeaderReported)
@@ -4291,6 +4374,8 @@ public class SequencedArmSelfTest {
 			return "任务数 " + a.tasks.size() + " → " + b.tasks.size();
 		if (!a.origin.equals(b.origin))
 			return "程序原点变了：" + a.origin.toShortString() + " → " + b.origin.toShortString();
+		if (a.hasOrigin != b.hasOrigin)
+			return "原点的「设过没有」变了：" + a.hasOrigin + " → " + b.hasOrigin;
 		if (!a.editorMode.equals(b.editorMode))
 			return "编辑模式变了：" + a.editorMode + " → " + b.editorMode;
 		if (a.editorTask != b.editorTask)
@@ -4511,8 +4596,8 @@ public class SequencedArmSelfTest {
 			  /* 这是任务说明 */
 			  take 0 0 0
 			""");
-		// §19.2 第 2 条：程序头就是原点。这份语料同时盖住"非零原点"这条解析分支
-		// （其它语料都不写程序头 ⇒ 走缺省 (0,0,0) 那条）
+		// §19.2 第 2 条：程序头就是原点（可选，§19.7）。这份语料同时盖住"非零原点"这条解析分支
+		// （其它语料都不写程序头 ⇒ 那些程序读回来是"原点未设置"）
 		corpus.put("非零原点的程序", """
 			@origin 100 64 -300
 			task main
