@@ -1677,6 +1677,30 @@ public class SequencedArmSelfTest {
 		if (!modeSurvivesImport || !taskClampedToImport)
 			LOGGER.error("[selftest] 导入脚本把编辑状态弄坏了：模式保住={}（应为 true） 任务夹到={}（应为 0，新程序只有 1 个任务）",
 				modeSurvivesImport, afterImport.editorTask);
+
+		// ④ 浏览位置（§18）：页面 / 操作页指针 / 两个列表的滚动 —— 用户要"关掉去试一下、再打开接着改"
+		CardProgramStorage.writeView(card, new CardProgramStorage.View(3, CardProgramStorage.PAGE_ENTRIES, 42.5f, 12f));
+		CardProgramStorage.View viewBack = CardProgramStorage.readView(card);
+		boolean viewKept = viewBack.entry() == 3 && CardProgramStorage.PAGE_ENTRIES.equals(viewBack.page())
+			&& Math.abs(viewBack.scroll() - 42.5f) < 0.01f && Math.abs(viewBack.taskScroll() - 12f) < 0.01f;
+		// ★ 写浏览位置**不能碰程序**（它走的是自己那条轻量通道，见 CardViewPacket）
+		boolean viewKeepsProgram = CardProgramStorage.read(card, registries).tasks.size() == session.tasks.size();
+		// 客户端送来的脏数据不许进 NBT：页名乱写 ⇒ 当操作页；指针负数 / 滚动 NaN、负数 ⇒ 归 0
+		CardProgramStorage.writeView(card, new CardProgramStorage.View(-7, "乱写的页", Float.NaN, -3f));
+		CardProgramStorage.View dirtyBack = CardProgramStorage.readView(card);
+		boolean viewSanitised = dirtyBack.entry() == 0 && CardProgramStorage.PAGE_ENTRIES.equals(dirtyBack.page())
+			&& dirtyBack.scroll() == 0f && dirtyBack.taskScroll() == 0f;
+		// 从没打开过编辑器的新卡 ⇒ 默认值（不是"读出一个空指针"那种惊喜）
+		boolean viewDefault = CardProgramStorage
+			.readView(new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()))
+			.equals(CardProgramStorage.View.DEFAULT);
+
+		LOGGER.info("[selftest] 浏览位置（§18）: 存得住={} 不动程序={} 脏数据被过滤={} 新卡取默认={} （指针={} 页={} 滚动={}/{}）",
+			viewKept, viewKeepsProgram, viewSanitised, viewDefault, viewBack.entry(), viewBack.page(), viewBack.scroll(),
+			viewBack.taskScroll());
+		if (!viewKept || !viewKeepsProgram || !viewSanitised || !viewDefault)
+			LOGGER.error("[selftest] 浏览位置有问题：存得住={} 不动程序={} 脏数据被过滤={} 新卡取默认={}", viewKept,
+				viewKeepsProgram, viewSanitised, viewDefault);
 	}
 
 	/**

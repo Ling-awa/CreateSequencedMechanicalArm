@@ -35,6 +35,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.menu.ArmProgramMenu;
 import io.github.Ling.create_sequenced_mechanical_arm.network.ArmProgramEditPacket;
 import io.github.Ling.create_sequenced_mechanical_arm.network.CardUiPacket;
+import io.github.Ling.create_sequenced_mechanical_arm.network.CardViewPacket;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmEntryText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmIcons;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
@@ -344,6 +345,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		super(menu, inventory, title);
 		this.menu = menu;
 		program = CardProgramStorage.read(menu.getCard(), registries());
+		view = CardProgramStorage.readView(menu.getCard());
 		// 打开时直接落到"正在编辑的那个任务"上：玩家在界外用 Ctrl+滚轮选了任务 3，
 		// 界面就得开在任务 3 —— 否则那两个入口各说各话（§5.1 v5）。
 		if (program.tasks.isEmpty()) {
@@ -356,6 +358,71 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 指针的初始位置跟着页面走：任务页落在"正在编辑的那个任务"上，操作页落在第一行
 		//（用户实测：重开界面后切到任务页，指针指着任务 1 而实际在任务 2）。
 		pointerIndex = defaultPointer();
+		// ★ §18：再恢复上次的浏览位置（页面 / 操作页指针 / 两个列表的滚动）——
+		//   "关掉去世界里试一下、再打开接着改"要能接着上一行。
+		applyView();
+	}
+
+	/** 上次关界面时存下来的浏览位置（{@link #pushView()} 用它判"变了没有"）。 */
+	private CardProgramStorage.View view = CardProgramStorage.View.DEFAULT;
+
+	/**
+	 * 恢复上次的浏览位置（§18）。**只恢复浏览位置**：页面、操作页指针、两个列表的滚动。
+	 *
+	 * <p>当前任务**不在这里**恢复 —— 它是语义，构造函数上面那段已经由 {@code program.editorTask} 决定了；
+	 * 这两件事的生命周期不同，混在一起就会出现"打开界面落在别处"那种各说各话（§5.1 v5、§18 的表）。
+	 *
+	 * <p>数值只做"非负"兜底，真正的上限交给 {@code init → clampPointers → clampListScroll}：
+	 * 构造期还没有布局，算不出列表现在多长（内容可能在上次离开之后变短了）。
+	 */
+	private void applyView() {
+		if (!program.tasks.isEmpty() && CardProgramStorage.PAGE_TASKS.equals(view.page()))
+			page = Page.TASKS;
+		// 指针：先把"当前任务的操作页那一份"记进账本（哪怕这次开在任务页，也不能把它冲成 0 ——
+		// 否则"去任务页看了一眼再关掉"就会把操作页的位置弄丢）
+		pointers.put("task#" + currentTask, Math.max(0, view.entry()));
+		if (page == Page.ENTRIES)
+			pointerIndex = Math.max(0, view.entry());
+		restoreScroll("tasks", view.taskScroll());
+		restoreScroll("task#" + currentTask, view.scroll());
+	}
+
+	/** 把一个列表的滚动直接摆到位（**不带动画**：恢复的位置不该从顶部滑过去）。 */
+	private void restoreScroll(String key, float value) {
+		if (value <= 0f)
+			return;
+		LerpedFloat chaser = listScrolls.computeIfAbsent(key, key2 -> LerpedFloat.linear()
+			.startWithValue(0));
+		chaser.setValue(value);
+		chaser.chase(value, 1f, Chaser.EXP);
+	}
+
+	/** 当前浏览位置（跨重开要保留的那四个数）。 */
+	private CardProgramStorage.View currentView() {
+		pointers.put(listKey(), pointerIndex); // 先把"现在"落进按列表的账本，再取
+		return new CardProgramStorage.View(pointers.getOrDefault("task#" + currentTask, 0), page.name(),
+			scrollOf("task#" + currentTask), scrollOf("tasks"));
+	}
+
+	/** 某个列表当前的滚动值（没建过就是 0）。 */
+	private float scrollOf(String key) {
+		LerpedFloat chaser = listScrolls.get(key);
+		return chaser == null ? 0f : chaser.getChaseTarget();
+	}
+
+	/**
+	 * 把"看到哪"写回卡（{@link CardViewPacket}）。**没变就不发**。
+	 *
+	 * <p>为什么不走 {@code ArmProgramEditPacket}（全量保存）：那条路要过规模上限与体积校验，
+	 * 而"滚动到第 15 行"根本不是数据改动 —— 玩家只是挪了挪视线，没有理由为此冒"整份程序被拒"的风险
+	 * （与 {@code pushTaskSelection} 用 {@code CardUiPacket} 的理由相同，§5.1 v5）。
+	 */
+	private void pushView() {
+		CardProgramStorage.View now = currentView();
+		if (now.equals(view))
+			return;
+		view = now;
+		PacketDistributor.sendToServer(new CardViewPacket(now.entry(), now.page(), now.scroll(), now.taskScroll()));
 	}
 
 	/**
@@ -460,6 +527,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	@Override
 	public void removed() {
 		super.removed();
+		// 浏览位置（§18）：与"数据有没有改动"无关，先走自己那条轻量通道写回卡
+		pushView();
 		if (!dirty)
 			return;
 		// 会话状态一起落盘（§5.1 v5）：在界面里换到任务 2 再关掉，回世界后录入的就是任务 2
@@ -2994,6 +3063,34 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return probe.page == Page.TASKS;
 	}
 
+	/**
+	 * 关掉界面再打开，是否回到离开时那一页 / 那一行 / 那个滚动位置（§18）。
+	 *
+	 * <p>用户要求：<i>"可以让操作页的指针位置和滚动位置也保留下来，这样方便玩家连续编辑测试。"</i>
+	 * 这条走的是**真实的重开路径**：把浏览位置写进卡 → 用这张卡构造一个界面 → 看它落在哪
+	 * （而不是去读 {@code pointers} 里那几个数，那只等于测了自己）。
+	 */
+	private static boolean viewStateSeedOk(Inventory inventory, RegistryAccess registries) {
+		ArmProgram program = new ArmProgram();
+		for (int i = 0; i < 2; i++) {
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "t" + (i + 1);
+			for (int e = 0; e < 6; e++)
+				task.entries.add(new ArmProgramEntry());
+			program.tasks.add(task);
+		}
+		program.editorTask = 1; // 当前任务是第 2 个
+		program.editorMode = CardUiPacket.EDIT;
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CardProgramStorage.write(card, program, registries);
+		CardProgramStorage.writeView(card, new CardProgramStorage.View(3, CardProgramStorage.PAGE_ENTRIES, 40f, 12f));
+		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+		ItemStack.STREAM_CODEC.encode(buffer, card);
+		ArmProgramScreen probe = new ArmProgramScreen(new ArmProgramMenu(0, inventory, buffer), inventory, tr("title"));
+		return probe.page == Page.ENTRIES && probe.currentTask == 1 && probe.pointerIndex == 3
+			&& Math.abs(probe.scrollOf("task#1") - 40f) < 0.01f && Math.abs(probe.scrollOf("tasks") - 12f) < 0.01f;
+	}
+
 	/** 自检用：实测到的任务数上限（加到第几个被编辑器挡住）；{@code -1} = 守卫没生效。 */
 	private int probedTaskLimit = -1;
 
@@ -3226,16 +3323,21 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			// 这是"两个入口各说各话"的唯一防线：一边改了 etask、另一边还从 0 开始，用起来就像没生效。
 			boolean sessionSeeded = true;
 			boolean emptyOnTasks = true;
+			boolean viewSeeded = true;
 			try {
 				sessionSeeded = sessionSeedOk(mc, inventory, registries);
 				emptyOnTasks = emptyProgramStartsOnTasks(inventory, registries);
+				viewSeeded = viewStateSeedOk(inventory, registries);
 			} catch (Throwable t) {
 				sessionSeeded = false;
+				viewSeeded = false;
 			}
 			if (!sessionSeeded && problem == null)
 				problem = "打开编辑器没有落到卡上记着的任务（etask 没被读）";
 			if (!emptyOnTasks && problem == null)
 				problem = "空卡打开编辑器没有直接进任务页";
+			if (!viewSeeded && problem == null)
+				problem = "关掉界面再打开没有回到离开时的页面 / 指针 / 滚动位置（§18）";
 
 			if (problem != null)
 				return "FAIL " + problem;
@@ -3255,7 +3357,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				+ (signalWording == null ? "收发+单位" : "FAIL") + " 语言键=" + (langKeys == null ? "缺=0" : "FAIL")
 				+ " 实测宽=模式" + modeLabelW + "/" + (SIGNAL_MODE_W - 10) + ",数值" + numLabelW + "/"
 				+ (SIGNAL_TICKS_W - 10) + ",单位" + unitLabelW + "/" + (SIGNAL_UNIT_W - 10)
-				+ " 会话落点=" + (sessionSeeded ? 1 : 0) + " 空卡进任务页=" + (emptyOnTasks ? 1 : 0) + " 任务上限="
+				+ " 会话落点=" + (sessionSeeded ? 1 : 0) + " 空卡进任务页=" + (emptyOnTasks ? 1 : 0) + " 视图="
+				+ (viewSeeded ? "记住了" : "FAIL") + " 任务上限="
 				+ screen.probedTaskLimit + " 备注框=" + (noteFieldOk ? "OK" : "FAIL") + " 滚动="
 				+ (scrollIndep == null && scrollBar == null ? "独立+可拖" : "FAIL") + " 指针="
 				+ (pointerIndep == null ? "按列表独立" : "FAIL") + " 热区=" + screen.hits;

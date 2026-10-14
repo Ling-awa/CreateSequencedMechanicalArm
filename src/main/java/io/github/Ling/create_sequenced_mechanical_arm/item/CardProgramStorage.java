@@ -47,6 +47,28 @@ public final class CardProgramStorage {
 	private static final String KEY_MODE = "ArmProgramMode";
 	private static final String KEY_TASK = "ArmProgramTaskIndex";
 
+	/**
+	 * 编辑器"看到哪"：页面、操作页的指针、两个列表各自的滚动（§18）。
+	 *
+	 * <p>与 {@link #KEY_MODE}/{@link #KEY_TASK} 分开：那两个是**语义**（录制要写进哪个任务），
+	 * 这四个纯粹是浏览位置（用户："可以让操作页的指针位置和滚动位置也保留下来，这样方便玩家连续编辑测试"）。
+	 * 数值的合法性（指针/滚动有没有越界）由**界面侧**夹取 —— 只有它知道列表现在多长。
+	 */
+	private static final String KEY_ENTRY = "ArmProgramEntryIndex";
+	private static final String KEY_PAGE = "ArmProgramPage";
+	private static final String KEY_SCROLL = "ArmProgramScroll";
+	private static final String KEY_TASK_SCROLL = "ArmProgramTaskScroll";
+
+	/**
+	 * "哪一页"的两个取值 —— **这是界面与存储之间的契约**（与 {@code ArmProgramScreen.Page} 枚举同名）。
+	 * 放常量而不是字面量：页名写错的表现是"打开界面落在另一页"，不会报任何错。
+	 */
+	public static final String PAGE_TASKS = "TASKS";
+	public static final String PAGE_ENTRIES = "ENTRIES";
+
+	/** 滚动位置的合法上限：正常列表只有几位数到几百像素；这是挡住客户端送来的离谱数值的护栏。 */
+	public static final float MAX_SCROLL = 100_000f;
+
 	/** 旧键（编译结果）。**只用于检测与清理，绝不读取**。 */
 	private static final String KEY_LEGACY = "ArmProgram";
 
@@ -61,6 +83,19 @@ public final class CardProgramStorage {
 		TOO_LARGE,
 		/** 程序里有无法转成脚本形式的物品栈（反编译那处抛点），一个字节都没写。 */
 		NOT_ENCODABLE
+	}
+
+	/**
+	 * 编辑器的浏览位置（跨重开保留，§18）。
+	 *
+	 * @param entry      操作页的指针（第几条操作），0 基
+	 * @param page       {@code "TASKS"} / {@code "ENTRIES"}（与界面那个 {@code Page} 枚举同名）
+	 * @param scroll     当前任务操作页的纵向滚动
+	 * @param taskScroll 任务页的纵向滚动
+	 */
+	public record View(int entry, String page, float scroll, float taskScroll) {
+		/** 新卡 / 旧卡没有这四个键时的默认值：操作页第一行、不滚动。 */
+		public static final View DEFAULT = new View(0, PAGE_ENTRIES, 0f, 0f);
 	}
 
 	private CardProgramStorage() {
@@ -154,10 +189,52 @@ public final class CardProgramStorage {
 		root.remove(KEY_LEGACY);
 		root.remove(KEY_MODE);
 		root.remove(KEY_TASK);
+		root.remove(KEY_ENTRY);
+		root.remove(KEY_PAGE);
+		root.remove(KEY_SCROLL);
+		root.remove(KEY_TASK_SCROLL);
 		if (root.isEmpty())
 			stack.remove(DataComponents.CUSTOM_DATA);
 		else
 			stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
+	}
+
+	/**
+	 * 读卡上的浏览位置（§18）。没有这四个键（新卡、或从没打开过编辑器）⇒ {@link View#DEFAULT}。
+	 *
+	 * <p>**不做越界夹取**：只有界面知道"这个列表现在多长"。这里只保证不返回负数/NaN 这种能直接算出崩溃的值，
+	 * 真正的夹取在界面恢复时（{@code clampPointers}/{@code clampListScroll}）。
+	 */
+	public static View readView(ItemStack stack) {
+		CompoundTag root = rootTag(stack);
+		if (!root.contains(KEY_ENTRY) && !root.contains(KEY_PAGE))
+			return View.DEFAULT;
+		float scroll = root.getFloat(KEY_SCROLL);
+		float taskScroll = root.getFloat(KEY_TASK_SCROLL);
+		return new View(Math.max(0, root.getInt(KEY_ENTRY)), pageOrDefault(root.getString(KEY_PAGE)),
+			sane(scroll), sane(taskScroll));
+	}
+
+	/** 写浏览位置（走 {@code CardViewPacket}；界面里滚动/移动指针**不是数据改动**，不过规模校验那条路）。 */
+	public static void writeView(ItemStack stack, View view) {
+		CompoundTag root = rootForWrite(stack);
+		root.putInt(KEY_ENTRY, Math.max(0, view.entry()));
+		root.putString(KEY_PAGE, pageOrDefault(view.page()));
+		root.putFloat(KEY_SCROLL, sane(view.scroll()));
+		root.putFloat(KEY_TASK_SCROLL, sane(view.taskScroll()));
+		stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
+	}
+
+	/** 页面名只认这两个（其余一律当操作页）—— 客户端送来的值不能直接进 NBT。 */
+	private static String pageOrDefault(String page) {
+		return PAGE_TASKS.equals(page) ? PAGE_TASKS : PAGE_ENTRIES;
+	}
+
+	/** NaN / 负无穷 / 天文数字一律压成 0：滚动位置是从网络来的数，必须能安全进 NBT 与渲染。 */
+	private static float sane(float value) {
+		if (Float.isNaN(value) || value < 0f || value > MAX_SCROLL)
+			return value > MAX_SCROLL ? MAX_SCROLL : 0f;
+		return value;
 	}
 
 	private static void warnLegacyDropped() {
