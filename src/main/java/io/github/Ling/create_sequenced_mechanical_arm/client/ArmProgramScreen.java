@@ -281,11 +281,45 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private final Map<String, LerpedFloat> listScrolls = new HashMap<>();
 
+	/**
+	 * 当前页面对应的"列表身份"：任务页一份、**每个任务的操作页各一份**。
+	 *
+	 * <p>指针（{@link #pointers}）与滚动（{@link #listScrolls}）**共用这一个 key** —— 两者说的都是
+	 * "我在这个列表里看到哪一行"；各写一套 key 迟早会留下"指针记得、滚动忘了"这种半对的状态。
+	 */
+	private String listKey() {
+		return page == Page.TASKS ? "tasks" : "task#" + currentTask;
+	}
+
 	/** 当前页面对应的那个滚动位置（懒创建；不是每帧新建，所以位置能记住）。 */
 	private LerpedFloat listScroll() {
-		return listScrolls.computeIfAbsent(page == Page.TASKS ? "tasks" : "task#" + currentTask,
-			key -> LerpedFloat.linear()
-				.startWithValue(0));
+		return listScrolls.computeIfAbsent(listKey(), key -> LerpedFloat.linear()
+			.startWithValue(0));
+	}
+
+	/**
+	 * 每个列表**各自**的指针位置（key 与滚动完全相同）。
+	 *
+	 * <p>用户实测：<i>"另外操作界面的指针也是，切换UI之后会回到第一个"</i>。指针原来只有
+	 * {@link #pointerIndex} 一份，切页时被另一个列表的下标覆盖（而且任务页会拿到**条目下标**），
+	 * 回来自然落在别处。滚动位置早就按列表分开了（见 {@link #listScrolls} 的说明），
+	 * 指针是同一类东西，所以也按列表记。
+	 *
+	 * <p>⚠️ 这里记的是**浏览位置**（"我看到哪一行"），与滚动位置**同寿**（关掉界面就没了）。
+	 * 真正需要跨重开保留的是"我在编辑哪个任务"——那是**语义**（录制要写进那个任务），存在卡上（{@code etask}）。
+	 */
+	private final Map<String, Integer> pointers = new HashMap<>();
+
+	/**
+	 * 一个列表**第一次**被打开时，指针该在哪。
+	 *
+	 * <p>任务页 = **正在编辑的那个任务**。用户实测：界面关掉再开、切到任务页，指针指着任务 1 而实际在任务 2 ——
+	 * 任务页的指针就是"我在哪个任务上"，没有任何理由从第 1 个开始。操作页 = 第一行。
+	 */
+	private int defaultPointer() {
+		if (page == Page.TASKS)
+			return Mth.clamp(currentTask, 0, Math.max(0, program.tasks.size() - 1));
+		return 0;
 	}
 
 	/** 纵向滚动条：拖拽中 / 鼠标与滑块上沿的差（见 {@code mouseDragged}）。 */
@@ -319,6 +353,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		} else {
 			currentTask = Mth.clamp(program.editorTask, 0, program.tasks.size() - 1);
 		}
+		// 指针的初始位置跟着页面走：任务页落在"正在编辑的那个任务"上，操作页落在第一行
+		//（用户实测：重开界面后切到任务页，指针指着任务 1 而实际在任务 2）。
+		pointerIndex = defaultPointer();
 	}
 
 	/**
@@ -2640,25 +2677,40 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	/** 底部第一个按钮：任务页 ↔ 操作页。 */
 	private void togglePage() {
-		if (page == Page.ENTRIES) {
-			page = Page.TASKS;
-			pointerIndex = Mth.clamp(pointerIndex, 0, Math.max(0, program.tasks.size() - 1));
-		} else {
-			if (program.tasks.isEmpty()) {
-				status = tr("status.no_task").getString();
-				rebuildPending = true;
-				return;
-			}
-			currentTask = Mth.clamp(pointerIndex, 0, program.tasks.size() - 1);
-			page = Page.ENTRIES;
-			pointerIndex = 0;
-			pushTaskSelection();
+		if (!switchPage(page == Page.ENTRIES ? Page.TASKS : Page.ENTRIES)) {
+			status = tr("status.no_task").getString();
+			rebuildPending = true;
+			return;
 		}
+		// 进操作页时"指针指着的那个任务"成了当前任务 ⇒ 写回卡（与界外 Ctrl+滚轮同一条路，§5.1 v5）
+		if (page == Page.ENTRIES)
+			pushTaskSelection();
 		// ⚠️ 这里**不再**"把滚动归零"：每个列表有自己的位置（见 listScrolls 的说明），
 		//   回到某个列表就该回到它上次看到的地方。要归零只需拖滑块/滚轮。
 		clampListScroll(); // 只把它夹进**自己**的范围（内容可能在上次离开之后变短了）
 		status = "";
 		rebuildPending = true;
+	}
+
+	/**
+	 * 页面切换的**状态部分**：把指针存回旧列表、取出新列表的（没记过就用 {@link #defaultPointer()}），
+	 * 并在进操作页时把"指针指着的任务"变成当前任务。返回 {@code false} = 切不过去（一条任务都没有）。
+	 *
+	 * <p>为什么与按钮分开：自检要走**真实的切换路径**却**不能发包** —— {@link #pushTaskSelection()}
+	 * 会把模式/任务推给服务端（顺手改掉玩家卡上的编辑状态），那是按钮该做的事，不是状态机该做的事。
+	 */
+	private boolean switchPage(Page to) {
+		if (to == Page.ENTRIES && program.tasks.isEmpty())
+			return false;
+		pointers.put(listKey(), pointerIndex); // 旧列表（它的 key 由**旧的** page / currentTask 决定）
+		if (to == Page.TASKS) {
+			page = Page.TASKS;
+		} else {
+			currentTask = Mth.clamp(pointerIndex, 0, program.tasks.size() - 1);
+			page = Page.ENTRIES;
+		}
+		pointerIndex = Math.max(0, pointers.getOrDefault(listKey(), defaultPointer()));
+		return true;
 	}
 
 	/** 底部第三个按钮：在**指针之后**插入（"插入新操作到下方"），然后直接进编辑器。 */
@@ -3162,6 +3214,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String scrollIndep = screen.scrollIndependenceProblem();
 			if (scrollIndep != null && problem == null)
 				problem = "滚动位置: " + scrollIndep;
+			// 指针同样要**每个列表一份**，且任务页要落在当前任务上（用户 2026-10-14 反馈）。
+			String pointerIndep = screen.pointerIndependenceProblem();
+			if (pointerIndep != null && problem == null)
+				problem = "指针位置: " + pointerIndep;
 			String scrollBar = screen.scrollBarProblem();
 			if (scrollBar != null && problem == null)
 				problem = "滚动条: " + scrollBar;
@@ -3201,7 +3257,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				+ (SIGNAL_TICKS_W - 10) + ",单位" + unitLabelW + "/" + (SIGNAL_UNIT_W - 10)
 				+ " 会话落点=" + (sessionSeeded ? 1 : 0) + " 空卡进任务页=" + (emptyOnTasks ? 1 : 0) + " 任务上限="
 				+ screen.probedTaskLimit + " 备注框=" + (noteFieldOk ? "OK" : "FAIL") + " 滚动="
-				+ (scrollIndep == null && scrollBar == null ? "独立+可拖" : "FAIL") + " 热区=" + screen.hits;
+				+ (scrollIndep == null && scrollBar == null ? "独立+可拖" : "FAIL") + " 指针="
+				+ (pointerIndep == null ? "按列表独立" : "FAIL") + " 热区=" + screen.hits;
 		} catch (Throwable t) {
 			StringBuilder report = new StringBuilder("FAIL ").append(t);
 			for (StackTraceElement frame : t.getStackTrace()) {
@@ -3566,6 +3623,66 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		} finally {
 			page = savedPage;
 			currentTask = savedTask;
+		}
+	}
+
+	/**
+	 * 自检：**指针也要按列表分开记**，而且任务页第一次打开时指针要落在**正在编辑的那个任务**上。
+	 *
+	 * <p>用户实测（2026-10-14）：<i>"此处的UI左侧的指针不会保留原本的位置（关闭UI后再次打开并且切换到任务界面的
+	 * 结果，尽管它指着任务1但是实际上是任务2。另外操作界面的指针也是，切换UI之后会回到第一个）。"</i>
+	 *
+	 * <p>走 {@link #switchPage}（真实的切换状态机，去掉发包那一半）：只往 {@code pointers} 里塞两个数再读出来
+	 * 等于没测（决策 68）。
+	 */
+	private String pointerIndependenceProblem() {
+		Page savedPage = page;
+		int savedTask = currentTask;
+		int savedPointer = pointerIndex;
+		Map<String, Integer> savedPointers = new HashMap<>(pointers);
+		try {
+			if (program.tasks.isEmpty())
+				return "自检前提不成立：程序里一条任务都没有";
+
+			// ① 操作页把指针放到第 3 行 → 切到任务页：指针必须落在**当前任务**上（不是从 0 开始）
+			page = Page.ENTRIES;
+			currentTask = 0;
+			pointers.clear();
+			pointerIndex = 3;
+			if (!switchPage(Page.TASKS))
+				return "从操作页切不到任务页";
+			int expectTasks = Mth.clamp(currentTask, 0, program.tasks.size() - 1);
+			if (pointerIndex != expectTasks)
+				return "切到任务页时指针没有落在当前任务上（指针=" + pointerIndex + "，当前任务=" + currentTask + "）";
+			// ② 切回操作页：刚才那第 3 行必须还在（用户报的"切换UI之后回到第一个"的反面）
+			if (!switchPage(Page.ENTRIES))
+				return "从任务页切不回操作页";
+			if (pointerIndex != 3)
+				return "切回来时操作页的指针没记住（期望 3，实际 " + pointerIndex + "）";
+
+			// ③ 任务页自己也要记住（要有 ≥2 个任务才有意义：1 个任务时"记住的"和"默认的"是同一个数）
+			if (program.tasks.size() >= 2) {
+				page = Page.TASKS;
+				currentTask = 0;
+				pointers.clear();
+				pointerIndex = 1; // 在任务页把指针挪到第 2 行
+				if (!switchPage(Page.ENTRIES))
+					return "任务页切到操作页失败";
+				// 进操作页会把"指着的任务"变成当前任务；拨回任务 0，好让**默认值(0)** 与**记住的值(1)** 不同，
+				// 否则这条断言在"指针没记住、只是落回了默认值"时也会绿。
+				currentTask = 0;
+				if (!switchPage(Page.TASKS))
+					return "操作页切回任务页失败";
+				if (pointerIndex != 1)
+					return "任务页的指针没记住（期望 1，实际 " + pointerIndex + "）";
+			}
+			return null;
+		} finally {
+			page = savedPage;
+			currentTask = savedTask;
+			pointerIndex = savedPointer;
+			pointers.clear();
+			pointers.putAll(savedPointers);
 		}
 	}
 

@@ -441,6 +441,37 @@ public class SequencedArmSelfTest {
 		boolean legacyCardEmpty = !CardProgramStorage.hasProgram(legacyCard)
 			&& CardProgramStorage.read(legacyCard, registries).tasks.isEmpty();
 
+		// ④ ★ 悬空任务名的程序必须**存得住**（§17.10：这条原来没有，后果是整份程序被清空）
+		//    真实路径：录一条「调用 子任务B」→ 把任务 B 删掉或改名 ⇒ 模型里合法（运行时按"跳转找不到任务"
+		//    走失败出口），但**编译期是硬错**。盘上只有文本 ⇒ 存储必须"带伤装载"，不能把程序丢掉。
+		ArmProgram dangling = new ArmProgram();
+		ArmProgramTask danglingMain = new ArmProgramTask();
+		danglingMain.name = "main";
+		ArmProgramEntry danglingCall = new ArmProgramEntry();
+		danglingCall.op = OperationType.CALL;
+		danglingCall.callTarget = "sub_task_gone"; // 程序里根本没有这个名字的任务
+		danglingMain.entries.add(danglingCall);
+		dangling.tasks.add(danglingMain);
+		// 前提：编译**确实**报错 —— 而且报错时值**仍然有内容**（这正是 §17.10 改掉的那条契约：
+		// 原来是 value=null ⇒ "编译有错"等于"内容没了"）。这条前提不成立，下面那条就测不到东西。
+		ScriptResult<ArmProgram> strict = ScriptCompiler.compile(ScriptCompiler.decompile(dangling, registries),
+			registries);
+		boolean compilerRejectsButKeeps = strict.hasErrors() && strict.value() != null;
+		ItemStack danglingCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CardProgramStorage.write(danglingCard, dangling, registries);
+		ArmProgram danglingBack = CardProgramStorage.read(danglingCard, registries);
+		boolean danglingKept = danglingBack.tasks.size() == 1
+			&& danglingBack.tasks.get(0)
+				.entries.size() == 1
+			&& "sub_task_gone".equals(danglingBack.tasks.get(0)
+				.entries.get(0).callTarget);
+		LOGGER.info("[selftest] 悬空任务名（删掉被调用的任务）: 编译器报错但保住内容={} 存储往返不死={}", compilerRejectsButKeeps,
+			danglingKept);
+		if (!compilerRejectsButKeeps)
+			problems.add("前提不成立：悬空任务名没被编译器当错误，或编译有错时值仍是空的（契约被改回去了）");
+		if (!danglingKept)
+			problems.add("悬空任务名的程序在存储往返里丢了内容（读回来是空的 ⇒ 玩家的程序会没）");
+
 		// ③ 臂本体：存档 tag 里是 ProgramText、没有 Program；**另起一条全新的臂**读它（走 read 真实入口）
 		BlockPos armPos = new BlockPos(0, 200, 0);
 		BlockState oldState = level.getBlockState(armPos);

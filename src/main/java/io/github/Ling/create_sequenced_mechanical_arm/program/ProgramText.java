@@ -64,10 +64,12 @@ public final class ProgramText {
 	}
 
 	/**
-	 * 文本 → 程序（{@link ScriptCompiler#compile} 的安全版）：**有错返回 {@code null}**（不抛）。
+	 * 文本 → 程序（{@link ScriptCompiler#compile} 的安全版）：**编译有错也照样把内容带回来**（§17.10）。
 	 *
-	 * <p>调用方按 {@code null} 当"没有程序"处理；但注意它与"空文本"要分开讲：
-	 * 空文本是正常状态（新卡），编译失败是**数据有问题**，这里会留一条 WARN 带行号。
+	 * <p>为什么不能"有错就返回 null"：模型允许编译器不认的状态 —— 最典型的是**悬空的任务名**
+	 * （玩家录了「调用 子任务B」，然后删掉/改名了任务 B；这在模型里合法，运行时会走失败出口），
+	 * 而盘上只有文本。要是把这种文本判成"没有程序"，玩家的程序一读回来就**整份没了**。
+	 * 所以这里只记一条 WARN 留痕，然后**带伤装载**；只有"连一个任务都没解析出来"时才返回 null。
 	 */
 	@Nullable
 	public static ArmProgram fromText(String text, HolderLookup.Provider registries) {
@@ -77,9 +79,8 @@ public final class ProgramText {
 		if (compiled.hasErrors()) {
 			List<String> lines = ScriptCompiler.errorLines(compiled.errors());
 			int shown = Math.min(3, lines.size());
-			LOGGER.warn("脚本文本编译失败（{} 字节，{} 个错误）：{}", utf8Length(text), lines.size(),
-				String.join(" | ", lines.subList(0, shown)));
-			return null;
+			LOGGER.warn("脚本文本有 {} 个编译错误（{} 字节），按**已解析到的内容**装载（不丢程序）：{}", lines.size(),
+				utf8Length(text), String.join(" | ", lines.subList(0, shown)));
 		}
 		return compiled.value();
 	}

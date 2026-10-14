@@ -105,8 +105,13 @@ public final class ScriptParser {
 	}
 
 	/**
-	 * 编译一份脚本。<b>永远返回一个程序</b>（有错时可能是空程序）——
-	 * 调用方必须先看 {@link ScriptResult#hasErrors()}（命令入口与自检都照这个顺序写）。
+	 * 编译一份脚本。<b>永远返回一个程序</b>（有错时是"已经解析到哪算哪"的那份，可能是空程序）——
+	 * 调用方**必须先看** {@link ScriptResult#hasErrors()}（命令入口与自检都照这个顺序写）。
+	 *
+	 * <p>⚠️ 有错时值**不是 null** 是刻意的（§17.10）：模型允许编译器不认的状态（最典型的是**悬空的任务名**
+	 * —— GUI 里删掉 / 改名了被「调用」的任务，这在模型里合法、运行时会走失败出口），而盘上只有文本。
+	 * 如果"一有错就丢值"，这种程序读回来就变成**空程序** —— 玩家的程序当场没了。
+	 * 所以：错误照报，**内容留着**。
 	 *
 	 * @param text       源文本（UTF-8 无 BOM、LF/CRLF 都吃）
 	 * @param registries 解析物品 / 组件用的注册表（自检里有现成的 {@code server.registryAccess()}）
@@ -116,7 +121,7 @@ public final class ScriptParser {
 		ArmProgram program = parser.parseFile(text == null ? "" : text);
 		if (parser.errors.isEmpty())
 			return ScriptResult.ok(program, parser.warnings);
-		return ScriptResult.fail(parser.errors);
+		return ScriptResult.withErrors(program, parser.errors, parser.warnings);
 	}
 
 	// ————————————————————————— 词法 —————————————————————————

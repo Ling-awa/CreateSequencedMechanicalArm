@@ -23,7 +23,7 @@ public final class ScriptCompiler {
 
 	/**
 	 * 编译 {@code .sma} 文本。**先看 {@link ScriptResult#hasErrors()}，再看值**
-	 * —— 有错时值是个空程序（命令入口绝不能把空程序当成功写进卡里）。
+	 * —— 有错时值**也可能有内容**（"已经解析到哪算哪"，§17.10），命令入口照旧必须先看错误再决定要不要写卡。
 	 */
 	public static ScriptResult<ArmProgram> compile(String text, HolderLookup.Provider registries) {
 		return ScriptParser.parse(text, registries);
