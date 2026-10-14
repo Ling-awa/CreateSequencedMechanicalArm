@@ -409,20 +409,37 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 	}
 
 	/**
-	 * 认领要按住的那件物品：上次那件还在就继续用它（哪怕它已经漂出目标格），
-	 * 否则在**目标格**里挑一件**这条条目真的加工得了的**、离中心最近的（原地加工会把对象换掉，
-	 * 所以要能重新认领）。
+	 * 认领物品时允许的"离格子中心最大距离"。
 	 *
-	 * <p><b>为什么要过"加工得了"这一关</b>（用户第二十七轮续三十五）：认领现在是**长期**的
+	 * <p>两个条目类型的要求不同（用户第二十七轮续四十实测）：
+	 * <ul>
+	 *   <li><b>取物</b>：物品**一进入判定范围**就按住 —— 范围取带子自己的加工范围 {@code ±.51}
+	 *       （`handleProcessingOnAllItems` 用的同一个值）。</li>
+	 *   <li><b>组装</b>：要等它**走到格子中间**再按住 —— 容差至少一个 tick 的带速
+	 *       （否则高速带上每 tick 的位移就跨过了容差窗口，永远追不上），慢带子则用 1/32 格（半个像素）。
+	 *       16rpm 下带速 1/64 格/tick ⇒ 容差 1/32 ⇒ 物品停在离中心 ≤1/32 格处，肉眼就是"中间"。</li>
+	 * </ul>
+	 *
+	 * <p>⚠️ 认领时**绝不移动物品**（不再有"拉到中心"那一步）：用户实测
+	 * <i>"它会捕获并定住物品，但是物品会立即瞬移到中间而不是留在原本的位置"</i>。
+	 * 两条路都不需要定心：取物走 {@code BeltInventory.getStackAtOffset:394-406}（只看在不在这一格），
+	 * 组装走 {@code handleProcessingOnAllItems}（范围就是整格 ±.51）。
+	 */
+	public static float claimTolerance(boolean needsCentre, float beltStep) {
+		return needsCentre ? Math.max(1 / 32f, Math.abs(beltStep)) : CLAIM_RANGE;
+	}
+
+	/** 判定范围：与带子自己的加工范围一致（`handleProcessingOnAllItems` ⇒ 中心 ±.51）。 */
+	private static final float CLAIM_RANGE = .51f;
+
+	/**
+	 * 认领要按住的那件物品：上次那件还在就继续用它，否则按**当前条目的位置条件**在目标格里挑一件
+	 * **这条条目真的加工得了的**、离中心最近的。
+	 *
+	 * <p><b>为什么认领要过"加工得了"这一关</b>（用户第二十七轮续三十五）：认领是**长期**的
 	 * （跨收回、跨待机，见 {@link #canPinTarget()}）。见谁按谁的话，刚加工出来的**产物**会被按在
 	 * 原地 —— 它恰好不再匹配配方，于是"按着 → 等不到加工 → 一直按着"，整条带子被一件物品堵死。
-	 * 判据交给运行时（{@code ProgramRuntime.canWorkOn}），它用的是**与前置检查同一批事实**，
-	 * 所以"认领了却永远加工不了"不会出现：产物流走，下一件能加工的进来。
-	 *
-	 * <p>认领时**顺手把它拉到格子中心**（照 `BeltInventory:291-295` 的 `ProcessingResult.HOLD` 处理）：
-	 * 臂的取物点就在格子中心，而 `handleProcessingOnAllItems` 只认"中心 ±.51" ⇒
-	 * 物品停在格子边缘时，取物与组装两条路都可能"看不到它"（用户第二十七轮续三十实测：
-	 * 改完反而完全抓不到 —— 就是因为只锁不定心）。
+	 * 判据交给运行时（{@code ProgramRuntime.canWorkOn}），它用的是**与前置检查同一批事实**。
 	 */
 	@Nullable
 	private TransportedItemStack claimBeltItem() {
@@ -433,26 +450,22 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			return null;
 		}
 		List<TransportedItemStack> items = inventory.getTransportedItems();
-		// ① 保留：上一次认领的那件**还在带子上**就继续按着（哪怕它漂出了目标格 —— 它本来就是
-		//    我们按住的，中途换目标只会让它被放回带上跑掉）。
+		// ① 保留：上一次认领的那件**还在带子上**就继续按着（它被我们按住、不会漂走）。
 		TransportedItemStack item = pinnedBeltItem != null && items.contains(pinnedBeltItem)
 			&& !pinnedBeltItem.stack.isEmpty() ? pinnedBeltItem : null;
-		// ② 认领：目标格里"这条条目加工得了"的、离中心最近的一件。
+		// ② 认领：目标格里"这条条目加工得了"、且满足**位置条件**的一件。
 		if (item == null) {
-			float center = belt.index + .5f;
+			float centre = belt.index + .5f;
+			float tolerance = claimTolerance(runtime.claimNeedsCentre(this), belt.getBeltMovementSpeed());
 			float bestDistance = Float.MAX_VALUE;
 			for (TransportedItemStack candidate : items) {
 				if (candidate.stack.isEmpty())
 					continue;
-				// ⚠️ 范围必须与**带子自己的加工范围逐字相同**（`handleProcessingOnAllItems` ⇒
-				//    `handleCenteredProcessingOnAllItems(.51f, …)` ⇒ `applyToEachWithin(index + .5f, .51f, …)`，
-				//    见 `BeltBlockEntity:405-413`、`BeltInventory:456-464`）：否则会出现
-				//    "前置检查放行了、但到那儿一看没有可认领的物品" ⇒ 白伸一趟（决策 68/91：判据写两份必然分叉）。
-				if (Math.abs(candidate.beltPosition - center) >= .51f)
-					continue; // 只认目标格中心 ±.51
+				float distance = Math.abs(candidate.beltPosition - centre);
+				if (distance >= tolerance)
+					continue; // 取物：整格都算"进入判定范围"；组装：只有走到中间才算
 				if (!runtime.canWorkOn(this, candidate.stack))
 					continue; // 产物 / 加工不了的东西：不按（否则会堵住带子）
-				float distance = Math.abs(candidate.beltPosition - center);
 				if (distance < bestDistance) {
 					bestDistance = distance;
 					item = candidate;
@@ -464,20 +477,15 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			return null;
 		}
 		pinnedBeltItem = item;
+		// ★ **不动物品**：它停在自己现在的位置。`locked` 才是"按住"的那个标记
+		//   （带子服务端 `BeltInventory:161-162` 与客户端 `:119-121` 都会因此跳过移动，且都不会清掉它），
+		//   `lockedExternally` 每 tick 由 `holdBeltItem()` 重设，挡住带子自己的清理。
 		if (item != clientHoldItem || !item.locked) {
-			centreOnBelt(belt, item);
 			item.locked = true;
 			clientHoldItem = item;
 			syncBeltController();
 		}
 		return item;
-	}
-
-	/** 把物品拉到目标格中心；1/512 那个偏移是照抄上游的（让它落在中心的正确一侧）。 */
-	private void centreOnBelt(BeltBlockEntity belt, TransportedItemStack item) {
-		boolean positive = belt.getDirectionAwareBeltMovementSpeed() > 0;
-		item.beltPosition = belt.index + .5f + (positive ? 1 / 512f : -1 / 512f);
-		item.prevBeltPosition = item.beltPosition;
 	}
 
 	/** 松手：两个标记都要清（`locked` 不会被自动消费，忘清会在客户端留下永远不动的"幽灵物品"）。 */

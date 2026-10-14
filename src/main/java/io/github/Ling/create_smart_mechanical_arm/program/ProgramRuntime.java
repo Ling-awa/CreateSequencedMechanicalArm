@@ -1108,6 +1108,19 @@ public class ProgramRuntime {
 	}
 
 	/**
+	 * 认领的**位置条件**：当前条目是「组装」时，要等物品**走到格子中间**才按住；
+	 * 其它（取物）**一进入判定范围就按住**（用户第二十七轮续四十实测要求）。
+	 *
+	 * <p>为什么分两种：取物时手臂的爪子是去"那一格"取东西，物品停在哪都一样（取物走
+	 * {@code getStackAtOffset}，只看在不在这一格）；而组装要在物品身上作业，
+	 * 让它**自己走到中间**再定住才符合观感 —— 一进范围就按住并把它拽到中间，看起来是"瞬移"。
+	 */
+	public boolean claimNeedsCentre(SmartArmBlockEntity arm) {
+		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
+		return entry != null && entry.op == OperationType.DEPLOY;
+	}
+
+	/**
 	 * 这件物品**现在值得认领吗** —— 认领 = 用 {@code locked} 把它按在带子上等手臂来加工
 	 * （见 {@link SmartArmBlockEntity#updateBeltHold()}）。
 	 *

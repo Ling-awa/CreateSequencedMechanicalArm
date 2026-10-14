@@ -151,6 +151,7 @@ public class SmartArmSelfTest {
 		checkDeployPrecheckScansAllSlots(server);
 		checkRetractBeforeNextMove(server);
 		checkMovePoseTimeline();
+		checkClaimPositionPolicy();
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
@@ -1101,6 +1102,43 @@ public class SmartArmSelfTest {
 		if (!frozenWithoutTarget)
 			LOGGER.error("[selftest] 没有目标时旋转**没有冻结**（baseAngle={}°）—— 收回/等待期间不许转向",
 				frozen.baseAngle);
+	}
+
+	/**
+	 * 认领物品的**位置条件**：取物一进范围就按住（原地不动）；组装等它走到中间再按住。
+	 * （用户第二十七轮续四十实测：<i>"它会捕获并定住物品，但是物品会立即瞬移到中间而不是留在原本的位置"</i>。）
+	 *
+	 * <p>⚠️ **这条断言只能钉住"规则"，钉不住"世界里的位置"** —— 自检没有传送带夹具（见 §7.23 末的说明），
+	 * 所以"物品真的停在原地"必须由游戏内实测确认。这里能钉的是：
+	 * ① 取物：容差 = 整格（±.51，与带子自己的加工范围一致）；② 组装：容差 ≥ 一个 tick 的带速
+	 * （否则高速带上永远追不上中心）；③ 组装慢带子下的容差 = 1/32 格（半个像素，肉眼就是"中间"）。
+	 */
+	private static void checkClaimPositionPolicy() {
+		float tol = 1e-4f;
+		float slowStep = 1 / 64f; // 16rpm：一格 64 tick
+		float fastStep = .25f; // 256rpm：一格 4 tick
+		float takeRange = SmartArmBlockEntity.claimTolerance(false, slowStep);
+		float deploySlow = SmartArmBlockEntity.claimTolerance(true, slowStep);
+		float deployFast = SmartArmBlockEntity.claimTolerance(true, fastStep);
+
+		boolean takeTakesWholeSegment = Math.abs(takeRange - .51f) < tol;
+		boolean deployWaitsForCentre = deploySlow < takeRange && Math.abs(deploySlow - 1 / 32f) < tol;
+		boolean deployKeepsUpOnFastBelts = Math.abs(deployFast - fastStep) < tol;
+
+		LOGGER.info("[selftest] 认领位置条件: 取物容差={}（整格） 组装容差·慢带={}（16rpm，应当 1/32） "
+			+ "组装容差·快带={}（应当 ≥ 一个 tick 的带速 {}）",
+			takeRange, deploySlow, deployFast, fastStep);
+
+		if (!takeTakesWholeSegment)
+			LOGGER.error("[selftest] 「取物」的认领范围不是整格（{}，应当 .51 = 带子自己的加工范围）—— "
+				+ "取物应当是「一进入判定范围就按住」", takeRange);
+		if (!deployWaitsForCentre)
+			LOGGER.error("[selftest] 「组装」没有「等物品走到中间」（慢带容差={}）—— 一进范围就按住会把物品"
+				+ "从格子边缘摁住（用户实测的「瞬移到中间」就是这么来的）", deploySlow);
+		if (!deployKeepsUpOnFastBelts)
+			LOGGER.error("[selftest] 快带子上「组装」的容差**没有跟着带速走**（{}，应当等于一个 tick 的位移 {}）"
+				+ "—— 比它小则每 tick 直接跨过窗口、永远认领不到；比它大则等于「一进范围就按住」", deployFast,
+				fastStep);
 	}
 
 	/** 走目标方块**自己的物品能力**放一个铁锭（不碰 BE 内部字段，与"世界里真的放了一个"一致）。 */
