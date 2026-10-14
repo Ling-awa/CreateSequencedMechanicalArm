@@ -8,6 +8,8 @@
 
 > 设计取向：**专注于动力臂本身，尽量不添加额外内容**。不新增方块族、不做跨模组适配，全部功能都长在这一条臂和它的操作表上。
 
+**仓库**：<https://github.com/Ling-awa/CreateSmartMechanicalArm> —— 从 [Releases](https://github.com/Ling-awa/CreateSmartMechanicalArm/releases) 拿 jar，或按下面的「构建」自己产一个；问题与建议请提到 [Issues](https://github.com/Ling-awa/CreateSmartMechanicalArm/issues)。
+
 ---
 
 ## 这是什么
