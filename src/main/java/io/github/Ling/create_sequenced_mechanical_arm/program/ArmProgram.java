@@ -57,13 +57,37 @@ public class ArmProgram {
 	/**
 	 * 世界内录入的"会话状态"：当前是录入还是编辑模式、正在编辑哪个任务。
 	 *
-	 * <p>为什么放在程序里而不是新建物品组件：这张卡的程序本来就是一个随卡走、且由服务端权威写入的
-	 * NBT 块（录制/编辑都走它），塞两个字段就自动获得了"换物品不丢、重登不丢、服务端认账"三件事，
-	 * 不用再开组件 + 同步通道。臂装载时这两个字段会被忽略（运行时只读 tasks）。
+	 * <p><b>它们不在 `.sma` 文本里</b>（§17.9）：文本描述的是**程序**，而这两个字段是**玩家怎么看这份程序**。
+	 * 写进文本的话，`/sma code import` 一份别人的脚本就会顺手改掉你的模式；反过来，你在文本里手写
+	 * `mode=EDIT` 也毫无意义。所以盘上它们与文本**并排**存在卡上（见 {@code CardProgramStorage}）。
+	 *
+	 * <p>⚠️ §17 之前它们寄生在卡里的**程序 NBT** 上 —— 那会儿的理由是"这张卡的程序本来就是一个随卡走、
+	 * 且由服务端权威写入的 NBT 块，塞两个字段就自动获得换物品不丢 / 重登不丢 / 服务端认账"。
+	 * 存储改成文本之后这句话不成立了，少了这处安身之地，症状就是"切换物品又回到录入模式"。
+	 *
+	 * <p>臂装载时这两个字段会被忽略（运行时只读 tasks）。
 	 */
-	public String editorMode = "RECORD";
-	/** 正在编辑/录入的任务下标（1 基序号 - 1 存这里，越界时运行前会夹住）。 */
+	public static final String MODE_RECORD = "RECORD";
+	public static final String MODE_EDIT = "EDIT";
+
+	public String editorMode = MODE_RECORD;
+	/** 正在编辑/录入的任务下标（1 基序号 - 1 存这里；越界时**读回来**会夹住 —— 见 {@link #clampEditorTask()}）。 */
 	public int editorTask;
+
+	/**
+	 * 把 {@code editorTask} 夹进合法范围（{@code 0 .. 任务数-1}；空程序 = 0）。
+	 *
+	 * <p>**这条规则只有一处**：载入 NBT 与"从卡上读回编辑状态"共用它。界面把它直接当索引用，
+	 * 越界（改坏的 NBT、删任务后残留的旧下标、导入了一份更短的脚本）就是打开编辑器当场崩。
+	 * 调用时机必须在**任务都读完**之后。
+	 */
+	public void clampEditorTask() {
+		int last = Math.max(0, tasks.size() - 1);
+		if (editorTask < 0)
+			editorTask = 0;
+		else if (editorTask > last)
+			editorTask = last;
+	}
 
 	public boolean isEmpty() {
 		return tasks.isEmpty();
@@ -120,7 +144,7 @@ public class ArmProgram {
 	public static ArmProgram load(CompoundTag tag, HolderLookup.Provider registries) {
 		ArmProgram program = new ArmProgram();
 		program.absolute = tag.getBoolean("abs");
-		program.editorMode = tag.contains("emode") ? tag.getString("emode") : "RECORD";
+		program.editorMode = tag.contains("emode") ? tag.getString("emode") : MODE_RECORD;
 		program.editorTask = Math.max(0, tag.getInt("etask"));
 		// 备注**不在这里夹**：夹（截断）会让"文本 → 模型 → 文本"丢字（不变量 #1 死在这一步）。
 		// 上限的守门人只有两个：编译器（超了报错带行号，见 ScriptParser）与反编译后的文本本身。
@@ -130,8 +154,7 @@ public class ArmProgram {
 			program.tasks.add(ArmProgramTask.load(list.getCompound(i), registries));
 		// 会话状态里的任务下标必须在**读完任务之后**夹到合法范围：它会被界面直接当索引用，
 		// 越界（改坏的 NBT、或删任务后残留的旧下标）就是打开编辑器当场崩。
-		if (program.editorTask >= program.tasks.size())
-			program.editorTask = Math.max(0, program.tasks.size() - 1);
+		program.clampEditorTask();
 		return program;
 	}
 

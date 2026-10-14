@@ -20,15 +20,21 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  * 录入会话状态（模式 / 正在编辑哪个任务）的 C2S 意图包（PLAN.md §5.1）。
  *
  * <p>为什么需要它：模式与"当前任务"必须是<b>卡上的状态</b>而不是客户端内存里的开关 —— 用户实测
- * "切换物品之后就回到录入模式"。状态写在卡的程序 NBT 里（{@code emode}/{@code etask}），
- * 客户端只发意图，服务端读了卡、改两个字段、再广播权威副本回来（与录制同一条路径）。
+ * "切换物品之后就回到录入模式"。客户端只发意图，服务端读了卡、改这两个字段、再广播权威副本回来
+ * （与录制同一条路径）。
+ *
+ * <p>⚠️ 它们**不再**存在卡里的程序 NBT 上（那是 §17 之前的做法）：§17 把程序的落盘形式换成了
+ * `.sma` 文本，而文本里没有"玩家怎么看"的位置（见 §17.9 的回归记录）。现在它们与文本**并排**
+ * 存在卡上（`CardProgramStorage` 的 `ArmProgramMode` / `ArmProgramTaskIndex`），走的是同一套
+ * 服务端权威写入 —— 这里的两行注释描述的机制没变，只是宿主换了。
  *
  * <p>服务端不校验"这个玩家该不该有编辑模式"：编辑的是他自己手上的卡，模式只是 UX 约定。
  */
 public record CardUiPacket(String mode, int task) implements CustomPacketPayload {
 
-	public static final String RECORD = "RECORD";
-	public static final String EDIT = "EDIT";
+	// 线上取值只有一处定义（`ArmProgram` 的模型常量）—— 这里只是别名，免得两边各写一个 "EDIT"
+	public static final String RECORD = ArmProgram.MODE_RECORD;
+	public static final String EDIT = ArmProgram.MODE_EDIT;
 
 	public static final CustomPacketPayload.Type<CardUiPacket> TYPE =
 		new CustomPacketPayload.Type<>(

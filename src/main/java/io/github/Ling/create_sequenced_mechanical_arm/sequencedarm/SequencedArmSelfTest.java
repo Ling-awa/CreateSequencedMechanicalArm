@@ -1619,8 +1619,23 @@ public class SequencedArmSelfTest {
 		CardProgramStorage.write(card, session, registries);
 		int clampedHigh = CardProgramStorage.read(card, registries).editorTask;
 
-		LOGGER.info("[selftest] 录入会话固化: 模式={} 任务={} 负数夹取={} 越界夹取={}", modeKept, taskKept, clampedLow,
-			clampedHigh);
+		// ③ 导入脚本这条路（`writeText`）**不碰**模式：导入一份别人的脚本不该把玩家的模式打回录入；
+		//    但"正在编辑的任务"要按**新程序**的任务数夹住（新脚本可能只有一个任务）。
+		//    §17.9 的回归就是死在这里没被测到 —— 这条断言是补上的那一半。
+		session.editorTask = 2;
+		ItemStack imported = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		CardProgramStorage.write(imported, session, registries);
+		ArmProgram shorter = new ArmProgram();
+		ArmProgramTask onlyTask = new ArmProgramTask();
+		onlyTask.name = "只有一个";
+		shorter.tasks.add(onlyTask);
+		CardProgramStorage.writeText(imported, ScriptCompiler.decompile(shorter, registries));
+		ArmProgram afterImport = CardProgramStorage.read(imported, registries);
+		boolean modeSurvivesImport = "EDIT".equals(afterImport.editorMode);
+		boolean taskClampedToImport = afterImport.editorTask == 0 && afterImport.tasks.size() == 1;
+
+		LOGGER.info("[selftest] 录入会话固化: 模式={} 任务={} 负数夹取={} 越界夹取={} 导入后模式保住={} 导入后任务夹到={}",
+			modeKept, taskKept, clampedLow, clampedHigh, modeSurvivesImport, afterImport.editorTask);
 		if (!modeKept || !taskKept)
 			LOGGER.error("[selftest] 录入会话状态没有固化到卡上！modeKept={} taskKept={}（换物品就会丢模式）", modeKept,
 				taskKept);
@@ -1628,6 +1643,9 @@ public class SequencedArmSelfTest {
 		if (clampedLow != 0 || clampedHigh != session.tasks.size() - 1)
 			LOGGER.error("[selftest] 越界任务下标没有被夹到合法范围：负数→{}（期望 0） 越界→{}（期望 {}，界面会索引越界）",
 				clampedLow, clampedHigh, session.tasks.size() - 1);
+		if (!modeSurvivesImport || !taskClampedToImport)
+			LOGGER.error("[selftest] 导入脚本把编辑状态弄坏了：模式保住={}（应为 true） 任务夹到={}（应为 0，新程序只有 1 个任务）",
+				modeSurvivesImport, afterImport.editorTask);
 	}
 
 	/**

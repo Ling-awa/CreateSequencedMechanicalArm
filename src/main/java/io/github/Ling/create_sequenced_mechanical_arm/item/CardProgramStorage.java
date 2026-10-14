@@ -35,6 +35,18 @@ public final class CardProgramStorage {
 	/** 唯一真相：`.sma` 文本。 */
 	private static final String KEY_TEXT = "ArmProgramText";
 
+	/**
+	 * 编辑器"视口"状态：模式（{@code RECORD}/{@code EDIT}）与正在编辑的任务下标（§17.9）。
+	 *
+	 * <p>**为什么与文本并排、而不写进文本**：这两个字段说的是"玩家怎么看这份程序"，不是程序本身。
+	 * 写进 `.sma` 的话，`/sma code import` 一份别人的脚本就会顺手改掉你的模式；反过来你在文本里手写
+	 * `mode=EDIT` 也毫无意义。§17 之前它们寄生在卡里的**程序 NBT** 上（{@code emode}/{@code etask}），
+	 * 换成文本存储后那里没位置了 —— 少了这一处，症状正是用户报的
+	 * "切换物品又回到录入模式 / 切完任务一录入就跳回任务一"。
+	 */
+	private static final String KEY_MODE = "ArmProgramMode";
+	private static final String KEY_TASK = "ArmProgramTaskIndex";
+
 	/** 旧键（编译结果）。**只用于检测与清理，绝不读取**。 */
 	private static final String KEY_LEGACY = "ArmProgram";
 
@@ -61,10 +73,69 @@ public final class CardProgramStorage {
 	/** 卡上的**原文**（导入进来的脚本会原样保留排版；GUI 保存过的则是规范形式）。 */
 	@Nullable
 	public static String readText(ItemStack stack) {
+		return textOf(rootTag(stack));
+	}
+
+	/** 文本 → 程序（编译一次），并把卡上的编辑状态装回去。空卡 / 编译不过 ⇒ 空程序。 */
+	public static ArmProgram read(ItemStack stack, HolderLookup.Provider registries) {
+		CompoundTag root = rootTag(stack);
+		ArmProgram program = ProgramText.fromText(textOf(root), registries);
+		if (program == null)
+			program = new ArmProgram();
+		// 编辑状态总是从卡上取（缺键 = 新卡 / 旧卡 ⇒ 默认录入模式 + 第 1 个任务），
+		// 且**必须在程序读完之后**夹下标（任务数才知道）
+		program.editorMode = root.contains(KEY_MODE) ? root.getString(KEY_MODE) : ArmProgram.MODE_RECORD;
+		program.editorTask = Math.max(0, root.getInt(KEY_TASK));
+		program.clampEditorTask();
+		return program;
+	}
+
+	/** 程序 → 文本 + 编辑状态 → 落盘。**失败时一个字节都不写**（不覆盖原有数据）。 */
+	public static StoreResult write(ItemStack stack, ArmProgram program, HolderLookup.Provider registries) {
+		String text = ProgramText.toText(program, registries);
+		if (text == null)
+			return StoreResult.NOT_ENCODABLE;
+		if (!ProgramText.withinLimit(text))
+			return StoreResult.TOO_LARGE;
+		CompoundTag root = rootForWrite(stack);
+		root.putString(KEY_TEXT, text);
+		root.putString(KEY_MODE, program.editorMode);
+		root.putInt(KEY_TASK, program.editorTask);
+		stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
+		return StoreResult.OK;
+	}
+
+	/**
+	 * 直接落盘一段文本（`/sma code import` 走这里：保住作者的排版与注释）。
+	 *
+	 * <p><b>刻意不动编辑状态</b>：导入一份脚本不该把玩家的模式打回录入。任务下标照旧留在卡上，
+	 * 读的时候会按**新程序**的任务数夹住（新脚本可能只有一个任务）。
+	 */
+	public static StoreResult writeText(ItemStack stack, String text) {
+		if (!ProgramText.withinLimit(text))
+			return StoreResult.TOO_LARGE;
+		CompoundTag root = rootForWrite(stack);
+		root.putString(KEY_TEXT, text);
+		stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
+		return StoreResult.OK;
+	}
+
+	/** 取一份可写的 CUSTOM_DATA 根标签（保留卡上别的东西，顺手清掉旧格式键）。 */
+	private static CompoundTag rootForWrite(ItemStack stack) {
+		CompoundTag root = rootTag(stack);
+		root.remove(KEY_LEGACY);
+		return root;
+	}
+
+	/** 卡上的 CUSTOM_DATA 根标签（没有就给一份空的；**调用方可以改**）。 */
+	private static CompoundTag rootTag(ItemStack stack) {
 		CustomData data = stack.get(DataComponents.CUSTOM_DATA);
-		if (data == null)
-			return null;
-		CompoundTag root = data.copyTag();
+		return data == null ? new CompoundTag() : data.copyTag();
+	}
+
+	/** 卡上的程序文本；没有（或只有旧格式）⇒ {@code null}。 */
+	@Nullable
+	private static String textOf(CompoundTag root) {
 		String text = root.getString(KEY_TEXT);
 		if (text.isEmpty()) {
 			if (root.contains(KEY_LEGACY))
@@ -74,34 +145,6 @@ public final class CardProgramStorage {
 		return text;
 	}
 
-	/** 文本 → 程序（编译一次）。文本缺失或编译不过 ⇒ 空程序（后者由 {@link ProgramText} 留 WARN）。 */
-	public static ArmProgram read(ItemStack stack, HolderLookup.Provider registries) {
-		ArmProgram program = ProgramText.fromText(readText(stack), registries);
-		return program == null ? new ArmProgram() : program;
-	}
-
-	/** 程序 → 文本 → 落盘。**失败时一个字节都不写**（不覆盖原有数据）。 */
-	public static StoreResult write(ItemStack stack, ArmProgram program, HolderLookup.Provider registries) {
-		String text = ProgramText.toText(program, registries);
-		if (text == null)
-			return StoreResult.NOT_ENCODABLE;
-		return writeText(stack, text);
-	}
-
-	/** 直接落盘一段文本（`/sma code import` 走这里：保住作者的排版与注释）。 */
-	public static StoreResult writeText(ItemStack stack, String text) {
-		if (!ProgramText.withinLimit(text))
-			return StoreResult.TOO_LARGE;
-		CompoundTag root = new CompoundTag();
-		CustomData existing = stack.get(DataComponents.CUSTOM_DATA);
-		if (existing != null)
-			root = existing.copyTag();
-		root.remove(KEY_LEGACY);
-		root.putString(KEY_TEXT, text);
-		stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
-		return StoreResult.OK;
-	}
-
 	public static void clear(ItemStack stack) {
 		CustomData existing = stack.get(DataComponents.CUSTOM_DATA);
 		if (existing == null)
@@ -109,6 +152,8 @@ public final class CardProgramStorage {
 		CompoundTag root = existing.copyTag();
 		root.remove(KEY_TEXT);
 		root.remove(KEY_LEGACY);
+		root.remove(KEY_MODE);
+		root.remove(KEY_TASK);
 		if (root.isEmpty())
 			stack.remove(DataComponents.CUSTOM_DATA);
 		else
