@@ -10,6 +10,8 @@
 
 **仓库**：<https://github.com/Ling-awa/CreateSmartMechanicalArm> —— 从 [Releases](https://github.com/Ling-awa/CreateSmartMechanicalArm/releases) 拿 jar，或按下面的「构建」自己产一个；问题与建议请提到 [Issues](https://github.com/Ling-awa/CreateSmartMechanicalArm/issues)。
 
+**还没做的功能与计划**：见 [`ROADMAP.md`](ROADMAP.md)（过滤操作、操作导入方块、相对/绝对坐标转化、从臂中复制操作、美术资源……细节仍在商榷）。
+
 ---
 
 ## 这是什么
