@@ -215,7 +215,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		clearTransmissions();
 		program.tasks.clear();
 		program.tasks.addAll(newProgram.tasks);
-		program.absolute = newProgram.absolute;
+		// 原点跟着一起走：插卡那条路已经把它重基成臂的位置（§19.2 第 1 条），
+		// 漏掉这一行会让臂内 origin 停在 (0,0,0) 而 offset 却是相对臂的 ⇒ 范围提示整体偏移一个臂位。
+		program.origin = newProgram.origin;
 		runtime.onProgramReplaced(this); // 任务数可能变了：槽位与频率缓存都要重来
 	}
 
@@ -1478,15 +1480,15 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 * ⇒ 复制出来的程序全部指错方向。上游的做法就是对存下来的偏移调 `transform.applyWithoutOffset(pos)`
 	 *（只取旋转/镜像、不含结构平移）。数学上正确：旋转是线性的，`R(目标) − R(臂) = R(目标 − 臂)`。
 	 *
-	 * <p>相对偏移之外的情况这里不用管：绝对条目在"插卡进臂"那一刻就被 {@code ProgramCoordinates.toRelative}
-	 * 换算成相对了，所以 BE 里的程序不含绝对条目（这一条由 {@link SequencedArmSelfTest} 顺带钉住）。
+	 * <p>相对偏移之外的情况这里不用管：P1「坐标模型统一」之后条目坐标只有一种语义（相对原点），
+	 * 而臂内的原点恒等于臂的位置（插卡时 {@code ProgramCoordinates.rebaseTo} 定的）。
 	 */
 	@Override
 	public void transform(BlockEntity be, StructureTransform transform) {
 		boolean changed = false;
 		for (ArmProgramTask task : program.tasks) {
 			for (ArmProgramEntry entry : task.entries) {
-				if (!entry.op.requiresTarget() || entry.absolute)
+				if (!entry.op.requiresTarget())
 					continue;
 				entry.offset = transform.applyWithoutOffset(entry.offset);
 				changed = true;
@@ -1566,7 +1568,7 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		if (!clientPacket) {
 			// ★ PLAN.md §17：盘上**只存文本**。编译结果（program 字段）只活在内存里，
 			// 写盘这一刻现生成一次脚本文本 —— 不缓存是为了"存下来的永远就是现在跑的那份"：
-			// `ProgramCoordinates.toRelative` / 命令都能在 setProgram 之后改模型，
+			// `ProgramCoordinates.rebaseTo` / 命令都能在 setProgram 之后改模型，
 			// 缓存文本迟早会与程序对不上（那种不一致只在重进世界时才现形）。
 			tag.putString("ProgramText", programTextForSave(registries));
 			tag.put("Runtime", runtime.save());
@@ -1653,10 +1655,12 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			}
 			ArmProgram loaded = ProgramText.fromText(text, registries);
 			program.tasks.clear();
-			program.absolute = false;
+			// 端点：臂内**恒有** origin == 臂的位置（§19.2 第 1 条）。臂本体盘上只存文本，
+			// 文本头里的 origin 是**卡上**那个参考点；进臂后它就等于臂自己 ⇒ 这里显式重置，
+			// 免得载入一份"原点在别处"的文本后，范围提示按错误的世界位置算。
+			program.origin = worldPosition;
 			if (loaded != null) {
 				program.tasks.addAll(loaded.tasks);
-				program.absolute = loaded.absolute;
 				runtime.load(tag.getCompound("Runtime"));
 			} else {
 				// 没有程序 / 文本编译不过：运行时状态必须跟着回到起点。

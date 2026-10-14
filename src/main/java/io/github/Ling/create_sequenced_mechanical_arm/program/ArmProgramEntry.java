@@ -18,7 +18,7 @@ import net.minecraft.world.item.ItemStack;
 /**
  * 操作表里的一条操作（PLAN.md §4.1 的 Entry）。
  *
- * <p>NBT 键刻意短（这是会被反复存读的结构）：{@code op/off/abs/delay/wt/to/tunit/timeout/onok/
+ * <p>NBT 键刻意短（这是会被反复存读的结构）：{@code op/off/delay/wt/to/tunit/timeout/onok/
  * okt/tot/note/count/waitt/wunit/redpow/urep/uamt}。
  *
  * <p><b>§7.7 v2 的成败语义（用户定的）</b>：一条操作只有两个出口 —— <b>成功</b>与<b>超时</b>。
@@ -30,9 +30,15 @@ import net.minecraft.world.item.ItemStack;
 public class ArmProgramEntry {
 
 	public OperationType op = OperationType.TAKE;
-	/** 目标位置；{@code absolute=false} 时相对手臂方块。臂内部优先用相对坐标（对齐原版交互点）。 */
+	/**
+	 * 目标位置：<b>相对程序原点</b>（{@link ArmProgram#origin}）的偏移。
+	 *
+	 * <p>P1「坐标模型统一」之前这里还有 {@code absolute} 字段（真 = 世界绝对坐标）—— 已删除：
+	 * 一份程序只有一个原点，条目的空间语义不再有第二种写法。插进臂时
+	 * {@code ProgramCoordinates.rebaseTo} 把原点改写成臂的位置，于是臂里这份的
+	 * {@code origin} 恒等于臂方块自身位置，与上游 {@code ArmInteractionPoint.serialize(anchor)} 一致。
+	 */
 	public BlockPos offset = BlockPos.ZERO;
-	public boolean absolute;
 
 	/** 前摇等待（ticks）。 */
 	public int delay;
@@ -306,7 +312,6 @@ public class ArmProgramEntry {
 		CompoundTag tag = new CompoundTag();
 		tag.putString("op", op.name());
 		tag.put("off", NbtUtils.writeBlockPos(offset));
-		tag.putBoolean("abs", absolute);
 		tag.putInt("delay", delay);
 		tag.putString("face", face.getName());
 		tag.putInt("to", failAmount);
@@ -340,7 +345,6 @@ public class ArmProgramEntry {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = OperationType.byName(tag.getString("op"), OperationType.TAKE);
 		entry.offset = NBTHelper.readBlockPos(tag, "off");
-		entry.absolute = tag.getBoolean("abs");
 		entry.delay = Math.max(0, tag.getInt("delay"));
 		Direction parsedFace = Direction.byName(tag.getString("face"));
 		entry.face = parsedFace == null ? Direction.UP : parsedFace;
@@ -425,7 +429,6 @@ public class ArmProgramEntry {
 		StringBuilder sb = new StringBuilder(op.name());
 		if (op.requiresTarget())
 			sb.append(' ')
-				.append(absolute ? "abs" : "rel")
 				.append(offset.toShortString());
 		if (delay > 0)
 			sb.append(" delay=")

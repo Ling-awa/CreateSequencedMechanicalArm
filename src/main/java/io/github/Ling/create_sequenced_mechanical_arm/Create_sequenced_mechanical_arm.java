@@ -43,7 +43,6 @@ public class Create_sequenced_mechanical_arm {
             .displayItems((parameters, output) -> {
                 output.accept(SequencedArmRegistration.SEQUENCED_ARM_ITEM.get());
                 output.accept(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
-                output.accept(SequencedArmRegistration.OPERATION_TABLE_ABSOLUTE.get());
             })
             .build());
 

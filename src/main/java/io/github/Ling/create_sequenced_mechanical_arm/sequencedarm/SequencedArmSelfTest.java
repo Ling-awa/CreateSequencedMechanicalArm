@@ -48,6 +48,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
+import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptParser;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptResult;
 
 import net.minecraft.core.BlockPos;
@@ -372,7 +373,6 @@ public class SequencedArmSelfTest {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = OperationType.SIGNAL;
 		entry.offset = new BlockPos(1234567, 255, -1234567);
-		entry.absolute = true;
 		entry.delay = 12000;
 		entry.face = Direction.NORTH;
 		entry.failAmount = 120;
@@ -479,7 +479,12 @@ public class SequencedArmSelfTest {
 		boolean armCompileOnLoad = false;
 		boolean armLegacyDropped = false;
 		try {
-			CompoundTag tag = armTagWith(level, armPos, program, registries);
+			// 臂内的程序**恒以臂的位置为原点**（§19.2 第 1 条），所以夹具也得是这个形态 ——
+			// 否则比的是"卡上原点的程序"，而臂读回来时会把原点重置成自己（这是对的：蓝图旋转/搬家后
+			// 文本头里的旧原点会过期）。第一版忘了这一点，于是两边文本头不同，这条断言假红。
+			ArmProgram forArm = DevPresets.mainWithSubTasks();
+			forArm.origin = armPos;
+			CompoundTag tag = armTagWith(level, armPos, forArm, registries);
 			armIsText = tag != null && tag.contains("ProgramText", Tag.TAG_STRING) && !tag.contains("Program");
 			if (tag != null) {
 				SequencedArmBlockEntity fresh = freshArm(level, armPos);
@@ -488,11 +493,11 @@ public class SequencedArmSelfTest {
 					armCompileOnLoad = !fresh.getProgram()
 						.isEmpty()
 						&& ScriptCompiler.decompile(fresh.getProgram(), registries)
-							.equals(ScriptCompiler.decompile(program, registries));
+							.equals(ScriptCompiler.decompile(forArm, registries));
 					// 旧字段：去掉文本、把编译结果塞回去 ⇒ 必须当空程序（用户选的"不兼容"，§17.3）
 					CompoundTag legacyTag = tag.copy();
 					legacyTag.remove("ProgramText");
-					legacyTag.put("Program", program.save(registries));
+					legacyTag.put("Program", forArm.save(registries));
 					fresh.read(legacyTag, registries, false);
 					armLegacyDropped = fresh.getProgram()
 						.isEmpty();
@@ -2518,12 +2523,17 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 卡片与坐标语义的自检（阶段 3a 的核心不变量）：
-	 * ① 程序写进物品再读回来必须无损；② 绝对条目在插入时必须按臂的位置转成相对。
+	 * 卡片与坐标语义的自检（P1「坐标模型统一」，PLAN.md §19）：
+	 * ① 程序写进物品再读回来必须无损（含<b>原点</b>）；
+	 * ② {@link ProgramCoordinates#rebaseTo} 换原点后，每一条的<b>世界位置逐条不变</b>；
+	 * ③ 插卡进臂之后臂内原点 == 臂的位置，且目标的世界位置与插卡前一致。
 	 *
-	 * <p>这两条都是"编译通过但可能静默错"的东西 —— 坐标算错只会让臂搬错地方，不会报任何错。
+	 * <p>这三条都是"编译通过但可能静默错"的东西 —— 坐标算错只会让臂搬错地方，不会报任何错。
+	 * 所以断言全部按**世界位置**比（世界位置 = {@code origin + offset}）：只比 offset 的话，
+	 * 把 {@code delta} 的符号写反、或者忘了同步 origin，都能"看起来绿"。
 	 */
 	private static void checkCardAndCoordinates(MinecraftServer server) {
+		ServerLevel level = server.overworld();
 		HolderLookup.Provider registries = server.registryAccess();
 
 		ArmProgram source = DevPresets.depotAB();
@@ -2537,32 +2547,112 @@ public class SequencedArmSelfTest {
 		if (!stored || !lossless)
 			LOGGER.error("[selftest] 卡片 NBT 往返失败！stored={} lossless={}", stored, lossless);
 
-		// 绝对 → 相对：把预设的偏移当作"世界绝对坐标"，转换后应当回到原始的相对偏移
-		ArmProgram absolute = DevPresets.depotAB();
-		BlockPos armPos = new BlockPos(120, 70, -300);
-		int marked = 0;
-		for (ArmProgramTask task : absolute.tasks) {
+		// ——— ①② 重基：世界位置逐条不变 ———
+		ArmProgram program = DevPresets.depotAB();
+		BlockPos oldOrigin = new BlockPos(120, 70, -300);
+		program.origin = oldOrigin; // 装作"录的时候以 (120,70,-300) 为参考点"
+		List<BlockPos> targets = new ArrayList<>();
+		List<BlockPos> untargetedOffsets = new ArrayList<>();
+		int targetEntries = 0;
+		for (ArmProgramTask task : program.tasks) {
 			for (ArmProgramEntry entry : task.entries) {
-				if (!entry.op.requiresTarget())
-					continue;
-				entry.offset = entry.offset.offset(armPos);
-				entry.absolute = true;
-				marked++;
+				if (entry.op.requiresTarget()) {
+					// 世界目标 = 原点 + 偏移（**一条断言引用的同一个公式**，见 §0.5）
+					targets.add(oldOrigin.offset(entry.offset));
+					targetEntries++;
+				} else {
+					// 不碰目标的操作没有位置语义 ⇒ 重基**不该**动它们的 offset
+					untargetedOffsets.add(entry.offset);
+				}
 			}
 		}
-		int converted = ProgramCoordinates.toRelative(absolute, armPos);
-		boolean clean = true;
-		for (ArmProgramTask task : absolute.tasks)
+
+		BlockPos newOrigin = new BlockPos(-40, 12, 77);
+		int rebased = ProgramCoordinates.rebaseTo(program, newOrigin);
+		boolean originMoved = program.origin.equals(newOrigin);
+		boolean worldKept = true;
+		int index = 0;
+		for (ArmProgramTask task : program.tasks)
 			for (ArmProgramEntry entry : task.entries)
-				if (entry.absolute)
-					clean = false;
-		ArmProgramTask first = absolute.tasks.get(0);
-		boolean offsetRestored = first.entries.get(0).offset.equals(new BlockPos(2, 0, 0));
-		LOGGER.info("[selftest] 坐标转换: 标记绝对={} 转换={} 首条偏移复原={} 无残留绝对={}", marked, converted, offsetRestored,
-			clean);
-		if (marked != converted || !offsetRestored || !clean)
-			LOGGER.error("[selftest] 坐标转换不变量失败：marked={} converted={} offsetRestored={} clean={}", marked,
-				converted, offsetRestored, clean);
+				if (entry.op.requiresTarget() && !newOrigin.offset(entry.offset)
+					.equals(targets.get(index++)))
+					worldKept = false;
+		boolean untouchedKept = true;
+		int plain = 0;
+		for (ArmProgramTask task : program.tasks)
+			for (ArmProgramEntry entry : task.entries)
+				if (!entry.op.requiresTarget() && !entry.offset.equals(untargetedOffsets.get(plain++)))
+					untouchedKept = false;
+		// 原点本来就等于 newOrigin 时必须是"什么都没动"（delta 为 0 —— 符号写反时这一条不会红，
+		// 但上面那条 worldKept 会红；两条一起才能同时钉住"方向"与"空操作"）
+		int sameOriginRebased = ProgramCoordinates.rebaseTo(program, newOrigin);
+
+		LOGGER.info("[selftest] 坐标重基: 目标条目={} 实测平移={} 原点已改={} 世界位置不变={} "
+			+ "不碰目标的条目未动={} 原点相同时零改动={}", targetEntries, rebased, originMoved, worldKept, untouchedKept,
+			sameOriginRebased == 0);
+		if (targetEntries == 0)
+			LOGGER.error("[selftest] 夹具里没有一条需要目标的操作 —— 这条断言等于没测");
+		if (rebased != targetEntries || !originMoved || !worldKept || !untouchedKept)
+			LOGGER.error("[selftest] 重基坏了：targetEntries={} rebased={} originMoved={} worldKept={} untouchedKept={}",
+				targetEntries, rebased, originMoved, worldKept, untouchedKept);
+		if (sameOriginRebased != 0)
+			LOGGER.error("[selftest] 原点没变却平移了 {} 条（重基不是幂等空操作）", sameOriginRebased);
+
+		// ——— ③ 插卡进臂：臂内原点 == 臂的位置，且目标的世界位置不变 ———
+		BlockPos armPos = new BlockPos(120, 70, -300);
+		SequencedArmBlockEntity arm = freshArm(level, armPos);
+		ItemStack loadable = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		boolean cardInserted = false;
+		boolean originIsArm = false;
+		boolean armTargetsKept = false;
+		if (arm == null) {
+			LOGGER.warn("[selftest] 插卡自检跳过：({},{},{}) 上没建出臂方块实体", armPos.getX(), armPos.getY(),
+				armPos.getZ());
+		} else {
+			// 卡上的程序以"世界原点"为参考点（= 条目 offset 就是世界坐标）；插进臂之后
+			// 臂内的 offset 应该变成"相对臂的位置"，而 `origin + offset` 仍是同一个世界位置。
+			ArmProgram onCard = DevPresets.depotAB();
+			onCard.origin = BlockPos.ZERO;
+			CardProgramStorage.write(loadable, onCard, registries);
+			BlockPos worldBeforeInsert = null;
+			for (ArmProgramTask task : onCard.tasks)
+				for (ArmProgramEntry entry : task.entries)
+					if (worldBeforeInsert == null && entry.op.requiresTarget())
+						worldBeforeInsert = onCard.origin.offset(entry.offset);
+
+			ServerPlayer probe = fakePlayer(level);
+			cardInserted = probe != null
+				&& SequencedArmBlock.loadProgramFromCard(arm, loadable, probe, level) != null
+				&& !arm.getProgram()
+					.isEmpty();
+			ArmProgram inArm = arm.getProgram();
+			originIsArm = inArm.origin.equals(armPos);
+			BlockPos worldAfterInsert = null;
+			for (ArmProgramTask task : inArm.tasks)
+				for (ArmProgramEntry entry : task.entries)
+					if (worldAfterInsert == null && entry.op.requiresTarget())
+						worldAfterInsert = inArm.origin.offset(entry.offset);
+			armTargetsKept = worldBeforeInsert != null && worldBeforeInsert.equals(worldAfterInsert)
+				&& !targets.isEmpty();
+			level.setBlockAndUpdate(armPos, Blocks.AIR.defaultBlockState());
+		}
+
+		LOGGER.info("[selftest] 插卡重基: 插卡成功={} 臂内原点==臂的位置={} 目标世界位置不变={}", cardInserted, originIsArm,
+			armTargetsKept);
+		if (!cardInserted || !originIsArm || !armTargetsKept)
+			LOGGER.error("[selftest] 插卡没有把程序重基到臂的位置：cardInserted={} originIsArm={} armTargetsKept={}",
+				cardInserted, originIsArm, armTargetsKept);
+	}
+
+	/** 假玩家（自检里点界面的那些路径共用）；不可用时返回 null 并说一声，不把自检判红。 */
+	@Nullable
+	private static ServerPlayer fakePlayer(ServerLevel level) {
+		try {
+			return FakePlayerFactory.getMinecraft(level);
+		} catch (Throwable unavailable) {
+			LOGGER.warn("[selftest] 假玩家不可用（{}）", unavailable.toString());
+			return null;
+		}
 	}
 
 	/**
@@ -2591,6 +2681,8 @@ public class SequencedArmSelfTest {
 
 		// ① 正常保存：改动必须落到卡上，且往返无损
 		ArmProgram edited = DevPresets.mainWithSubTasks();
+		// 原点写一个非零值：不然下面那条"原点活过了落盘往返"是**永远为真**的断言（§0.5）
+		edited.origin = new BlockPos(30, 66, -12);
 		edited.tasks.get(0).entries.get(0).delay = 37;
 		edited.tasks.get(0).loopCount = 7;
 		edited.tasks.get(0).loop = ArmProgramTask.LoopType.COUNT;
@@ -2609,7 +2701,9 @@ public class SequencedArmSelfTest {
 			&& saved.tasks.get(0).loopCount == 7 && saved.tasks.get(0).loop == ArmProgramTask.LoopType.COUNT;
 		boolean lossless = saved.save(registries)
 			.equals(edited.save(registries));
-		boolean formFlag = !saved.absolute; // 相对形态的卡 → 程序自称相对
+		// P1（§19）：`program.absolute` 那个"坐标空间"标记已删；这里改钉**原点**能过落盘往返
+		// （编辑器保存走 NBT → 文本 → 再编译，原点要在这一圈里活下来）
+		boolean formFlag = saved.origin.equals(edited.origin);
 
 		// ② 超限必须整份拒绝，且不能把原来那张卡改坏
 		ArmProgram tooBig = new ArmProgram();
@@ -3944,26 +4038,26 @@ public class SequencedArmSelfTest {
 		// ⑤ 编译期必须报错的那些（§12.3 的净收益）：每条都要报在**写那一行**上
 		String overLongNote = "x".repeat(ArmProgramEntry.NOTE_MAX + 1);
 		boolean overLongReported = reportsAt(registries,
-			"task main\n  take @rel 0 0 0 /*" + overLongNote + "*/\n", 2, "128");
+			"task main\n  take 0 0 0 /*" + overLongNote + "*/\n", 2, "128");
 		boolean unknownTaskReported = reportsAt(registries,
 			"task main\n  call 不存在的任务\n", 2, "unknown task") && reportsAt(registries,
-				"task main\n  take @rel 0 0 0 fail=goto 不存在的任务\n", 2, "unknown task");
+				"task main\n  take 0 0 0 fail=goto 不存在的任务\n", 2, "unknown task");
 		// 未知任务名要**列出已知任务名**（用户点名要的：{@code unknown task: cook_wok} + 已知清单）
 		ScriptResult<ArmProgram> unknownTask = ScriptCompiler.compile("task main\n  call 没有这个\n", registries);
 		boolean knownListed = !unknownTask.hasErrors() || unknownTask.errors()
 			.stream()
 			.anyMatch(error -> error.message()
 				.contains("main"));
-		boolean unknownItemReported = reportsAt(registries, "task main\n  take @rel 0 0 0 icon=notamod:no_such_item\n", 2,
+		boolean unknownItemReported = reportsAt(registries, "task main\n  take 0 0 0 icon=notamod:no_such_item\n", 2,
 			"未知物品");
-		boolean badCountReported = reportsAt(registries, "task main\n  take @rel 0 0 0 count=65\n", 2, "count");
-		boolean badCoordReported = reportsAt(registries, "task main\n  take @rel 0 0 999999999\n", 2, "坐标");
-		boolean badOpReported = reportsAt(registries, "task main\n  teleport @rel 0 0 0\n", 2, "未知操作");
+		boolean badCountReported = reportsAt(registries, "task main\n  take 0 0 0 count=65\n", 2, "count");
+		boolean badCoordReported = reportsAt(registries, "task main\n  take 0 0 999999999\n", 2, "坐标");
+		boolean badOpReported = reportsAt(registries, "task main\n  teleport 0 0 0\n", 2, "未知操作");
 		boolean badModeReported = reportsAt(registries, "task main\n  signal recv_x on freq=iron_ingot\n", 2, "信号模式");
 		boolean missingFreqReported = reportsAt(registries, "task main\n  signal recv on\n", 2, "频率");
 		// ⚠️ `/*` 在**引号外**才算注释开头（§12.3a 细则 2），所以这里必须用真的注释、
 		// 而不是 "引号里带 /* 的字符串"：后者正是那条细则要保护的写法。
-		boolean unclosedCommentReported = reportsAt(registries, "task main\n  take @rel 0 0 0 /* 没闭合\n", 2, "没有闭合");
+		boolean unclosedCommentReported = reportsAt(registries, "task main\n  take 0 0 0 /* 没闭合\n", 2, "没有闭合");
 		LOGGER.info(
 			"[selftest] 脚本编译期错误: 超长备注={} 未知任务={} 已知任务名列出={} 未知物品={} 个数越界={} 坐标越界={} 未知操作={} 未知模式={} 缺频率={} 注释未闭合={}",
 			overLongReported, unknownTaskReported, knownListed, unknownItemReported, badCountReported, badCoordReported,
@@ -4061,50 +4155,55 @@ public class SequencedArmSelfTest {
 		if (!noteCostSane)
 			problems.add("备注没有进入脚本（预算讨论无从谈起）");
 
-		// ⑧ 程序头（§12.3 末尾，主代理 87①）：文本首行的坐标空间就是 ArmProgram.absolute。
-		//    反编译器**永远写**；编译器缺省按 rel；导入时与手持卡形态不符是命令层的硬错（游戏内人工确认）。
-		//    注意（假红修掉）：原来这里复用上面那个 `budgetTask`，而它**一条条目都没有** ⇒
-		//    `anyMatch(entry -> entry.absolute)` 必然 false —— 一条永远红的断言等于没测。
-		ArmProgram absProgram = new ArmProgram();
-		absProgram.absolute = true;
-		ArmProgramTask absTask = new ArmProgramTask();
-		absTask.name = "绝对";
-		ArmProgramEntry absEntry = new ArmProgramEntry();
-		absEntry.op = OperationType.TAKE;
-		absEntry.absolute = true;
-		absEntry.offset = new BlockPos(10, 64, -3);
-		absTask.entries.add(absEntry);
-		absProgram.tasks.add(absTask);
-		String absText = ScriptCompiler.decompile(absProgram, registries);
-		ScriptResult<ArmProgram> absBack = ScriptCompiler.compile(absText, registries);
-		boolean headerAlwaysWritten = absText.startsWith("@abs\n") && itemText.startsWith("@rel\n");
-		boolean headerRoundTrip = !absBack.hasErrors() && absBack.value().absolute;
-		boolean headerAbsKept = absBack.value().tasks.stream()
-			.flatMap(task -> task.entries.stream())
-			.anyMatch(entry -> entry.absolute);
-		//    缺省（不写程序头）= rel：老的手写文本与老导出文件都吃得下
-		ScriptResult<ArmProgram> noHeader = ScriptCompiler.compile("task main\n  take @rel 0 0 0\n", registries);
-		boolean headerDefaultsRel = !noHeader.hasErrors() && !noHeader.value().absolute;
-		boolean headerAfterTaskReported = reportsAt(registries, "task main\n  @abs\n", 2, "第一行");
-		boolean doubleHeaderReported = reportsAt(registries, "@rel\n@abs\ntask main\n  take @rel 0 0 0\n", 2, "只能有一行");
-		boolean headerExtraReported = reportsAt(registries, "@abs 1 2 3\ntask main\n  take @rel 0 0 0\n", 1, "后面不能再有");
-		LOGGER.info("[selftest] 脚本程序头: 反编译永远写={} @abs往返={} 条目绝对性保留={} 缺省=rel={} 晚写报错={} 重复报错={} 多余记号报错={}",
-			headerAlwaysWritten, headerRoundTrip, headerAbsKept, headerDefaultsRel, headerAfterTaskReported,
-			doubleHeaderReported, headerExtraReported);
+		// ⑧ 程序头（§19.2 第 2 条）：文本首行的 `@origin x y z` 就是 ArmProgram.origin。
+		//    反编译器**永远写**；编译器缺省 (0,0,0)；写晚了 / 写两遍 / 少坐标都报错。
+		//    ⚠️ 反证要点（§0.5）：断言必须能让"反编译器漏写原点"和"编译器不读原点"这两件事**分别**变红，
+		//    所以这里比的是**逐条世界位置**（origin + offset），不是只比那一个字段。
+		ArmProgram movedProgram = new ArmProgram();
+		movedProgram.origin = new BlockPos(10, 64, -3);
+		ArmProgramTask movedTask = new ArmProgramTask();
+		movedTask.name = "原点在别处";
+		ArmProgramEntry movedEntry = new ArmProgramEntry();
+		movedEntry.op = OperationType.TAKE;
+		movedEntry.offset = new BlockPos(-7, 2, 5);
+		movedTask.entries.add(movedEntry);
+		movedProgram.tasks.add(movedTask);
+		String movedText = ScriptCompiler.decompile(movedProgram, registries);
+		ScriptResult<ArmProgram> movedBack = ScriptCompiler.compile(movedText, registries);
+		boolean headerAlwaysWritten =
+			movedText.startsWith("@origin 10 64 -3\n") && itemText.startsWith("@origin 0 0 0\n");
+		boolean headerRoundTrip = false;
+		if (!movedBack.hasErrors() && !movedBack.value().tasks.isEmpty()
+			&& !movedBack.value().tasks.get(0).entries.isEmpty()) {
+			ArmProgram back = movedBack.value();
+			ArmProgramEntry backEntry = back.tasks.get(0).entries.get(0);
+			// 逐条世界位置：origin 或 offset 有一个读丢了/读错了，这一条就红
+			headerRoundTrip = back.origin.equals(movedProgram.origin) && backEntry.offset.equals(movedEntry.offset)
+				&& back.origin.offset(backEntry.offset)
+					.equals(movedProgram.origin.offset(movedEntry.offset));
+		}
+		//    缺省（不写程序头）= (0,0,0)：老脚本（除 `@abs` 记号外）与手写文本都吃得下
+		ScriptResult<ArmProgram> noHeader = ScriptCompiler.compile("task main\n  take 0 0 0\n", registries);
+		boolean headerDefaultsZero = !noHeader.hasErrors() && noHeader.value().origin.equals(BlockPos.ZERO);
+		boolean headerAfterTaskReported = reportsAt(registries, "task main\n  @origin 0 0 0\n", 2, "第一行");
+		boolean doubleHeaderReported =
+			reportsAt(registries, "@origin 0 0 0\n@origin 1 1 1\ntask main\n  take 0 0 0\n", 2, "只能有一行");
+		boolean headerIncompleteReported = reportsAt(registries, "@origin 10\ntask main\n  take 0 0 0\n", 1, "三个整数");
+		LOGGER.info("[selftest] 脚本程序头: 反编译永远写={} @origin往返={} 缺省=(0,0,0)={} 晚写报错={} 重复报错={} "
+			+ "坐标不全报错={}", headerAlwaysWritten, headerRoundTrip, headerDefaultsZero, headerAfterTaskReported,
+			doubleHeaderReported, headerIncompleteReported);
 		if (!headerAlwaysWritten)
-			problems.add("反编译器没有永远写出程序头 @abs/@rel（导出再导入会把坐标空间静默改掉）");
+			problems.add("反编译器没有永远写出程序头 @origin x y z（导出再导入坐标会整体平移）");
 		if (!headerRoundTrip)
-			problems.add("@abs 程序头过不了往返（绝对坐标表会被读成相对）");
-		if (!headerAbsKept)
-			problems.add("绝对程序里的条目绝对性丢了");
-		if (!headerDefaultsRel)
-			problems.add("不写程序头时没有缺省成 rel");
+			problems.add("@origin 程序头过不了往返（原点的世界位置变了）");
+		if (!headerDefaultsZero)
+			problems.add("不写程序头时没有缺省成 (0,0,0)");
 		if (!headerAfterTaskReported)
 			problems.add("程序头写在 task 之后没有报错");
 		if (!doubleHeaderReported)
 			problems.add("程序头写了两行没有报错");
-		if (!headerExtraReported)
-			problems.add("程序头后面跟了别的东西没有报错");
+		if (!headerIncompleteReported)
+			problems.add("程序头缺坐标没有报错");
 
 		// ⑨ §12.3a 第 6 条：同一个归属对象上的两块注释**合并**成一个备注（换行连接），不报错
 		ScriptResult<ArmProgram> merged = ScriptCompiler.compile(SCRIPT_MERGED_NOTE_SAMPLE, registries);
@@ -4132,7 +4231,7 @@ public class SequencedArmSelfTest {
 
 		// ⑨b 写在条目**上面**的注释归**上一条**（§12.3a 唯一那条规则：归"上面最近的那个拥有备注的东西"）
 		ScriptResult<ArmProgram> leading = ScriptCompiler.compile(
-			"task main\n  take @rel 0 0 0\n  /* 上面那句的说明 */\n  take @rel 1 0 0\n", registries);
+			"task main\n  take 0 0 0\n  /* 上面那句的说明 */\n  take 1 0 0\n", registries);
 		ArmProgramTask leadingTask = leading.hasErrors() || leading.value().tasks.isEmpty() ? null
 			: leading.value().tasks.get(0);
 		boolean leadingHasTwo = leadingTask != null && leadingTask.entries.size() > 1;
@@ -4146,8 +4245,8 @@ public class SequencedArmSelfTest {
 				+ showNote(leadingSecond) + " ]");
 
 		// ⑩ §12.3 末尾（主代理 87③）：`unload amount=` 必填，反编译器永远写
-		boolean unloadAmountRequired = reportsAt(registries, "task main\n  unload @rel 0 0 2 repeat=once\n", 2, "amount");
-		ScriptResult<ArmProgram> oneStack = ScriptCompiler.compile("task main\n  unload @rel 0 0 2 amount=one_stack\n",
+		boolean unloadAmountRequired = reportsAt(registries, "task main\n  unload 0 0 2 repeat=once\n", 2, "amount");
+		ScriptResult<ArmProgram> oneStack = ScriptCompiler.compile("task main\n  unload 0 0 2 amount=one_stack\n",
 			registries);
 		boolean oneStackRoundTrip = !oneStack.hasErrors()
 			&& ScriptCompiler.decompile(oneStack.value(), registries)
@@ -4190,8 +4289,8 @@ public class SequencedArmSelfTest {
 	private static String scriptDifference(ArmProgram a, ArmProgram b) {
 		if (a.tasks.size() != b.tasks.size())
 			return "任务数 " + a.tasks.size() + " → " + b.tasks.size();
-		if (a.absolute != b.absolute)
-			return "程序坐标形态变了";
+		if (!a.origin.equals(b.origin))
+			return "程序原点变了：" + a.origin.toShortString() + " → " + b.origin.toShortString();
 		if (!a.editorMode.equals(b.editorMode))
 			return "编辑模式变了：" + a.editorMode + " → " + b.editorMode;
 		if (a.editorTask != b.editorTask)
@@ -4229,8 +4328,6 @@ public class SequencedArmSelfTest {
 			return where + "操作变了：" + a.op + " → " + b.op;
 		if (!a.offset.equals(b.offset))
 			return where + "坐标变了：" + a.offset.toShortString() + " → " + b.offset.toShortString();
-		if (a.absolute != b.absolute)
-			return where + "绝对/相对变了";
 		if (a.delay != b.delay)
 			return where + "delay 变了：" + a.delay + " → " + b.delay;
 		if (a.face != b.face)
@@ -4317,12 +4414,12 @@ public class SequencedArmSelfTest {
 
 	/**
 	 * 一行里既有条目又有注释（真实情况），所以取**内容那一段**：截到第一个 `/*` 为止。
-	 * 程序头（{@code @abs}/{@code @rel}）从 C 阶段起永远是文本第一行（主代理 87①），
+	 * 程序头（{@code @origin x y z}）永远是文本第一行（§19.2 第 2 条），
 	 * 所以这里**先跳过它**，返回值才是"这条条目长什么样"。
 	 */
 	private static String firstLine(String text) {
 		String rest = text;
-		if (rest.startsWith("@abs") || rest.startsWith("@rel")) {
+		if (rest.startsWith(ScriptParser.HEADER)) {
 			int headerEnd = rest.indexOf('\n');
 			rest = headerEnd < 0 ? "" : rest.substring(headerEnd + 1);
 		}
@@ -4354,14 +4451,14 @@ public class SequencedArmSelfTest {
 		Map<String, String> corpus = new LinkedHashMap<>();
 		corpus.put("全部操作", """
 			task 主任务 loop=count loopN=3
-			  take      @rel 1 0 0 count=3 delay=10
-			  deposit   @rel 0 0 2
-			  unload    @rel 0 0 2 repeat=until_empty amount=max
-			  deploy    @rel 2 0 0 face=up
-			  attack    @abs 10 64 -3 face=north
-			  mine      @abs 10 64 -3 face=down
-			  use       @abs 10 64 -3 face=east
-			  use_sneak @abs 10 64 -3 face=west
+			  take      1 0 0 count=3 delay=10
+			  deposit   0 0 2
+			  unload    0 0 2 repeat=until_empty amount=max
+			  deploy    2 0 0 face=up
+			  attack    10 64 -3 face=north
+			  mine      10 64 -3 face=down
+			  use       10 64 -3 face=east
+			  use_sneak 10 64 -3 face=west
 			  wait      5s
 			  wait_redstone on
 			  signal    recv on freq=iron_ingot + copper_ingot
@@ -4380,51 +4477,52 @@ public class SequencedArmSelfTest {
 			task main
 			  wait 100t
 			  wait 2m
-			  take @rel 0 0 0 timeout=5s fail=skip
-			  take @rel 0 0 0 timeout=3t fail=stop
+			  take 0 0 0 timeout=5s fail=skip
+			  take 0 0 0 timeout=3t fail=stop
 			""");
 		corpus.put("跳转落点两种", """
 			task main
-			  take @rel 0 0 0 ok=goto 收尾 fail=goto 2
-			  take @rel 0 0 0
+			  take 0 0 0 ok=goto 收尾 fail=goto 2
+			  take 0 0 0
 			task 收尾
 			  break
 			""");
 		corpus.put("多行备注", """
 			task main
-			  take @rel 0 0 0 /*第一行
+			  take 0 0 0 /*第一行
 			第二行
 			  第三行有缩进*/
 			""");
-		corpus.put("含终止符的备注", "task main\n  take @rel 0 0 0 note=\"带 */ 的备注\\n第二行\"\n");
+		corpus.put("含终止符的备注", "task main\n  take 0 0 0 note=\"带 */ 的备注\\n第二行\"\n");
 		corpus.put("任务行尾 + 条目紧跟", """
 			task main /* 任务备注 */
-			  take @rel 0 0 0
+			  take 0 0 0
 			  /* 紧跟着上一条 */
 			""");
 		// §12.3a 第 6 条（主代理 87②）：行尾一块 + 紧跟的独占行一块 ⇒ **合并**成一个备注，不报错
 		corpus.put("两块注释合并", """
 			task main
-			  take @rel 0 0 0 /* 行尾一句 */
+			  take 0 0 0 /* 行尾一句 */
 			  /* 紧接着再补一句 */
 			""");
 		// §12.3a 第 7 条：`task` 行之后、第一条条目之前的独占注释 ⇒ 归**这个任务**
 		corpus.put("task 行后的注释归任务", """
 			task main
 			  /* 这是任务说明 */
-			  take @rel 0 0 0
+			  take 0 0 0
 			""");
-		// §12.3 末尾（主代理 87①）：程序头就是坐标空间，`@abs` 这份走的是另一条分支
-		corpus.put("绝对坐标表", """
-			@abs
+		// §19.2 第 2 条：程序头就是原点。这份语料同时盖住"非零原点"这条解析分支
+		// （其它语料都不写程序头 ⇒ 走缺省 (0,0,0) 那条）
+		corpus.put("非零原点的程序", """
+			@origin 100 64 -300
 			task main
-			  take @abs 10 64 -3
-			  deposit @abs 12 64 -3
+			  take 110 64 -303
+			  deposit 112 64 -303
 			""");
 		corpus.put("完整 SNBT 物品", """
 			task main
-			  take @rel 0 0 0 icon={id:"minecraft:black_banner",count:1,components:{"minecraft:base_color":"black"}}
-			  take @rel 0 0 0 icon=minecraft:leather_helmet#C41E3A
+			  take 0 0 0 icon={id:"minecraft:black_banner",count:1,components:{"minecraft:base_color":"black"}}
+			  take 0 0 0 icon=minecraft:leather_helmet#C41E3A
 			""");
 		corpus.put("空物品槽", """
 			task main
@@ -4438,20 +4536,20 @@ public class SequencedArmSelfTest {
 		/*程序备注
 		第二行*/
 		task main /*任务备注*/
-		  take @rel 0 0 0 /*条目备注
+		  take 0 0 0 /*条目备注
 		第二行*/
-		  deposit @rel 0 0 2
+		  deposit 0 0 2
 		""";
 
 	/** {@code note="…"} 保底写法；与 {@link #SCRIPT_NOTES_SAMPLE} 的条目备注必须是**同一个字符串**。 */
-	private static final String SCRIPT_QUOTED_NOTE_SAMPLE = "task main\n  take @rel 0 0 0 note=\"条目备注\\n第二行\"\n";
+	private static final String SCRIPT_QUOTED_NOTE_SAMPLE = "task main\n  take 0 0 0 note=\"条目备注\\n第二行\"\n";
 
 	/**
 	 * §12.3a 第 6 条（主代理 87②）：**同一个归属对象上的两块注释合并**成一个备注（换行连接），
 	 * **不报错**。行尾一块 + 紧跟其后的独占行一块 —— 玩家"再补一句注释"就是这个写法。
 	 */
 	private static final String SCRIPT_MERGED_NOTE_SAMPLE = "task main\n"
-		+ "  take @rel 0 0 0 /* 行尾一句 */\n"
+		+ "  take 0 0 0 /* 行尾一句 */\n"
 		+ "  /* 紧接着再补一句 */\n";
 
 }

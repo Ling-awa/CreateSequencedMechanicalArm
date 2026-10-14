@@ -44,15 +44,15 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
  *   /sma hold              把主手的 1 件物品放进臂内（DEPLOY 需要臂手上有应用物）
  *   /sma clear             清空臂内库存（物品掉在方块位置）
  *   /sma preset &lt;名字&gt;      装载预设（depot_ab / loop3 / wait / take_or / unload / deploy / mine / attack / use / use_sneak / subtasks / freq / hold）
- *   /sma card &lt;名字&gt;        把预设写进一张<b>相对</b>坐标操作表发给自己
- *   /sma card_abs &lt;名字&gt;    同上，但发<b>绝对</b>形态（用来验证"绝对卡插不进臂"）
- *   /sma export            把臂内现有的操作表写进主手的相对坐标操作表
+ *   /sma card &lt;名字&gt;        把预设写进一张操作表发给自己
+ *   /sma export            把臂内现有的操作表写进主手的操作表
  *   /sma code export [名字] 把主手卡上的程序导出成脚本文本（给了名字就同时落成文件）
  *   /sma code check &lt;名字&gt;  只编译那个脚本文件并回报（含行号的错误），不写卡
  *   /sma code import &lt;名字&gt; 读那个脚本文件，编译并写进主手卡（走同一套规模校验）
  * </pre>
  *
- * <p>坐标是<b>相对手臂</b>的偏移。卡片与 GUI 会在阶段 3 取代这套命令。
+ * <p>坐标一律<b>相对程序原点</b>（文本头 {@code @origin x y z}，P1 起只有这一套语义）；
+ * 插进臂时原点整体平移到臂的位置。卡片与 GUI 会在阶段 3 取代这套命令。
  */
 @EventBusSubscriber(modid = Create_sequenced_mechanical_arm.MODID)
 public class SequencedArmCommands {
@@ -65,15 +65,11 @@ public class SequencedArmCommands {
 				.executes(ctx -> load(ctx.getSource(), supplier))));
 
 		// 卡片：把预设写进一张操作表发给自己（阶段 3a 的测试入口，GUI 在 3c 取代它）
+		// P1 起只有一种操作表（绝对形态已删，§19）⇒ `card_abs` 子命令一并去掉。
 		LiteralArgumentBuilder<CommandSourceStack> card = Commands.literal("card");
-		LiteralArgumentBuilder<CommandSourceStack> cardAbsolute = Commands.literal("card_abs");
 		DevPresets.all()
-			.forEach((name, supplier) -> {
-				card.then(Commands.literal(name)
-					.executes(ctx -> giveCard(ctx.getSource(), supplier, false)));
-				cardAbsolute.then(Commands.literal(name)
-					.executes(ctx -> giveCard(ctx.getSource(), supplier, true)));
-			});
+			.forEach((name, supplier) -> card.then(Commands.literal(name)
+				.executes(ctx -> giveCard(ctx.getSource(), supplier))));
 
 		event.getDispatcher()
 			.register(Commands.literal("sma")
@@ -90,7 +86,6 @@ public class SequencedArmCommands {
 					.executes(ctx -> export(ctx.getSource())))
 				.then(preset)
 				.then(card)
-				.then(cardAbsolute)
 				.then(codeCommand()));
 	}
 
@@ -115,16 +110,15 @@ public class SequencedArmCommands {
 					.executes(ctx -> codeImport(ctx.getSource(), StringArgumentType.getString(ctx, "名字")))));
 	}
 
-	/** 把预设写进一张操作表物品并发给执行者（绝对形态用于测试"拒收绝对卡"这条路径）。 */
-	private static int giveCard(CommandSourceStack source, Supplier<ArmProgram> preset, boolean absolute) {
+	/** 把预设写进一张操作表物品并发给执行者（P1 起只有一种操作表，§19）。 */
+	private static int giveCard(CommandSourceStack source, Supplier<ArmProgram> preset) {
 		ServerPlayer player = source.getPlayer();
 		if (player == null) {
 			source.sendFailure(Component.literal("需要由玩家执行"));
 			return 0;
 		}
 		ArmProgram program = preset.get();
-		ItemStack card = new ItemStack((absolute ? SequencedArmRegistration.OPERATION_TABLE_ABSOLUTE
-			: SequencedArmRegistration.OPERATION_TABLE_RELATIVE).get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
 		CardProgramStorage.write(card, program, source.registryAccess());
 		if (!CardProgramStorage.hasProgram(card)) {
 			source.sendFailure(Component.literal("预设存不进卡片（转成脚本文本失败或超限）"));
@@ -133,12 +127,17 @@ public class SequencedArmCommands {
 		if (!player.getInventory()
 			.add(card))
 			player.drop(card, false);
-		source.sendSuccess(() -> Component.literal("已给予" + (absolute ? "绝对" : "相对") + "坐标操作表（"
-			+ program.tasks.size() + " 个任务）"), false);
+		source.sendSuccess(() -> Component.literal("已给予操作表（" + program.tasks.size() + " 个任务）"), false);
 		return 1;
 	}
 
-	/** 把臂里现有的操作表写进主手的相对坐标操作表（方便复制到别的臂或备份）。 */
+	/**
+	 * 把臂里现有的操作表写进主手的操作表（方便复制到别的臂或备份）。
+	 *
+	 * <p>P1 起没有"形态对不对"这道检查：臂内的程序原点就是臂的位置，导出（写文本）时原点随文本一起走
+	 * （§19.2 第 3 条："导出时必须把臂的位置写进原点"）—— 于是导出再插到另一条臂上时，
+	 * {@code rebaseTo} 会把世界位置原样搬过去。
+	 */
 	private static int export(CommandSourceStack source) {
 		ServerPlayer player = source.getPlayer();
 		if (player == null) {
@@ -158,10 +157,6 @@ public class SequencedArmCommands {
 		ItemStack held = player.getMainHandItem();
 		if (!OperationTableItem.isTable(held)) {
 			source.sendFailure(Component.literal("主手请拿一张操作表"));
-			return 0;
-		}
-		if (OperationTableItem.isAbsoluteForm(held)) {
-			source.sendFailure(Component.literal("臂内的程序是相对坐标，请用相对坐标操作表承载"));
 			return 0;
 		}
 		if (CardProgramStorage.write(held, arm.getProgram(), source.registryAccess()) != CardProgramStorage.StoreResult.OK) {
@@ -312,17 +307,9 @@ public class SequencedArmCommands {
 			return 0;
 		}
 		ArmProgram program = compiled.value();
-		// §12.3 末尾（主代理 87①）的硬错：脚本文本首行的坐标空间必须与手持卡的形态一致。
-		// **不自动转换**：把绝对坐标当相对偏移读是"看起来完全正常"的错（臂会整体平移一格位），
-		// 而程序里那个 abs 标记本来就只有"这份数据是什么"的含义（ArmProgramEditPacket 每次落盘都重写它）。
-		boolean cardAbsolute = OperationTableItem.isAbsoluteForm(held);
-		if (program.absolute != cardAbsolute) {
-			String cardForm = cardAbsolute ? "绝对坐标操作表 / @abs" : "相对坐标操作表 / @rel";
-			String scriptForm = program.absolute ? "绝对坐标操作表 / @abs" : "相对坐标操作表 / @rel";
-			// 文案里两种形态各自说清（"+"/"@" 是编辑器与脚本里那两个记号，玩家一眼能对上）
-			source.sendFailure(tr("code.import_form_mismatch", cardForm, scriptForm));
-			return 0;
-		}
+		// P1「坐标模型统一」（§19）删掉了"脚本形态必须与手持卡形态一致"那道硬错：
+		// 卡上没有形态了，脚本里也没有坐标空间记号 —— 文本头的 `@origin` 是**数据**（原点在哪），
+		// 不是"这份数据是什么"的声明，导入时照收（它本来就该跟着文本走，否则导出的原点白写）。
 		if (!program.isWithinLimits()) {
 			source.sendFailure(tr("code.import_over_limit", ScriptCompiler.summarize(program)));
 			return 0;

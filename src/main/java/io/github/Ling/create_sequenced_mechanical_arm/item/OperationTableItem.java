@@ -4,37 +4,21 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * 操作表（"程序卡"）。两种形态共用一个类、注册成两个物品（PLAN.md §1.2 已确认的决策）：
- * <ul>
- *   <li>{@code absolute=true}：<b>绝对坐标操作表</b> —— 工作副本，靠在世界里录坐标、复制、修改，
- *       <b>不能插入臂</b>；</li>
- *   <li>{@code absolute=false}：<b>相对坐标操作表</b> —— 能插入臂；插入时其中残留的绝对条目
- *       会以臂的位置为基准就地转成相对（见 {@code ProgramCoordinates}）。</li>
- * </ul>
+ * 操作表（"程序卡"）—— 全模组只有这一种程序卡（PLAN.md §19）。
  *
- * <p>做成两个物品而不是一个物品两个模式，是为了"不容易混淆"（用户明确要求）。
+ * <p>P1「坐标模型统一」之前这里有两个形态（绝对 / 相对，注册成两个物品，绝对形态不允许插入臂）。
+ * 现在一份程序只有<b>一个原点</b>（{@code ArmProgram.origin}）、所有条目坐标都相对它，
+ * "这张卡是绝对的还是相对的"不再是一个概念 ⇒ 形态字段与创建栏里的第二项一并删除。
  */
 public class OperationTableItem extends Item {
 
-	private final boolean absolute;
-
-	public OperationTableItem(Properties properties, boolean absolute) {
+	public OperationTableItem(Properties properties) {
 		super(properties);
-		this.absolute = absolute;
-	}
-
-	public boolean isAbsoluteForm() {
-		return absolute;
 	}
 
 	/** 是否是操作表（不看形态）。 */
 	public static boolean isTable(ItemStack stack) {
 		return stack.getItem() instanceof OperationTableItem;
-	}
-
-	/** 是否是绝对形态（绝对形态不允许插入臂）。 */
-	public static boolean isAbsoluteForm(ItemStack stack) {
-		return stack.getItem() instanceof OperationTableItem table && table.absolute;
 	}
 
 }

@@ -610,7 +610,9 @@ public class ProgramRuntime {
 	}
 
 	private static BlockPos offsetOf(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
-		return entry.absolute ? entry.offset.subtract(arm.getBlockPos()) : entry.offset;
+		// 臂内的程序在插卡那一刻已经被 `ProgramCoordinates.rebaseTo(program, arm.getBlockPos())`
+		// 重基过（原点 == 臂的位置，§19.2 第 1 条）⇒ 条目 offset 直接就是"相对臂的偏移"。
+		return entry.offset;
 	}
 
 	private void execute(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {

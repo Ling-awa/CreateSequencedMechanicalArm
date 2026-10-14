@@ -2502,30 +2502,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			case BREAK -> {
 			}
 			default -> {
-				// 走到这里的都是"需要坐标"的动作：空间（滚轮选）+ 坐标 +（左右键才有）朝向
+				// 走到这里的都是"需要坐标"的动作：坐标（+ 左右键才有朝向）
+				// ★ P1「坐标模型统一」（§19）：条目属性里的「坐标空间」（rel/abs 滚轮）已删 ——
+				//   一份程序一个原点，条目不再有空间记号。原点的编辑入口（数值框 / 中键 / 整体偏移）
+				//   是 P2/P3 的事，这一轮不做。
 				if (!entry.op.requiresTarget())
 					return;
-				inlinePicker(FIELD_X, 42, tr("entry.space"), tr("hint.entry_space"),
-					List.of(tr("entry.space_rel"), tr("entry.space_abs")), entry.absolute ? 1 : 0, i -> {
-						pushUndo();
-						entry.absolute = i == 1;
-						rebuildPending = true;
-					});
 
 				boolean face = needsFace(entry.op);
-				int coordX = FIELD_X + 44;
-				int coordW = face ? 42 : FIELD_W - 44;
-				BlockPos offset = entry.offset;
-				textField(coordX, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
-					offset.getX() + "," + offset.getY() + "," + offset.getZ(), 24, v -> {
+				// 坐标框**接管**原来那个「坐标空间」选择框的位置（宽 42）：右沿仍与上面那个选择框
+				// （77..197）对齐。有「面」的操作用它原来的宽度（88..120），坐标框只占 77..109。
+				int coordW = face ? 32 : FIELD_W;
+				// 框里回显的是**世界位置**（= 原点 + 偏移），玩家在世界里看到的坐标就是它；
+				// 写回去时要减去原点：模型里存的永远是相对原点的偏移（§19.2 第 1 条，运行时的锚点是臂）。
+				BlockPos world = program.origin.offset(entry.offset);
+				textField(FIELD_X, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
+					world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
 						BlockPos parsed = parseCoords(v);
 						if (parsed != null) {
 							pushUndo();
-							entry.offset = parsed;
+							entry.offset = parsed.subtract(program.origin);
 						}
 					});
 				if (face)
-					inlinePicker(FIELD_X + 88, 32, tr("entry.face"), tr("hint.entry_face"),
+					inlinePicker(FIELD_X + 32 + 4, 32, tr("entry.face"), tr("hint.entry_face"),
 						labels(Direction.values()), entry.face.ordinal(), i -> {
 							pushUndo();
 							entry.face = Direction.values()[i];
@@ -3110,7 +3110,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				ArmProgramEntry entry = new ArmProgramEntry();
 				entry.op = op;
 				entry.offset = new BlockPos(1, 2, 3);
-				entry.absolute = op.ordinal() % 2 == 0;
 				entry.count = 2;
 				entry.waitAmount = 20;
 				entry.waitForPowered = false;
@@ -3923,8 +3922,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				sawWait = true;
 			if (needsFace(entry.op))
 				sawFace = true;
-			// 第二行的 DATA_AREA 盒子数（§7.6 v4 之后的实际布局）：
-			// 位置类 = 空间 + 坐标 = 2；左键/右键 +朝向 = 3；等待 = 时长 + 单位 = 2；
+			// 第二行的 DATA_AREA 盒子数（§19 坐标统一之后："坐标空间"选择框已删，坐标只剩一个框）：
+			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；等待 = 时长 + 单位 = 2；
 			// 收发信号 = 模式 +（只有发才有）数值 + 单位 ⇒ **接收 1 / 发送 3**（两个频率格是**菜单幽灵槽**，不算盒子）；
 			// 调用 = 目标 = 1；抛错 = 信息 = 1；退出 = 0（终结操作，第二行不需要任何东西）
 			editingProp = null;
@@ -3938,7 +3937,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				case SIGNAL -> entry.isSignalSend() ? 3 : 1;
 				case WAIT_REDSTONE, CALL, THROW -> 1;
 				case BREAK -> 0;
-				default -> needsFace(entry.op) ? 3 : 2;
+				default -> needsFace(entry.op) ? 2 : 1;
 			};
 			if (boxes != expected)
 				return entry.op + " 的基础内容应当是 " + expected + " 个控件，实际 " + boxes;

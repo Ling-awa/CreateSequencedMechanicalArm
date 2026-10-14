@@ -22,19 +22,24 @@
 
 > 待定：导入来源是脚本文本、另一张操作表，还是方块自己的一个槽位。
 
-### 3. 相对坐标 ⇄ 绝对坐标的转化
+### 3. 原点的设置界面与「整体偏移」
 
-现在「绝对坐标操作表」**插不进动力臂**（会明确拒绝并提示"请先复制到相对坐标操作表"），
-但**没有提供转化途径**。计划补上正规做法：把绝对卡转成相对卡（以及反向）。
-可能会采取其他转化方式。
+坐标已经统一成**一份程序一个原点 + 全部相对坐标**（原来那套"相对卡 / 绝对卡"的区别已经删掉了），
+但**改原点和整体挪动还没有界面入口**。计划补上：
 
-> 待定：在哪个界面/方块里做、是否支持批量、相对化时以哪条臂为基准，是否采用相对坐标 + 定一个原点方块的方式。
+- **在世界里设原点**：打算用**中键**（手持操作表时它现在被白白吞掉）—— 指着哪就把它设为原点，
+  并在世界里用**蓝色轮廓**画出来（操作的框仍是黄/红），这样相对坐标也能看见框；
+- **界面里改数值**：原点坐标、以及**整体偏移**（确认后施加到所有坐标上 —— 把一整套搬到别处）；
+  两者都会记进撤销栈。
+
+> 一个刻意的区分：**改原点**保持所有目标的**世界位置不变**（只是换个参考点），
+> **整体偏移**才是"把东西搬走"。合成一个按钮会出现"我只想改参考点，结果东西全跑了"。
 
 ### 4. 从动力臂中复制操作
 
 现在只有开发者命令 `/sma export`（把臂里的程序写进主手的操作表）。
 计划给玩家一个正规途径：**把臂里正在用的程序取回一张操作表** —— 换卡、备份、搬家都要用。
-相对卡复制相对坐标，绝对卡复制绝对坐标。这部分仍然可能修改，比如结合第3点，不在使用两张卡而是提供一种卡内的坐标转化方式。
+导出时会**连原点一起带走**（臂的位置就是那份程序的原点），所以换到另一条臂上仍然指向原来的地方。
 
 ### 5. 美术资源
 
@@ -44,7 +49,7 @@
 |---|---|
 | 方块 | 直接引用 Create 的动力臂模型 `create:block/mechanical_arm/block` |
 | 物品·动力臂 | `create:block/mechanical_arm/item` |
-| 物品·操作表（相对 / 绝对） | 分别是原版的 `paper` / `map` |
+| 物品·操作表 | 原版的 `paper` |
 | 界面 | 没有自己的 UI 贴图 |
 
 计划补：**UI 贴图、物品贴图、方块模型与贴图** —— 让它在视觉上是一条**自己的**臂，
@@ -103,11 +108,16 @@ This is a **plan, not a promise** — details are still being discussed and may 
 2. **Operation import block** — the equivalent of Create's Schematic Table for blank schematics:
    load a finished set of operations onto a blank operation table instead of recording every entry
    by hand. (Source still undecided: script text, another table, or a slot in the block.)
-3. **Relative / absolute coordinate conversion** — an absolute operation table currently cannot be
-   inserted into an arm (it is refused with a hint) and there is no way to convert one form into
-   the other yet.
+3. **Origin editing and "shift everything"** — coordinates are now unified (one origin per program, everything
+   relative to it; the old "relative card / absolute card" split is gone), but there is no UI to change the
+   origin yet. Planned: set the origin in world with the **middle mouse button** (currently swallowed while
+   holding a table) and draw it as a **blue outline** (operation outlines stay gold/red) so relative targets
+   become visible too; plus numeric editing of the origin and a **whole-program offset** in the GUI, both
+   undoable. The two are deliberately separate: changing the origin keeps every target's world position,
+   shifting moves them.
 4. **Copy operations out of an arm** — today only the developer command `/sma export` can do this;
-   a proper player-facing way is planned.
+   a proper player-facing way is planned. The export carries the origin (the arm's own position) with it,
+   so the program still points at the same places on another arm.
 5. **Art** — there are no textures of our own yet (no `textures/` directory at all): the block
    reuses Create's mechanical arm model, the items reuse Create's and vanilla textures, and the UI
    has no textures. UI, item, block model and block textures are all still to be made.
@@ -126,7 +136,8 @@ option `maxEntriesTotal` defaults to **1024** (nominal — raising it beyond wha
 nothing). This ceiling **cannot be raised further**: a Minecraft NBT string is 16-bit (65535 bytes), so
 storing more would require splitting the program across several strings/lines.
 ⚠️ **Programs already in saves from 0.1.0 or earlier are not read** — the old format stored the compiled
-form; re-record them or import a script.
+form; re-record them or import a script. **Cards from before the coordinate change are gone too**: the
+"absolute operation table" item was removed, and old scripts use the retired `@abs` header.
 
 **Undecided:** an in-game editor for `.sma` script text (may not happen — it overlaps with the GUI
 editor).

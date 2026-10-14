@@ -5,9 +5,11 @@ import java.util.List;
 
 import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 
 /**
@@ -39,8 +41,22 @@ public class ArmProgram {
 		return SequencedArmConfig.maxEntriesTotal();
 	}
 
-	/** {@code RELATIVE} 表示条目里的坐标是相对手臂的（臂内部表示）。 */
-	public boolean absolute = false;
+	/**
+	 * <b>程序原点</b>：所有条目的 {@link ArmProgramEntry#offset} 都是相对这个方块位置的偏移
+	 * （PLAN.md §19 的坐标模型统一：一份程序一个原点，条目上不再有"绝对 / 相对"标记）。
+	 *
+	 * <p>它只是<b>卡上的参考点</b>（编辑 / 显示 / 导出用），<b>不是运行时的锚点</b>：
+	 * 插进臂时 {@code ProgramCoordinates.rebaseTo(program, arm.getBlockPos())} 把原点整体平移到臂的位置，
+	 * 臂内部因此恒有 {@code origin == 臂方块位置}（与上游 {@code ArmInteractionPoint.serialize(anchor)}
+	 * 一致，蓝图旋转/镜像也照旧成立）。
+	 *
+	 * <p>为什么不能改成"运行时用 {@code origin + offset}"：那会让"搬臂"从"目标跟着走"变成
+	 * "目标锚死在原地"，是语义变化（§19.2 第 1 条、§17.5.2 已经写过一次）。
+	 *
+	 * <p>进 `.sma` 文本头（{@code @origin x y z}）：§17 之后盘上只有文本，只写卡上等于
+	 * "导出 → 改 → 导入"一圈回来坐标就变了。
+	 */
+	public BlockPos origin = BlockPos.ZERO;
 	public final List<ArmProgramTask> tasks = new ArrayList<>();
 
 	/**
@@ -127,7 +143,9 @@ public class ArmProgram {
 
 	public CompoundTag save(HolderLookup.Provider registries) {
 		CompoundTag tag = new CompoundTag();
-		tag.putBoolean("abs", absolute);
+		// 原点用 `NbtUtils.writeBlockPos`（写成 int[3]）：与 `arm` 方块实体里 `"Offset"` 的写法一致 ——
+		// 全工程只有这一种"方块坐标进 NBT"的形式，读的一侧才不会漏掉某个形状。
+		tag.put("origin", NbtUtils.writeBlockPos(origin));
 		ListTag list = new ListTag();
 		for (ArmProgramTask task : tasks)
 			list.add(task.save(registries));
@@ -143,7 +161,9 @@ public class ArmProgram {
 
 	public static ArmProgram load(CompoundTag tag, HolderLookup.Provider registries) {
 		ArmProgram program = new ArmProgram();
-		program.absolute = tag.getBoolean("abs");
+		// 缺 origin 键（老 NBT）⇒ 缺省 (0,0,0)：旧模型的绝对条目 offset 直接沿用 ⇒ 世界位置完全不变（§19.2 第 3 条）
+		program.origin = tag.contains("origin") ? NbtUtils.readBlockPos(tag, "origin")
+			.orElse(BlockPos.ZERO) : BlockPos.ZERO;
 		program.editorMode = tag.contains("emode") ? tag.getString("emode") : MODE_RECORD;
 		program.editorTask = Math.max(0, tag.getInt("etask"));
 		// 备注**不在这里夹**：夹（截断）会让"文本 → 模型 → 文本"丢字（不变量 #1 死在这一步）。

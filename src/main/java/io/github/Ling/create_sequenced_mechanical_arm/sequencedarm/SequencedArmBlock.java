@@ -126,7 +126,7 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 			if (result.consumesAction())
 				return result;
 		}
-		// 手持操作表右键 = 把卡片里的程序装载进这条臂（绝对形态会被拒收）。
+		// 手持操作表右键 = 把卡片里的程序装载进这条臂（P1 起没有形态检查，§19）。
 		// ★ 操作表**不参与**下面的"交换物品"（用户第二十七轮："操作表除外"）—— 它有自己的手势。
 		if (OperationTableItem.isTable(stack))
 			return onBlockEntityUseItemOn(level, pos, arm -> loadProgramFromCard(arm, stack, player, level));
@@ -231,23 +231,25 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	}
 
 	/**
-	 * 装载卡片程序（PLAN.md §6）。
+	 * 装载卡片程序（PLAN.md §6、§19.2）。
 	 *
 	 * <p>三个语义要点：
 	 * <ol>
-	 *   <li><b>绝对形态直接拒收</b>——它只是工作副本，不该塞进臂里；</li>
-	 *   <li>相对形态里若还残留绝对条目（在世界里刚录完就插），<b>此刻</b>以臂的位置为基准转成相对；</li>
+	 *   <li><b>重基一次</b>：程序里的坐标一律相对卡上的原点，插进臂时把原点整体平移到臂的位置
+	 *       （{@link ProgramCoordinates#rebaseTo}）—— 每一条的<b>世界位置逐条不变</b>，
+	 *       而臂内部因此恒有"原点 = 臂的位置"（§19.2 第 1 条）；</li>
+	 *   <li>卡片"是绝对卡还是相对卡"这件事已经<b>不存在</b>（P1 删掉了绝对坐标操作表），
+	 *       所以没有任何形态检查；</li>
 	 *   <li>卡片本身不被消耗（可反复插到多条臂上），需要清空有别的入口。</li>
 	 * </ol>
+	 *
+	 * <p>包可见（不是 private）是给启动自检用的：这条路上的"重基"是**静默**的 ——
+	 * 算错只会让臂搬到错的位置，编译期一点提示都没有（与 {@link #exchangeHeldItem} 同一个理由）。
 	 */
-	private static ItemInteractionResult loadProgramFromCard(SequencedArmBlockEntity arm, ItemStack card, Player player,
+	static ItemInteractionResult loadProgramFromCard(SequencedArmBlockEntity arm, ItemStack card, Player player,
 		Level level) {
 		if (level.isClientSide)
 			return ItemInteractionResult.SUCCESS;
-		if (OperationTableItem.isAbsoluteForm(card)) {
-			feedback(player, "absolute_refused", ChatFormatting.RED);
-			return ItemInteractionResult.SUCCESS;
-		}
 		ArmProgram program = CardProgramStorage.read(card, level.registryAccess());
 		if (program.isEmpty()) {
 			feedback(player, "empty_card", ChatFormatting.RED);
@@ -257,7 +259,7 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 			feedback(player, "over_limit", ChatFormatting.RED);
 			return ItemInteractionResult.SUCCESS;
 		}
-		int converted = ProgramCoordinates.toRelative(program, arm.getBlockPos());
+		int converted = ProgramCoordinates.rebaseTo(program, arm.getBlockPos());
 		arm.setProgram(program);
 
 		// 装载时顺手报一下"有多少条超出这条臂的范围"（用户第十九轮）：
@@ -265,12 +267,13 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 		// 所以最早能说的就是这一刻 —— 运行时也会再判一次（ProgramRuntime.preCheckFailure），
 		// 这里只是**提前告知**，不拒绝整张卡（否则一张卡就没法给"远的臂"用了）。
 		int range = ArmBlockEntity.getRange();
-		int outOfRange = 0;		for (ArmProgramTask task : program.tasks) {
+		int outOfRange = 0;
+		for (ArmProgramTask task : program.tasks) {
 			for (ArmProgramEntry entry : task.entries) {
 				if (!entry.op.requiresTarget())
 					continue;
-				BlockPos target = entry.absolute ? entry.offset : arm.getBlockPos()
-					.offset(entry.offset);
+				// 世界目标 = 原点 + 偏移。重基之后原点就是臂的位置 ⇒ 与"相对臂的偏移"同值。
+				BlockPos target = program.origin.offset(entry.offset);
 				if (!ProgramRuntime.withinArmRange(arm.getBlockPos(), target))
 					outOfRange++;
 			}

@@ -95,8 +95,10 @@ public final class ArmEntryText {
 			}
 			default -> {
 				if (entry.op.requiresTarget())
-					suffix.append("  ")
-						.append(entry.absolute ? "@" : "+")
+					// P1（§19）：坐标一律相对程序原点，条目上不再有"绝对/相对"记号 ⇒ 统一用 `+`。
+					// 显示的是**偏移**（模型里那个值），卡上也是它 —— 世界位置要在界面上按
+					// `origin + offset` 算（GUI 的坐标框走那条路）。
+					suffix.append("  +")
 						.append(entry.offset.getX())
 						.append(',')
 						.append(entry.offset.getY())

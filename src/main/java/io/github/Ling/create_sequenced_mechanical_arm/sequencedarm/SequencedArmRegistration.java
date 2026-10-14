@@ -48,17 +48,15 @@ public class SequencedArmRegistration {
 	public static final DeferredItem<BlockItem> SEQUENCED_ARM_ITEM =
 		ITEMS.registerSimpleBlockItem("sequenced_arm", SEQUENCED_ARM);
 
-	// ——— 操作表（程序卡）：两种形态共用一个类，注册成两个物品（PLAN.md §1.2） ———
+	// ——— 操作表（程序卡）———
+	// P1「坐标模型统一」（PLAN.md §19）之后**只有这一种**操作表：一份程序一个原点，
+	// 条目坐标一律相对原点 ⇒ "绝对卡 / 相对卡"这个区分没有意义了。
+	// ⚠️ 原来那个 `operation_table_absolute` 的**注册 id 刻意不再保留**：用户已确认不做老数据兼容，
+	//    老存档里的绝对卡会变成"未知物品"（这是 P1 明确接受的一次性代价）。
 
-	/** 相对坐标操作表：能插入臂；插入时把残留的绝对条目转成相对。 */
 	public static final DeferredItem<OperationTableItem> OPERATION_TABLE_RELATIVE =
 		ITEMS.register("operation_table_relative",
-			() -> new OperationTableItem(new Item.Properties().stacksTo(1), false));
-
-	/** 绝对坐标操作表：工作副本，用于在世界里录制/复制/修改，<b>不能插入臂</b>。 */
-	public static final DeferredItem<OperationTableItem> OPERATION_TABLE_ABSOLUTE =
-		ITEMS.register("operation_table_absolute",
-			() -> new OperationTableItem(new Item.Properties().stacksTo(1), true));
+			() -> new OperationTableItem(new Item.Properties().stacksTo(1)));
 
 	public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<SequencedArmBlockEntity>> SEQUENCED_ARM_BE =
 		BLOCK_ENTITIES.register("sequenced_arm",

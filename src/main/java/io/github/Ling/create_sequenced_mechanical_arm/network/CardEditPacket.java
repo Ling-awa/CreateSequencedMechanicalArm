@@ -140,8 +140,16 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = packet.op();
-		entry.offset = packet.pos(); // 世界里录下来的就是绝对坐标
-		entry.absolute = true;
+		// ★ P1「坐标模型统一」（PLAN.md §19）：条目坐标**一律相对程序原点**，
+		// 所以世界里录下来的位置要减去原点才进模型（原点 = (0,0,0) 时就是世界坐标本身）。
+		// 世界位置回显也按 `origin + offset` 算 —— 界面上给玩家看的必须是那个位置，
+		// 不是模型里那个偏移（两者在原点非零时不是同一个数）。
+		//
+		// ⚠️ 已知边界（P1 不做，留给 P2 的中键设原点）：卡上的原点不会因为"插进过某条臂"而改变，
+		//    所以"插卡（臂内原点被重基）→ 再拿回卡上录几条"时，这几次录制仍按**卡上的**原点换算。
+		//    两者不一致时那不是算错，而是"这张卡的基准还是那个旧原点"——P2 会让它显式可见（蓝色框）。
+		BlockPos world = packet.pos();
+		entry.offset = world.subtract(program.origin);
 		entry.face = packet.face();
 		// ★ 副手剪贴板 = 待办清单（用户第二十七轮）：录一条就把"下一个还没做的行"写成备注。
 		// 判据与 HUD 上那句"当前：xxx"共用 ClipboardChecklist.consumed 一处 ——
@@ -165,8 +173,7 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 			Component.translatable("create_sequenced_mechanical_arm.gui.editor.opt." + packet.op()
 				.name()
 				.toLowerCase()),
-			packet.pos()
-				.toShortString(),
+			world.toShortString(),
 			task.entries.size(), index + 1, task.name);
 	}
 
@@ -189,7 +196,10 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		ArmProgramTask task = program.tasks.get(index);
 		for (int i = task.entries.size() - 1; i >= 0; i--) {
 			ArmProgramEntry entry = task.entries.get(i);
-			if (!entry.op.requiresTarget() || !entry.absolute || !entry.offset.equals(pos))
+			// 比的是**世界位置**（P1，§19.4 风险那条）：条目里存的是"相对原点的偏移"，
+			// 直接拿世界坐标去比 `entry.offset` 在原点非零时就一条都删不掉。
+			if (!entry.op.requiresTarget() || !program.origin.offset(entry.offset)
+				.equals(pos))
 				continue;
 			task.entries.remove(i);
 			program.editorTask = index;

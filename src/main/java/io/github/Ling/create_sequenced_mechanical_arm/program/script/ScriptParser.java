@@ -49,13 +49,13 @@ import net.minecraft.world.item.component.DyedItemColor;
  *
  * <p>语言面（也是玩家可见错误的用词口径）：
  * <pre>
- *   @rel
+ *   &#64;origin 100 64 -3
  *   &ast;/文件头注释 = 程序备注&ast;/
  *   task 名字 loop=forever loopN=3 icon=minecraft:diamond
- *     take     @abs 10 64 -3 count=3 delay=10       &ast;/ 放铲子 &ast;/
- *     deposit  @rel 0 0 0
- *     unload   @rel 0 0 2 repeat=until_empty amount=max
- *     attack   @rel 0 0 0 face=up ok=goto 清理 fail=skip timeout=5s
+ *     take     10 64 -3 count=3 delay=10            &ast;/ 放铲子 &ast;/
+ *     deposit  0 0 0
+ *     unload   0 0 2 repeat=until_empty amount=max
+ *     attack   0 0 0 face=up ok=goto 清理 fail=skip timeout=5s
  *     wait     5s
  *     wait_redstone on
  *     signal   recv on place=0t freq=iron_ingot + copper_ingot
@@ -65,6 +65,10 @@ import net.minecraft.world.item.component.DyedItemColor;
  *     throw    "没材料"
  * </pre>
  *
+ * <p>⚠️ <b>P1 坐标模型统一</b>（PLAN.md §19）：文本头是 {@code @origin x y z}（缺省 {@code 0 0 0}），
+ * 条目坐标<b>不再带任何空间记号</b>，直接写三个整数。{@code @abs} / {@code @rel} 两个记号已删除：
+ * 旧脚本不迁移（用户确认不做兼容），报错时会明确说"坐标一律相对程序原点"。
+ *
  * <p>⚠️ 一处刻意的取舍（§12.3a 第 6 条）：条目行尾的块注释与紧跟其后的独占行块注释两者**合并**成一个
  * {@code note}（换行连接），不报错 —— 玩家想"再补一句注释"是很自然的事；三项合并（第三块）才报错。
  * 以前置写法写在条目**上面**的注释会按 §12.3a 归到**上一条**（用户明确要这个语义）。
@@ -73,6 +77,13 @@ public final class ScriptParser {
 
 	/** 坐标的合法范围。世界坐标与相对偏移都远在此内，超出必然是写错了。 */
 	public static final int COORD_LIMIT = 30_000_000;
+	/**
+	 * 程序头记号（PLAN.md §19.2 第 2 条）：{@code @origin x y z} —— 一份程序一个原点。
+	 *
+	 * <p>定义成常量而不是散落的字面量：解析、反编译、自检语料都要写它，
+	 * 三处各打一遍就会漂移（判据写两份必然漂移，决策 68/85）。
+	 */
+	public static final String HEADER = "@origin";
 	/** TAKE 的个数范围（§12.3：{@code count 1..64}）。 */
 	public static final int COUNT_MIN = 1;
 	public static final int COUNT_MAX = 64;
@@ -509,7 +520,7 @@ public final class ScriptParser {
 		@Nullable
 		ArmProgramEntry entry;
 		Owner owner = Owner.PROGRAM;
-		/** 程序头 {@code @abs}/{@code @rel} 是否已经出现过（只能有一行，§12.3）。 */
+		/** 程序头 {@code @origin x y z} 是否已经出现过（只能有一行，§12.3 / §19.2）。 */
 		boolean sawHeader;
 		/** 每个归属对象上已经见到几段备注（第 2 段换成行连接，第 3 段报错 —— §12.3a 第 6 条）。 */
 		int programNoteBlocks;
@@ -545,10 +556,10 @@ public final class ScriptParser {
 			error(line, "`#` 不再是注释写法 —— 请用 /* */（只保留一种注释语法）");
 			return;
 		}
-		// §12.3 末尾（主代理 87①）：程序头 = 文件首行的坐标空间 `@abs` / `@rel`（缺省 `rel`）。
-		// 不写的话，"导出一个绝对坐标表、再导进相对坐标卡"会把绝对坐标当相对偏移读 —— 静默改语义。
-		if (keyword.equalsIgnoreCase("@abs") || keyword.equalsIgnoreCase("@rel")) {
-			parseProgramHeader(ctx, tokens, keyword);
+		// §19.2 第 2 条（主代理拍板）：程序头 = 文件首行的 `@origin x y z`（缺省 `0 0 0`）。
+		// 原点必须进文本：§17 之后盘上只有文本，只写卡上等于"导出 → 改 → 导入"一圈回来坐标就变了。
+		if (keyword.equalsIgnoreCase(HEADER)) {
+			parseProgramHeader(ctx, tokens);
 			return;
 		}
 		if ("task".equals(keyword)) {
@@ -562,32 +573,40 @@ public final class ScriptParser {
 		parseEntry(ctx, tokens, line);
 	}
 
-	// ————————————————————————— 程序头：坐标空间 —————————————————————————
+	// ————————————————————————— 程序头：原点 —————————————————————————
 	/**
-	 * 程序头 {@code @abs} / {@code @rel}（§12.3 末尾那一条）：文本首行声明这份程序的坐标空间，
-	 * 对应 {@link ArmProgram#absolute}。反编译器**永远写**；编译器缺省按 {@code rel}。
+	 * 程序头 {@code @origin x y z}（PLAN.md §19.2 第 2 条）：声明这份程序的原点，
+	 * 对应 {@link ArmProgram#origin}。反编译器**永远写**；编译器缺省 {@code 0 0 0}。
 	 *
-	 * <p>为什么必须是硬字段而不是"看坐标猜"：绝对坐标写进相对卡（或反过来）会让运行语义整体平移，
-	 * 而且这种错**看起来完全正常**。所以：文本声明不匹配手持卡的形态时，由
-	 * {@code /sma code import} 报**硬错**、不自动转换（转换只在"把卡插进臂"那条既有路径上做）。
+	 * <p>为什么原点必须是硬字段：条目的坐标一律相对原点，而原点<b>不写出来就没地方存</b>
+	 * —— §17 之后盘上只有文本，导出再导入一圈回来坐标就整体平移了。默认 {@code (0,0,0)}
+	 * 正好等于"没设过原点时的世界坐标"（§19.3），所以老脚本缺这一行仍读得进来。
+	 *
+	 * <p>顺序硬要求：必须是文件里第一个记号（第一条 {@code task} 之前）。写在别处时，
+	 * 上面那段程序备注会先一步挂到"上一个拥有备注的东西"上（§12.3a）—— 报错而不静默接受。
 	 */
-	private void parseProgramHeader(Ctx ctx, List<Token> tokens, String keyword) {
+	private void parseProgramHeader(Ctx ctx, List<Token> tokens) {
 		int line = tokens.get(0)
 			.line();
 		if (ctx.task != null) {
-			error(line, "程序头 " + keyword + " 只能写在整个文件的第一行（第一条 task 之前）");
-			return;
-		}
-		if (tokens.size() > 1) {
-			error(line, "程序头 " + keyword + " 后面不能再有别的东西");
+			error(line, "程序头 " + HEADER + " 只能写在整个文件的第一行（第一条 task 之前）");
 			return;
 		}
 		if (ctx.sawHeader) {
-			error(line, "程序头只能有一行（" + keyword + " 与之前那行重复了）");
+			error(line, "程序头只能有一行（" + HEADER + " 与之前那行重复了）");
 			return;
 		}
+		if (tokens.size() != 4) {
+			error(line, "程序头要写成 " + HEADER + " x y z（三个整数）");
+			return;
+		}
+		Integer x = intValue(tokens.get(1), -COORD_LIMIT, COORD_LIMIT, "原点 X");
+		Integer y = intValue(tokens.get(2), -COORD_LIMIT, COORD_LIMIT, "原点 Y");
+		Integer z = intValue(tokens.get(3), -COORD_LIMIT, COORD_LIMIT, "原点 Z");
+		if (x == null || y == null || z == null)
+			return;
 		ctx.sawHeader = true;
-		ctx.program.absolute = keyword.equalsIgnoreCase("@abs");
+		ctx.program.origin = new BlockPos(x, y, z);
 	}
 
 	// ————————————————————————— 注释 / 备注的归属 —————————————————————————
@@ -760,8 +779,8 @@ public final class ScriptParser {
 			if (!position(rest, parsed, true))
 				return;
 		} else {
-			// 不碰目标的操作没有位置参数；但**模型里 offset/absolute 照样存在**
-			//（NBT 里 `off`/`abs` 是无条件写的），所以允许可选写法把非默认值写出来。
+			// 不碰目标的操作没有位置参数；但**模型里 offset 照样存在**
+			//（NBT 里 `off` 是无条件写的），所以允许可选写法把非默认值写出来。
 			optionalPosition(rest, parsed);
 		}
 		if (!operands(parsed, rest))
@@ -780,7 +799,6 @@ public final class ScriptParser {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = op;
 		entry.offset = parsed.offset;
-		entry.absolute = parsed.absolute;
 		entry.delay = parsed.delay;
 		entry.face = parsed.face;
 		entry.failAmount = parsed.failAmount;
@@ -925,7 +943,7 @@ public final class ScriptParser {
 		return true;
 	}
 
-	/** 后缀：key=value（+ 少数带空格的 `freq=物品 + 物品`、`pos=@abs 1 2 3`）。 */
+	/** 后缀：key=value（+ 少数带空格的 `freq=物品 + 物品`、`fail=goto 任务名`）。 */
 	private boolean suffixes(Ctx ctx, Parsed parsed, List<Token> rest) {
 		int index = 0;
 		while (index < rest.size()) {
@@ -1202,45 +1220,72 @@ public final class ScriptParser {
 
 	// ————————————————————————— 小解析器 —————————————————————————
 
-	/** 位置参数：{@code @abs|@rel} + 三个整数。 */
+	/**
+	 * 位置参数：<b>三个整数</b>（PLAN.md §19.2 第 2 条 —— 坐标一律相对程序原点，
+	 * {@code @abs} / {@code @rel} 两个记号已删除）。
+	 *
+	 * <p>为什么原来那个记号必须删掉而不是"继续容忍"：它表达的是"这条坐标是绝对的还是相对的"，
+	 * 而新模型里这个区别<b>不存在</b> —— 留着它就会出现"同一个文件中两种语义"的读法，
+	 * 正是这次统一要消灭的困惑（§19.1）。
+	 */
 	private boolean position(List<Token> rest, Parsed parsed, boolean required) {
-		if (rest.size() < 4) {
+		if (rest.size() < 3) {
 			if (required)
-				error(parsed.line, "缺坐标：需要 @abs/@rel 加三个整数（例如 @rel 0 0 2）");
+				error(parsed.line, "缺坐标：需要三个整数（坐标相对程序原点，例如 0 0 2）");
 			return !required;
 		}
-		String marker = rest.get(0)
-			.text();
-		boolean absolute;
-		if ("@abs".equalsIgnoreCase(marker))
-			absolute = true;
-		else if ("@rel".equalsIgnoreCase(marker))
-			absolute = false;
-		else {
+		// 老写法（`@rel 1 2 3`）走到这里：报错说清"记号没了"，别让玩家对着"缺坐标"发呆。
+		if (rest.get(0)
+			.text()
+			.startsWith("@")) {
 			if (!required)
 				return true;
 			error(rest.get(0)
-				.line(), "坐标前面要写 @abs（绝对）或 @rel（相对），收到：" + marker);
+				.line(), "坐标不再写 " + rest.get(0)
+					.text() + "：直接写三个整数即可（坐标一律相对程序原点）");
 			return false;
 		}
-		Integer x = intValue(rest.get(1), -COORD_LIMIT, COORD_LIMIT, "坐标 X");
-		Integer y = intValue(rest.get(2), -COORD_LIMIT, COORD_LIMIT, "坐标 Y");
-		Integer z = intValue(rest.get(3), -COORD_LIMIT, COORD_LIMIT, "坐标 Z");
+		Integer x = intValue(rest.get(0), -COORD_LIMIT, COORD_LIMIT, "坐标 X");
+		Integer y = intValue(rest.get(1), -COORD_LIMIT, COORD_LIMIT, "坐标 Y");
+		Integer z = intValue(rest.get(2), -COORD_LIMIT, COORD_LIMIT, "坐标 Z");
 		if (x == null || y == null || z == null)
 			return false;
 		parsed.offset = new BlockPos(x, y, z);
-		parsed.absolute = absolute;
-		rest.subList(0, 4)
+		rest.subList(0, 3)
 			.clear();
 		return true;
 	}
 
-	/** 非必需的位置参数：只有写成 {@code @abs/@rel …} 时才吃（不碰目标的操作平时不写它）。 */
+	/**
+	 * 非必需的位置参数：只有前三个记号都是整数时才吃（不碰目标的操作平时不写它）。
+	 *
+	 * <p>判据只能是"能不能解析成三个整数"，不能用"是不是以 {@code @} 开头"那种记号启发式：
+	 * 曾经位置参数带 {@code @abs/@rel} 前缀，现在同一位置上可能是 {@code fail=goto} / {@code delay=5}
+	 * 这类后缀 —— 直接拿它们去当坐标解析就会把一条完全正确的条目判成"坐标不是整数"。
+	 */
 	private void optionalPosition(List<Token> rest, Parsed parsed) {
-		if (!rest.isEmpty() && rest.get(0)
-			.text()
-			.startsWith("@"))
-			position(rest, parsed, false);
+		if (rest.size() < 3)
+			return;
+		if (!isInt(rest.get(0)) || !isInt(rest.get(1)) || !isInt(rest.get(2)))
+			return;
+		position(rest, parsed, false);
+	}
+
+	/**
+	 * 这个记号是不是"范围合法的十进制整数"—— <b>只判、不报错</b>。
+	 *
+	 * <p>为什么不能借用 {@link #intValue}：它是"报错版"，用它做**试探**会把一条完全正确的条目
+	 * （后面跟着 {@code delay=5}，首个后缀显然不是整数）判成"坐标要写整数"而报红。
+	 * 试探与解析必须是两个入口（这也是 {@code intValue} 的 {@code what} 不再接受 null 的原因）。
+	 */
+	private static boolean isInt(Token token) {
+		String value = valueOf(token).trim();
+		try {
+			int parsed = Integer.parseInt(value);
+			return parsed >= -COORD_LIMIT && parsed <= COORD_LIMIT;
+		} catch (NumberFormatException notAnInt) {
+			return false;
+		}
 	}
 
 	/**
@@ -1447,7 +1492,7 @@ public final class ScriptParser {
 	/**
 	 * 记号里的"值"：{@code key=value} 取 {@code value}，**不带 {@code =} 的裸记号取原文**。
 	 *
-	 * <p>⚠️ 第二半是必须的：位置参数与等待时长都是**裸记号**（{@code @rel 2 0 0} / {@code 5s}），
+	 * <p>⚠️ 第二半是必须的：位置参数与等待时长都是**裸记号**（{@code 2 0 0} / {@code 5s}），
 	 * 早先这里对没有 {@code =} 的记号返回空串，于是 {@code 2} 变成 {@code ""} ⇒
 	 * {@code Integer.parseInt("")} 抛异常 ⇒ 所有带坐标的条目一律报"坐标要写整数"、
 	 * 整条编译链路（以及不变量①②）全红。裸记号返回原文之后，数值/时间/物品 id 三种写法才走得通。
@@ -1546,7 +1591,6 @@ public final class ScriptParser {
 		final OperationType op;
 		final int line;
 		BlockPos offset = BlockPos.ZERO;
-		boolean absolute;
 		int delay;
 		Direction face = Direction.UP;
 		int failAmount = -1;

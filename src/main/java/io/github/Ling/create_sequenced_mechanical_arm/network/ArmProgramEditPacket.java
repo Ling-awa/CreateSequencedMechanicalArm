@@ -109,9 +109,9 @@ public record ArmProgramEditPacket(CompoundTag program) implements CustomPacketP
 		if (!program.isWithinLimits())
 			return SaveResult.OVER_LIMIT;
 
-		// 程序自己的坐标形态标记跟着卡片形态走：卡片是哪种形态，程序就自称哪种
-		// （条目级 absolute 才是运行语义，这个标记只用于"这份数据是什么"的可读性）
-		program.absolute = OperationTableItem.isAbsoluteForm(card);
+		// P1（§19）：这里原来有一行 `program.absolute = OperationTableItem.isAbsoluteForm(card)`
+		// —— 程序头那个"坐标空间"标记已删；现在文本头是 `@origin x y z`，是**数据**（原点在哪），
+		// 由编辑器/导入写进模型，落盘时随文本一起走，不需要在这里按卡片形态覆盖。
 		// 落盘这一步就是真正的天花板（§17.4）：程序先转成脚本文本才写得下。
 		// 失败**不落盘**，卡片上原来的文本保持不动。
 		CardProgramStorage.StoreResult stored = CardProgramStorage.write(card, program, registries);

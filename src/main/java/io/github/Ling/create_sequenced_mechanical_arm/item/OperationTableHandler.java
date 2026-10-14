@@ -50,7 +50,8 @@ import java.util.Objects;
  *   <li>手持操作表 → 进入会话；<b>换卡</b>（换成别的物品）才重建会话</li>
  *   <li><b>Alt + 滚轮</b> → 唯一的滚轮手势：录入模式切当前操作（界面见 {@link OperationSelectionOverlay}），
  *       编辑模式切"正在编辑的任务"</li>
- *   <li><b>右键方块</b> → 录入一条（记的是<b>世界绝对坐标 + 点击面</b>），录进"当前任务"</li>
+ *   <li><b>右键方块</b> → 录入一条（记的是<b>世界坐标 + 点击面</b>，进模型时按程序原点换算成偏移），
+ *       录进"当前任务"</li>
  *   <li><b>潜行右键</b> → 主手卡 + 副手写好字的剪贴板 = 按序号写入备注；否则在"录入模式 / 编辑模式"之间切换</li>
  *   <li><b>左键方块</b> → 撤销该方块上**最后录入的那一条**（一个方块可以绑多条操作）</li>
  *   <li>录过的目标实时画 AABB 轮廓</li>
@@ -198,15 +199,19 @@ public class OperationTableHandler {
 	 * <p><b>方块被挖掉了也照画</b>（用户："这样玩家破坏方块了也可以知道在那个地方是有操作的"）：
 	 * 没有形状（空气 / 被破坏）时退化成整方块大小的框，并换成<b>红色</b> —— 红色 = 那里的方块已经没了，
 	 * 金色 = 目标还在。未加载的区块直接跳过：那种情况下判不出"方块还在不在"，满世界画红框只会误导。
+	 *
+	 * <p>P1「坐标模型统一」（§19）：条目里存的是<b>相对原点的偏移</b>，所以世界位置要按
+	 * {@code program.origin.offset(entry.offset)} 算；同时"只画绝对条目"这道过滤也删了
+	 * —— 新模型里没有"绝对条目"这回事，所有带坐标的条目都该看得见（P2 才做原点的蓝框）。
 	 */
 	private static void drawOutlines(Level level, ArmProgram program) {
 		ArmProgramTask task = currentTask < 0 ? null : program.task(currentTask);
 		if (task == null)
 			return;
 		for (ArmProgramEntry entry : task.entries) {
-			if (!entry.op.requiresTarget() || !entry.absolute)
+			if (!entry.op.requiresTarget())
 				continue;
-			BlockPos pos = entry.offset;
+			BlockPos pos = program.origin.offset(entry.offset);
 			if (!level.hasChunkAt(pos))
 				continue;
 			BlockState state = level.getBlockState(pos);
@@ -349,7 +354,8 @@ public class OperationTableHandler {
 			feedback(player, "card.not_interactable", ChatFormatting.RED);
 			return;
 		}
-		// 记的是**世界绝对坐标**：转换时机在插臂时（§6）
+		// 记的是**世界坐标**（客户端只报位置与面，服务端按卡上程序的原点换算成偏移，§19.2）；
+		// 原点的整体平移（"以这条臂为基准"）发生在插卡进臂那一刻。
 		PacketDistributor.sendToServer(new CardEditPacket(CardEditPacket.Action.ADD_ENTRY, pos, face, currentOp()));
 	}
 
