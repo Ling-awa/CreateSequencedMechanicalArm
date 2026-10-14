@@ -180,6 +180,9 @@ public class ArmProgram {
 
 	public List<String> describe() {
 		List<String> out = new ArrayList<>();
+		// 原点放第一行（§19）：它是"这套坐标以哪为基准"，诊断时（`/sma info`）第一眼就要看到 ——
+		// 用户实测那次"看起来像绝对坐标"的排查，正是靠"原点 + 偏移"两个数一起看才定位到的。
+		out.add("原点 " + origin.toShortString());
 		for (ArmProgramTask task : tasks)
 			task.describeInto(out, i -> "  [" + i + "] ");
 		return out;

@@ -1144,7 +1144,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 标题芯片带"这个动作的必填信息"：位置类的坐标 + 左右键的朝向、等待类的时长/极性、调用的目标。
 		// 这段文字与护目镜 HUD 的步骤第一行**共用** ArmEntryText.base —— 两边各写一份必然越走越远
 		// （用户上一轮看到的就是"HUD 说 USE rel-2,1,0 onSuccess=SKIP_TO(9)" vs 卡片说"使用 +-2,1,0"）。
-		return ArmEntryText.base(entry);
+		return ArmEntryText.base(entry, program.origin);
 	}
 
 	/**
@@ -4103,7 +4103,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		String tail = ArmEntryText.signalTailText(send).getString();
 		if (!"1t".equals(tail))
 			return "持续 1t 的尾巴应当是「1t」，实际「" + tail + "」";
-		String sendBase = ArmEntryText.base(send).getString();
+		String sendBase = ArmEntryText.base(send, BlockPos.ZERO).getString();
 		if (!sendBase.contains(sendHead) || !sendBase.contains(tail))
 			return "发送信号的第一行里缺短语或时间（" + sendBase + " vs " + sendHead + " + " + tail + "）";
 		if (sendBase.contains(recvHead) || sendBase.contains(cutHead))
@@ -4146,7 +4146,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				return "标题芯片宽 " + signalChipWidth(chip) + " 装不下文字 " + need;
 		}
 		String offWord = tr("entry.signal_wait_off").getString();
-		String recvText = ArmEntryText.base(recvOff).getString();
+		String recvText = ArmEntryText.base(recvOff, BlockPos.ZERO).getString();
 		if (!recvText.contains(recvHead) || !recvText.contains(offWord))
 			return "老卡（redpow=false）的接收信号没有写成「" + recvHead + " … " + offWord + "」：" + recvText;
 

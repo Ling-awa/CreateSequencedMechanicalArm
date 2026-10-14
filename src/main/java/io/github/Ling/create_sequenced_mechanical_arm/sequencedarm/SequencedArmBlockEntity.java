@@ -861,7 +861,7 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		if (hud.entry != null) {
 			// 用 baseWithItems：工具提示里没有图标位，"等信号"绑的是哪对频率只能写名字
 			goggleLine().translate("gui.arm.step", hud.entryIndex + 1, hud.entryCount,
-				ArmEntryText.baseWithItems(hud.entry))
+				ArmEntryText.baseWithItems(hud.entry, getBlockPos()))
 				.style(ChatFormatting.GRAY)
 				.forGoggles(tooltip, 1);
 			for (Component prop : ArmEntryText.props(hud.entry))

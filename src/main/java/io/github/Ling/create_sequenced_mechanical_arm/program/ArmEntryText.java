@@ -10,6 +10,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 
@@ -45,8 +46,8 @@ public final class ArmEntryText {
 	 * <p>必要属性就是编辑器第二行里那些**必填**控件：位置类的坐标、左右键的朝向、等待类的时长/极性、
 	 * 调用的目标任务。可选属性（成功后 / 失败后 / 备注 / 个数…）不在这里，见 {@link #props}。
 	 */
-	public static Component base(ArmProgramEntry entry) {
-		return base(entry, false);
+	public static Component base(ArmProgramEntry entry, BlockPos origin) {
+		return base(entry, false, origin);
 	}
 
 	/**
@@ -56,11 +57,11 @@ public final class ArmEntryText {
 	 * 而工具提示没有图标位，只能写名字。这就是两者唯一的差别 —— 所以是同一个方法加一个开关，
 	 * 而不是各写一份（各写一份就会像以前那样两边说法不一致）。
 	 */
-	public static Component baseWithItems(ArmProgramEntry entry) {
-		return base(entry, true);
+	public static Component baseWithItems(ArmProgramEntry entry, BlockPos origin) {
+		return base(entry, true, origin);
 	}
 
-	private static Component base(ArmProgramEntry entry, boolean withFrequencyItems) {
+	private static Component base(ArmProgramEntry entry, boolean withFrequencyItems, BlockPos origin) {
 		StringBuilder suffix = new StringBuilder();
 		switch (entry.op) {
 			case WAIT -> suffix.append("  ")
@@ -94,16 +95,21 @@ public final class ArmEntryText {
 						.append(entry.callRepeat);
 			}
 			default -> {
-				if (entry.op.requiresTarget())
-					// P1（§19）：坐标一律相对程序原点，条目上不再有"绝对/相对"记号 ⇒ 统一用 `+`。
-					// 显示的是**偏移**（模型里那个值），卡上也是它 —— 世界位置要在界面上按
-					// `origin + offset` 算（GUI 的坐标框走那条路）。
-					suffix.append("  +")
-						.append(entry.offset.getX())
+				if (entry.op.requiresTarget()) {
+					// ★ 显示的是**世界位置**（= 原点 + 偏移），不是模型里那个偏移（§19）。
+					//   为什么必须这样：偏移是"相对程序原点"的数，原点非零时它跟玩家在世界里看到的坐标
+					//   **完全不是一回事** —— 用户实测（2026-10-14）就把它读成了"臂在用绝对坐标"：
+					//   那条操作的偏移是 (154,60,154)、臂原点是 (-154,-60,-154)，真实目标其实是世界原点 (0,0,0)
+					//   （那条操作**没录过位置**，新条目的偏移默认就是 0 = "指向原点"）。
+					//   模型里存的仍是偏移（`origin.offset(offset)` 只在显示这一层算），所以这里是**显示口径的唯一一处**。
+					BlockPos world = origin.offset(entry.offset);
+					suffix.append("  ")
+						.append(world.getX())
 						.append(',')
-						.append(entry.offset.getY())
+						.append(world.getY())
 						.append(',')
-						.append(entry.offset.getZ());
+						.append(world.getZ());
+				}
 			}
 		}
 		// 朝向是左右键的必填项（用户点名要它出现在必要属性里）：坐标之外再报一个面
@@ -357,7 +363,7 @@ public final class ArmEntryText {
 		bare.op = OperationType.TAKE;
 		bare.offset = new net.minecraft.core.BlockPos(1, 2, 3);
 		List<Component> bareProps = props(bare);
-		String baseText = base(bare).getString();
+		String baseText = base(bare, BlockPos.ZERO).getString();
 		if (!bareProps.isEmpty())
 			return "默认条目不该有可选属性行：" + bareProps;
 		if (!baseText.contains("1,2,3"))
@@ -372,7 +378,7 @@ public final class ArmEntryText {
 		full.failAmount = 5;
 		full.onTimeout = SkipAction.CONTINUE;
 		full.note = "备注";
-		String fullBase = base(full).getString();
+		String fullBase = base(full, BlockPos.ZERO).getString();
 		List<Component> fullProps = props(full);
 		if (!fullBase.contains("-2,1,0"))
 			return "第一行里没有坐标：" + fullBase;
