@@ -224,6 +224,17 @@ public class OperationTableHandler {
 	 * 原点没设（{@code hasOrigin=false}）时这条公式只是显示用的近似，且此时根本录不进新条目。
 	 */
 	private static void drawOutlines(Level level, ArmProgram program) {
+		// ★ 原点：**完整方块的蓝框**，与方块形状、有没有方块都无关（用户要求："无论方块形状、是否有方块
+		//   都显示为完整方块的蓝色方框"）。颜色取原版动力臂**输入端**那个蓝 ——
+		//   `ArmInteractionPoint:198-199`：输出端 `0xDDC166`（金）、输入端 `0x7FCDE0`（蓝）；
+		//   下面操作框用的那个金就是同一个来源，所以这里用同一个上游出处、不自己调色。
+		//   key 用常量字符串：Outliner 的 key 必须是稳定值类型，否则每 tick 会累积一份。
+		if (program.hasOrigin && level.hasChunkAt(program.origin))
+			Outliner.getInstance()
+				.showAABB("sequenced_arm:origin", new AABB(program.origin))
+				.colored(0x7FCDE0)
+				.lineWidth(1 / 16f);
+
 		ArmProgramTask task = currentTask < 0 ? null : program.task(currentTask);
 		if (task == null)
 			return;
