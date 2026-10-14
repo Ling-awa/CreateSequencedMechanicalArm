@@ -956,6 +956,43 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 		return progress == 1 ? 1 : (progress % .5f) * 2;
 	}
 
+	/**
+	 * 给定**移动进度**算这一次移动该摆成什么姿态 —— **纯函数**（不碰 chaser、不读世界）。
+	 * 渲染与自检用的是同一份实现（决策 68/94：判据不许写两份）。
+	 *
+	 * <p>顺序照抄上游 `ArmBlockEntity:203-220`，**顺序本身就是正确性的一部分**：
+	 * ① 先按**真正的目标**算旋转（`aimed`，整段因子）；
+	 * ② 然后 `target` 才会被"前半段折回/停在静止位"覆盖（半段因子用在臂角度上）。
+	 *
+	 * <p>⚠️ 我上一版把旋转那行挪到了②之后 ⇒ 前半段里两个端点都成了 `previousBaseAngle`
+	 * ⇒ **旋转被冻结**，到 `progress = .5` 才一步跳到一半。用户第二十七轮续三十九实测：
+	 * <i>"动画的旋转缺失了一部分……原本的旋转，前面一半没有了，然后突然瞬移到后面一半。"</i>
+	 *
+	 * @param progress          移动进度 0→1
+	 * @param previousTarget    起点姿态（客户端在开始新移动时快照的"手臂现在在哪"）
+	 * @param aimed             这一次真正的目标姿态；{@code null} = 没有目标（收回 / 等待）⇒ 旋转冻结
+	 * @param previousBaseAngle 起点的旋转角
+	 */
+	public static SmartArmAngleTarget poseAt(float progress, SmartArmAngleTarget previousTarget,
+		@Nullable SmartArmAngleTarget aimed, float previousBaseAngle) {
+		// ① 旋转：**整段**因子，必须在这里算（下面 target 会被覆盖）
+		float base = AngleHelper.angleLerp(rotationFactor(progress), previousBaseAngle,
+			aimed == null ? previousBaseAngle : aimed.baseAngle);
+
+		// ② 臂角度：前半段折回静止位、后半段从静止位伸向目标（半段因子）
+		SmartArmAngleTarget target = aimed == null ? SmartArmAngleTarget.RESTING : aimed;
+		SmartArmAngleTarget from = previousTarget;
+		if (progress < .5f)
+			target = SmartArmAngleTarget.RESTING;
+		else
+			from = SmartArmAngleTarget.RESTING;
+		float extension = extensionFactor(progress);
+
+		return SmartArmAngleTarget.of(base, Mth.lerp(extension, from.lowerArmAngle, target.lowerArmAngle),
+			Mth.lerp(extension, from.upperArmAngle, target.upperArmAngle),
+			AngleHelper.angleLerp(extension, from.headAngle % 360, target.headAngle % 360));
+	}
+
 	/** 推进移动进度；客户端顺带做角度插值（照抄 ArmBlockEntity.tickMovementProgress 的语义）。 */
 	private void tickMovementProgress() {
 		chasedPointProgress += Math.min(256, Math.abs(getSpeed())) / 1024f;
@@ -965,27 +1002,12 @@ public class SmartArmBlockEntity extends KineticBlockEntity implements Transform
 			return;
 
 		ArmInteractionPoint targeted = currentPoint();
-		SmartArmAngleTarget target = targeted == null ? SmartArmAngleTarget.RESTING : anglesFor(targeted);
-
-		SmartArmAngleTarget from = previousTarget;
-		if (chasedPointProgress < .5f)
-			target = SmartArmAngleTarget.RESTING; // 前半段：折回静止位
-		else
-			from = SmartArmAngleTarget.RESTING; // 后半段：从静止位伸向目标
-		float progress = extensionFactor(chasedPointProgress);
-
-		// ★ 旋转用**整段**因子（= 上游 `:208`），伸出用**半段**因子（= 上游 `:216`）——
-		//   两者都走的阶段是"后半段"，所以**旋转与伸出在最后半段同时进行，而旋转提前半段开始**。
-		//   用户第二十七轮续三十八实测对照：原版"转到一半才开始伸出"，我们曾经"一开始转就伸出"
-		//   （因为我上一轮把旋转也改成了半段因子 —— 那是为了消掉"收回时旋转"，
-		//   正确做法是让收回自成一段、且那一段不旋转，见 `retract()` 与 {@code ProgramRuntime.beginEntry} 的闸门）。
-		// ⚠️ 目标为静止位时旋转必须**冻结**（收回/等待期间不许转向新目标）。
-		baseAngle.setValue(AngleHelper.angleLerp(rotationFactor(chasedPointProgress), previousBaseAngle,
-			target == SmartArmAngleTarget.RESTING ? previousBaseAngle : target.baseAngle));
-
-		lowerArmAngle.setValue(Mth.lerp(progress, from.lowerArmAngle, target.lowerArmAngle));
-		upperArmAngle.setValue(Mth.lerp(progress, from.upperArmAngle, target.upperArmAngle));
-		headAngle.setValue(AngleHelper.angleLerp(progress, from.headAngle % 360, target.headAngle % 360));
+		SmartArmAngleTarget pose = poseAt(chasedPointProgress, previousTarget,
+			targeted == null ? null : anglesFor(targeted), previousBaseAngle);
+		baseAngle.setValue(pose.baseAngle);
+		lowerArmAngle.setValue(pose.lowerArmAngle);
+		upperArmAngle.setValue(pose.upperArmAngle);
+		headAngle.setValue(pose.headAngle);
 	}
 
 	/**

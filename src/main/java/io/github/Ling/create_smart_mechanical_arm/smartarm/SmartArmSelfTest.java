@@ -150,6 +150,7 @@ public class SmartArmSelfTest {
 		checkClaimFollowsIntent(server);
 		checkDeployPrecheckScansAllSlots(server);
 		checkRetractBeforeNextMove(server);
+		checkMovePoseTimeline();
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
@@ -1027,6 +1028,79 @@ public class SmartArmSelfTest {
 			level.setBlockAndUpdate(depotB, oldB);
 			level.setBlockAndUpdate(armPos, oldArm);
 		}
+	}
+
+	/**
+	 * 一次移动的**姿态时间线**（纯函数，不需要世界）—— 用户第二十七轮续三十九实测发现的回归。
+	 *
+	 * <p><b>用户实测</b>：<i>"动画的旋转缺失了一部分……原本的旋转，前面一半没有了，然后突然瞬移到后面一半，
+	 * 这一半旋转是正常的，旋转+伸出。"</i> 根因是我把旋转那行挪到了"`target` 被覆盖成静止位"**之后**
+	 * ⇒ 前半段里旋转的两个端点都成了 `previousBaseAngle` ⇒ 冻结，到 `progress = .5` 才一步跳到一半。
+	 * 上游的顺序是**先算旋转、再覆盖 target**（`ArmBlockEntity:205-215`）。
+	 *
+	 * <p>这条断言直接把时间线上四个点钉住（起点静止、前半段在转、.5 处转了一半且臂未伸、终点两者同时到位），
+	 * 另外钉住"没有目标（收回/等待）时旋转必须冻结"。把顺序改回去 ⇒ 第二条立刻变红。
+	 */
+	private static void checkMovePoseTimeline() {
+		float tol = 1e-3f;
+		SmartArmAngleTarget aim = SmartArmAngleTarget.of(90f, 100f, 20f, 30f);
+		SmartArmAngleTarget rest = SmartArmAngleTarget.RESTING;
+		SmartArmAngleTarget p0 = SmartArmBlockEntity.poseAt(0f, rest, aim, 0f);
+		SmartArmAngleTarget p25 = SmartArmBlockEntity.poseAt(.25f, rest, aim, 0f);
+		SmartArmAngleTarget p50 = SmartArmBlockEntity.poseAt(.5f, rest, aim, 0f);
+		SmartArmAngleTarget p75 = SmartArmBlockEntity.poseAt(.75f, rest, aim, 0f);
+		SmartArmAngleTarget p100 = SmartArmBlockEntity.poseAt(1f, rest, aim, 0f);
+		SmartArmAngleTarget frozen = SmartArmBlockEntity.poseAt(.25f, rest, null, 0f);
+
+		boolean startsAtOldDirection = Math.abs(p0.baseAngle) < tol;
+		// ★ 反证点：前半段必须**已经在转**。90° 的一趟转身里，.25 处应当是 25% = 22.5°
+		//   （我第一版把期望写成 45° ⇒ 变成一条"永远红"的断言 —— 决策 88：错的期望值和错的实现一样有害，
+		//    所以这里连"非零且单调"一起断言，而不是只钉一个数）。
+		boolean rotatesDuringFirstHalf = Math.abs(p25.baseAngle - 22.5f) < tol && p25.baseAngle > 0f
+			&& p25.baseAngle < p50.baseAngle;
+		boolean armStaysPutWhileTurning = Math.abs(p25.lowerArmAngle - rest.lowerArmAngle) < tol
+			&& Math.abs(p25.upperArmAngle - rest.upperArmAngle) < tol;
+		boolean halfTurnWhenExtensionStarts = Math.abs(p50.baseAngle - 45f) < tol
+			&& Math.abs(p50.lowerArmAngle - rest.lowerArmAngle) < tol;
+		boolean rotateAndExtendTogether = Math.abs(p75.baseAngle - 67.5f) < tol
+			&& Math.abs(p75.lowerArmAngle - (rest.lowerArmAngle + aim.lowerArmAngle) / 2f) < tol;
+		boolean bothFinishTogether = Math.abs(p100.baseAngle - aim.baseAngle) < tol
+			&& Math.abs(p100.lowerArmAngle - aim.lowerArmAngle) < tol
+			&& Math.abs(p100.upperArmAngle - aim.upperArmAngle) < tol;
+		boolean frozenWithoutTarget = Math.abs(frozen.baseAngle) < tol
+			&& Math.abs(frozen.lowerArmAngle - rest.lowerArmAngle) < tol;
+
+		LOGGER.info("[selftest] 移动姿态时间线: 起点朝旧方向={} 前半段就在转={}（.25 时={}°） "
+			+ "转身时臂不动={} .5 处转了一半={}（={}°） 后半段旋转+伸出同时={} 终点同时到位={} "
+			+ "无目标时旋转冻结={}",
+			startsAtOldDirection, rotatesDuringFirstHalf, p25.baseAngle, armStaysPutWhileTurning,
+			halfTurnWhenExtensionStarts, p50.baseAngle, rotateAndExtendTogether, bothFinishTogether,
+			frozenWithoutTarget);
+
+		if (!startsAtOldDirection)
+			LOGGER.error("[selftest] 移动起点不是「朝旧方向」（baseAngle={}）—— 应当从手臂当前朝向开始转",
+				p0.baseAngle);
+		if (!rotatesDuringFirstHalf)
+			LOGGER.error("[selftest] **前半段旋转被冻结或不对**（.25 时 baseAngle={}°，应当是 22.5°："
+				+ "90° 的一趟在四分之一处转了 25%）—— 冻结的表现就是用户实测的"
+				+ "「旋转的前一半没有了、突然瞬移到后一半」；"
+				+ "根因是旋转那行被排在「`target` 被覆盖成静止位」之后（上游是 `ArmBlockEntity:205-215`）",
+				p25.baseAngle);
+		if (!armStaysPutWhileTurning)
+			LOGGER.error("[selftest] 前半段手臂**伸了**（lower={} upper={}）—— 前半段应当只转身、臂不动",
+				p25.lowerArmAngle, p25.upperArmAngle);
+		if (!halfTurnWhenExtensionStarts)
+			LOGGER.error("[selftest] 伸出开始时旋转**不是一半**（baseAngle={}°）—— 原版是「转到一半才开始伸出」",
+				p50.baseAngle);
+		if (!rotateAndExtendTogether)
+			LOGGER.error("[selftest] 后半段旋转与伸出**没有同步**（baseAngle={}° lower={}）",
+				p75.baseAngle, p75.lowerArmAngle);
+		if (!bothFinishTogether)
+			LOGGER.error("[selftest] 终点姿态不对（base={} lower={} upper={}）", p100.baseAngle,
+				p100.lowerArmAngle, p100.upperArmAngle);
+		if (!frozenWithoutTarget)
+			LOGGER.error("[selftest] 没有目标时旋转**没有冻结**（baseAngle={}°）—— 收回/等待期间不许转向",
+				frozen.baseAngle);
 	}
 
 	/** 走目标方块**自己的物品能力**放一个铁锭（不碰 BE 内部字段，与"世界里真的放了一个"一致）。 */
