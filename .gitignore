@@ -22,3 +22,9 @@ run
 
 # Scratch area (extracted dependency sources, throwaway probes)
 .scratch
+
+# 设计与实测记录（PLAN.md）：**故意不进仓库**，只在本机维护。
+# 它逐轮记录了每条行为的理由、与上游源码的比对和用户实测原话 —— 属于内部工作日志，
+# 源码注释里引用的 §7.x / 决策 N 指向的就是它（README 里有一句说明）。
+# ⚠️ 文件必须留在盘上：它是这个项目唯一的"为什么"档案，删了就没了。
+PLAN.md
