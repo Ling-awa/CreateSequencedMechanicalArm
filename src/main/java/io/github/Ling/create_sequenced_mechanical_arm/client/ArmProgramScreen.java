@@ -255,19 +255,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int ADD_PROP_HIT_RIGHT = 16;
 
 	/**
-	 * 任务页底栏那两颗新按钮（「原点坐标」/「坐标偏移」）的位置与尺寸。
+	 * 任务页底栏那两颗按钮（「原点坐标」/「坐标偏移」）的位置与尺寸。
 	 *
-	 * <p>为什么接在 x=87 起：底栏原来只有三颗 18px 的 IconButton（21 / 45 / 63，右沿 81），
-	 * 再往右到面板内侧 236 是一整条空地 —— 而**不是**一路排到右边的确认键（那颗在
-	 * {@code leftPos + width - 42}，属于"整个界面"而不是"这一页"，见 {@code init}）。
-	 * 宽度 64：本仓库的字体口径是"汉字约 9px、ASCII 约 5–6px"（见 {@code SIGNAL_MODE_W} 那段账），
-	 * 中文「原点坐标」4 字 ≈ 36px、英文最长 "Origin" / "Offset" ≈ 33–36px，两端各留 10px 以上；
-	 * 这个账由自检 {@code checkBottomButtons} 用**实测字体宽度**兜住（按钮贴图不裁剪文字，
-	 * 放不下就是糊到按钮外面去，编译与服务端自检都看不出来）。
+	 * <p>★ 用户第四十二轮：它们原来是两颗 **64×18 的文字**按钮（x=87 / 155）。用户看到实机截图后说
+	 * "按钮太过靠左，或许可以和其他按钮一样采用方形按钮 + 图标" —— 三点都成立，所以改成与其它按钮
+	 * **同款**：18×18 方形 + 图标 + 悬停提示，接着 {@code I_ADD}（63..81）往右排。
+	 * 顺带修掉一个用户没点名、但同一张截图里看得见的毛病：文字版第二颗到 219，
+	 * 而右下角那颗「保存并关闭」在 {@code leftPos + width - 42 = 214..232}（{@code SCHEDULE} 贴图宽 256）
+	 * ⇒ **两颗叠了 5px**。方形化之后右沿只到 129，离确认键还有 85px。
+	 *
+	 * <p>间距 24（87 → 111）与左边那对的 45 → 63 对齐；纵向仍与那三颗同一条基线（y=196）。
+	 * 这几条由自检 {@code checkBottomButtons} 钉住（重叠/越界在编译期与服务端自检里都看不出来）。
 	 */
 	private static final int BOTTOM_BTN_SET_ORIGIN_X = 87;
-	private static final int BOTTOM_BTN_SHIFT_X = 155;
-	private static final int BOTTOM_BTN_W = 64;
+	private static final int BOTTOM_BTN_SHIFT_X = 111;
+	private static final int BOTTOM_BTN_SIZE = 18;
+
+	/**
+	 * 右下角那颗「保存并关闭」的 x（相对 {@code leftPos}）＝ {@code SCHEDULE} 贴图宽 256 − 42。
+	 *
+	 * <p>提成常量是为了让底栏那两颗按钮的自检（{@code checkBottomButtons}）能拿**同一个数**判重叠 ——
+	 * 原来它写 {@code bg.getWidth() - 42}，而自检里按"面板内侧 236"算，两边差了 22px，
+	 * 于是那 5px 的重叠一直没被发现（用户第四十二轮的截图就是它）。
+	 */
+	private static final int CONFIRM_BTN_X = 256 - 42;
 
 	private final ArmProgramMenu menu;
 
@@ -552,28 +563,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		insert.setToolTip(page == Page.ENTRIES ? tr("btn.insert_entry") : tr("btn.insert_task"));
 		addRenderableWidget(insert);
 
-		// ★ 任务列表页专有的两颗按钮（用户第二十七轮之后的新需求：卡上的原点与"整套搬一下"）。
+		// ★ 任务列表页专有的两颗按钮（用户第四十一轮的新需求：卡上的原点与"整套搬一下"）。
 		//   为什么只画在任务页：它们动的是**整张卡**（原点）与**所有任务**（偏移），
 		//   操作页是"某一任务里的某几条"，在那儿摆一颗"整份一起动"的按钮只会让人以为它只管当前任务。
-		//   位置接着底栏那一排往右排：x=87 / 155，各 64 宽（3 个 IconButton 到 GUI 81 为止，
-		//   两颗按钮到 219，都在面板内侧 236 以内）。宽度按最长的那个译文倒推（中文 4 字 ≈ 36px、
-		//   英文 "Origin" / "Offset" ≈ 36px），具体数由 {@code checkBottomButtons} 那条自检
-		//   用实测字体宽度钉住（Create 的按钮贴图不会裁剪文字，放不下就是画到按钮外面去）。
+		//   样式照左边那三颗：18×18 IconButton + 悬停提示（用户第四十二轮：原来是文字按钮，太笨重）。
+		//   图标：原点 = 靶心（{@code I_TARGET}）、偏移 = 平移（{@code I_TOOL_MOVE_XZ}，Create 蓝图工具
+		//   那套里的"沿 XZ 搬"）—— 都不新画贴图。
 		if (page == Page.TASKS) {
-			TextButton setOrigin = new TextButton(leftPos + BOTTOM_BTN_SET_ORIGIN_X, topPos + 196, BOTTOM_BTN_W,
-				18, tr("btn.set_origin"));
+			IconButton setOrigin = new IconButton(leftPos + BOTTOM_BTN_SET_ORIGIN_X, topPos + 196,
+				AllIcons.I_TARGET);
 			setOrigin.withCallback(() -> openDialog(Dialog.ORIGIN));
-			setOrigin.setToolTip(tr("tip.set_origin"));
+			// 提示 = 名字 + 一句解释（其它几颗只有名字，这两件事光看图标猜不出来）
+			setOrigin.setToolTip(tr("btn.set_origin").copy()
+				.append("\n")
+				.append(tr("tip.set_origin")));
 			addRenderableWidget(setOrigin);
 
-			TextButton shift = new TextButton(leftPos + BOTTOM_BTN_SHIFT_X, topPos + 196, BOTTOM_BTN_W, 18,
-				tr("btn.shift_coords"));
+			IconButton shift = new IconButton(leftPos + BOTTOM_BTN_SHIFT_X, topPos + 196, AllIcons.I_TOOL_MOVE_XZ);
 			shift.withCallback(() -> openDialog(Dialog.OFFSET));
-			shift.setToolTip(tr("tip.shift_coords"));
+			shift.setToolTip(tr("btn.shift_coords").copy()
+				.append("\n")
+				.append(tr("tip.shift_coords")));
 			addRenderableWidget(shift);
 		}
 
-		IconButton confirm = new IconButton(leftPos + bg.getWidth() - 42, topPos + bg.getHeight() - 30,
+		IconButton confirm = new IconButton(leftPos + CONFIRM_BTN_X, topPos + bg.getHeight() - 30,
 			AllIcons.I_CONFIRM);
 		confirm.withCallback(() -> minecraft.player.closeContainer());
 		confirm.setToolTip(tr("btn.save"));
@@ -3324,61 +3338,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	// ————————————————————————— 自绘控件 —————————————————————————
 
-	/** 带文字的 Create 按钮（用 IconButton 同一张 widgets 贴图，不引入新贴图）。 */
-	static class TextButton extends AbstractSimiWidget {
-
-		private final Component text;
-
-		TextButton(int x, int y, int width, int height, Component text) {
-			super(x, y, width, height);
-			this.text = text;
-		}
-
-		void setToolTip(Component text) {
-			toolTip.clear();
-			toolTip.add(text);
-		}
-
-		@Override
-		protected void doRender(GuiGraphics graphics, int mouseX, int mouseY, float partialTicks) {
-			isHovered = mouseX >= getX() && mouseY >= getY() && mouseX < getX() + width && mouseY < getY() + height;
-			AllGuiTextures button = !active ? AllGuiTextures.BUTTON_DISABLED
-				: isHovered && AllKeys.isMouseButtonDown(0) ? AllGuiTextures.BUTTON_DOWN
-					: isHovered ? AllGuiTextures.BUTTON_HOVER : AllGuiTextures.BUTTON;
-			RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
-			// ⚠️ 按钮贴图是 **18×18**（`AllGuiTextures.BUTTON("widgets", 18, 18)`）。第一版写的是
-			// `blit(..., min(width, 18), 18)` → 34px 宽的按钮只画出 18px 的底，文字居中飘在空白上，
-			// 看起来就是"图标和输入框之间一个大空隙"（用户实测）。改成九宫格拉伸：四角 1px、
-			// 四条边与中间拉伸（贴图的边正好 1px，拉伸不失真）。
-			blit9(graphics, button, getX(), getY(), width, height);
-			Minecraft mc = Minecraft.getInstance();
-			int color = active ? 0xFFFFFF : 0xA0A0A0;
-			graphics.drawString(mc.font, text, getX() + (width - mc.font.width(text)) / 2, getY() + (height - 8) / 2,
-				color, false);
-		}
-
-		/** 九宫格画一张 18×18 的按钮贴图：四角 + 四边 + 中间，任意宽高都铺满。 */
-		private static void blit9(GuiGraphics graphics, AllGuiTextures tex, int x, int y, int w, int h) {
-			ResourceLocation loc = tex.getLocation();
-			int u = tex.getStartX();
-			int v = tex.getStartY();
-			int tw = tex.getWidth();
-			int th = tex.getHeight();
-			if (w <= tw && h <= th) { // 放得下就原样搬，不放大贴图
-				graphics.blit(loc, x, y, w, h, u, v, w, h, 256, 256);
-				return;
-			}
-			int ex = Math.min(1, tw); // 边宽
-			int ey = Math.min(1, th);
-			graphics.blit(loc, x + ex, y + ey, w - ex * 2, h - ey * 2, u + ex, v + ey, Math.max(1, tw - ex * 2),
-				Math.max(1, th - ey * 2), 256, 256);
-			graphics.blit(loc, x + ex, y, w - ex * 2, ey, u + ex, v, Math.max(1, tw - ex * 2), ey, 256, 256);
-			graphics.blit(loc, x + ex, y + h - ey, w - ex * 2, ey, u + ex, v + th - ey, Math.max(1, tw - ex * 2), ey,
-				256, 256);
-			graphics.blit(loc, x, y, ex, h, u, v, ex, th, 256, 256);
-			graphics.blit(loc, x + w - ex, y, ex, h, u + tw - ex, v, ex, th, 256, 256);
-		}
-	}
+	// 用户第四十二轮：这里原来有一个 `TextButton`（自绘的"带文字 Create 按钮"，含 `blit9` 九宫格拉伸
+	// —— 那是为了把 18×18 的按钮贴图铺满 64 宽的底）。底栏那两颗文字按钮改成方形图标按钮之后
+	// 它就没有调用方了，整类删掉：**这个界面里所有按钮都是 18×18 的 IconButton**，
+	// 再往底栏塞第二套按钮样式只会让"哪颗是干什么的"更难认。
 
 	// ————————————————————————— 客户端自检 —————————————————————————
 
@@ -4833,38 +4796,46 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private final List<String> hits = new ArrayList<>();
 
 	/**
-	 * 自检：任务页底栏那两颗新按钮（「原点坐标」/「坐标偏移」）**画得下、也不越出面板**。
+	 * 自检：任务页底栏那两颗按钮（「原点坐标」/「坐标偏移」）**摆出来了、也没和谁挤在一起**。
 	 *
-	 * <p>为什么值得一条断言：Create 的按钮贴图**不裁剪文字**（同 {@code Label}），译文一变长
-	 * （英文 "Shift coords" 比中文长）就会糊到按钮外面、看起来像两个按钮叠在一起，而编译、
-	 * 服务端自检全都不报错。这条把"实测字体宽度"与按钮宽度对一遍，顺带钉住
-	 * ① 两个按钮都在**面板内容区**（≤236）里；② 它们与左边那三颗 IconButton 不重叠。
+	 * <p>为什么值得一条断言：这两条都是"编译、服务端自检全都不报错、只有人眼能看出来"的事 ——
+	 * 用户第四十二轮就是拿实机截图指出来的：文字版第二颗到 219，而右下角那颗「保存并关闭」从
+	 * {@link #CONFIRM_BTN_X}（214）起 ⇒ **叠了 5px**；而且它和左边三颗 IconButton 不是一路样式。
 	 *
-	 * <p>反证：把 {@code BOTTOM_BTN_W} 改成 40 ⇒ 英文 "Shift coords" 放不下 ⇒ 这条立刻红。
+	 * <p>反证：把 {@code BOTTOM_BTN_SHIFT_X} 改成 200 ⇒ "压住了「保存并关闭」"那条立刻红；
+	 * 把 {@code addRenderableWidget(setOrigin)} 删掉 ⇒ "没有摆出来"那条立刻红。
 	 */
 	@Nullable
 	private String checkBottomButtons() {
-		// ① 底栏左边那三颗 IconButton（21 / 45 / 63）到 GUI 81 为止：新按钮不许压上去
+		// ① 接着 I_ADD（63..81）往右排：不许压上去
 		if (BOTTOM_BTN_SET_ORIGIN_X < 81)
-			return "「原点坐标」按钮压住了左边那三颗 IconButton（x=" + BOTTOM_BTN_SET_ORIGIN_X + " < 81）";
-		// ② 两颗都要留在**面板内容区**里（236 = 面板内侧边线；再往右就画到面板外）
-		int right = BOTTOM_BTN_SHIFT_X + BOTTOM_BTN_W;
-		if (right > 236)
-			return "两颗按钮越出面板内容区（到 x=" + right + "，上限 236）";
-		if (BOTTOM_BTN_SHIFT_X < BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_W)
-			return "两颗按钮重叠（" + BOTTOM_BTN_SET_ORIGIN_X + ".." + (BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_W)
+			return "「原点坐标」压住了左边那三颗 IconButton（x=" + BOTTOM_BTN_SET_ORIGIN_X + " < 81）";
+		// ② 两颗之间要有缝（用户抱怨的就是"挤在一块儿"）
+		if (BOTTOM_BTN_SHIFT_X < BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_SIZE + 4)
+			return "两颗按钮挨得太紧（" + BOTTOM_BTN_SET_ORIGIN_X + ".." + (BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_SIZE)
 				+ " 与 " + BOTTOM_BTN_SHIFT_X + " 起）";
-		for (String key : new String[] { "btn.set_origin", "btn.shift_coords" }) {
-			String shown = tr(key).getString();
-			// 漏译文时 getString() 给的是**键名本身**（前缀很长）⇒ 下面那条宽度断言会顺带抓到它，
-			// 但把话说明白更好读（"没有译文"与"文字太长"是两件不同的事）
-			if (shown.startsWith("create_sequenced_mechanical_arm."))
-				return "按钮文字 " + key + " 没有译文（界面会显示原始 key）";
-			int need = font.width(tr(key));
-			if (need > BOTTOM_BTN_W - 6)
-				return "按钮文字「" + shown + "」放不下：" + need + " > " + (BOTTOM_BTN_W - 6)
-					+ "（按钮贴图不裁剪文字，会糊到按钮外面）";
+		// ③ 也不许压住右下角那颗「保存并关闭」（它在 leftPos + CONFIRM_BTN_X，与这一页无关但同一行）
+		int right = BOTTOM_BTN_SHIFT_X + BOTTOM_BTN_SIZE;
+		if (right > CONFIRM_BTN_X - 4)
+			return "两颗按钮压住了「保存并关闭」（到 x=" + right + "，那颗从 " + CONFIRM_BTN_X + " 起）";
+		// ④ 两颗按钮的图标不能是同一个（那就分不出哪个是哪个了）
+		if (AllIcons.I_TARGET == AllIcons.I_TOOL_MOVE_XZ)
+			return "两颗按钮用了同一个图标";
+		// ⑤ 常量对了不等于**真摆出来了**：在任务页上按坐标把这两颗找一遍
+		boolean origin = false;
+		boolean shift = false;
+		for (GuiEventListener widget : children()) {
+			if (!(widget instanceof IconButton button))
+				continue;
+			int x = button.getX() - leftPos;
+			int y = button.getY() - topPos;
+			if (x == BOTTOM_BTN_SET_ORIGIN_X && y == 196)
+				origin = true;
+			if (x == BOTTOM_BTN_SHIFT_X && y == 196)
+				shift = true;
 		}
+		if (!origin || !shift)
+			return "任务页上没有摆出这两颗按钮（原点=" + origin + " 偏移=" + shift + "）";
 		return null;
 	}
 
