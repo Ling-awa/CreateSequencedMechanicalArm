@@ -96,8 +96,25 @@ public final class ArmEntryText {
 					suffix.append("  ×")
 						.append(entry.callRepeat);
 			}
+			case FILTER -> {
+				// 过滤的必需信息 = 过滤位置（用户口径：必要输入为"幽灵物品 + 过滤位置"）。
+				// 位置名走 entry.filter_source.* 那个键（与编辑器第二行同一个来源，不写死中文）。
+				suffix.append("  ")
+					.append(tr(entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER
+						? "filter_source.container"
+						: "filter_source.held")
+							.getString());
+				// 幽灵物品的名字：**空过滤器 = 匹配一切**，那是个有意义的默认，所以显式写"未设置"
+				// 而不是省略（省略会让人以为这条没配好 —— 其实它一定成功）。
+				suffix.append(" → ")
+					.append(entry.filterItem.isEmpty() ? tr("filter.none").getString()
+						: entry.filterItem.getHoverName()
+							.getString());
+			}
 			default -> {
-				if (entry.op.requiresTarget())
+				// ★ 问**条目级**的 needsTarget()：过滤的容器模式有坐标（且胶囊上要看得见），
+				//   手持模式则一个字都不写（用户口径：手持模式不写坐标）。
+				if (entry.needsTarget())
 					// 显示的是**偏移**（模型里那个值），不是"原点 + 偏移"。用户定的口径（§19.7）：
 					// **臂运行时就是"臂坐标 + 偏移"**（{@code ProgramRuntime.offsetOf} 直接返回 offset，
 					// 卡上的原点不参与运行时、插卡也不平移），所以这一行读出来就是"相对执行它的那条臂"
@@ -110,8 +127,12 @@ public final class ArmEntryText {
 						.append(entry.offset.getZ());
 			}
 		}
-		// 朝向是左右键的必填项（用户点名要它出现在必要属性里）：坐标之外再报一个面
-		if (needsFace(entry.op))
+		// 朝向是左右键的必填项（用户点名要它出现在必要属性里）：坐标之外再报一个面。
+		// ⚠️ 过滤的**手持模式不报面** —— 与"手持模式不写坐标"同一条口径（那时面根本没有用）。
+		//   {@link #needsFace} 里给它放行，是为了容器模式那一支能共用同一套控件代码。
+		boolean faceMeaningful = needsFace(entry.op)
+			&& !(entry.op == OperationType.FILTER && !entry.needsTarget());
+		if (faceMeaningful)
 			suffix.append("  ")
 				.append(tr("opt." + entry.face.getName()).getString());
 		// 「收发信号」的**操作名**就是随模式变的短语（接收信号 / 发送信号 / 中断信号）——
@@ -120,10 +141,16 @@ public final class ArmEntryText {
 		return tr("chip.entry", name, suffix.toString());
 	}
 
-	/** 需要"交互面"的操作（左键/右键语义）—— 与编辑器里的判定同一处依据。 */
+	/**
+	 * 需要"交互面"的操作（左键/右键语义）—— 与编辑器里的判定同一处依据。
+	 *
+	 * <p>「过滤」在**容器模式**下也要一个面：它虽然只读（不做右键动作），但"臂伸到那一格的哪一面"
+	 * 是这条条目的一组必要信息 —— 用户点名的口径就是"容器模式写坐标 + {@code face=}"。
+	 * 手持模式用不上这个面（{@link #base} 里那一处会顺手省略它，与"手持模式不写坐标"同一条口径）。
+	 */
 	public static boolean needsFace(OperationType op) {
 		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK;
+			|| op == OperationType.USE_SNEAK || op == OperationType.FILTER;
 	}
 
 	/**

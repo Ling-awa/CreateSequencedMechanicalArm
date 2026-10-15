@@ -248,7 +248,9 @@ public class OperationTableHandler {
 		if (task == null)
 			return;
 		for (ArmProgramEntry entry : task.entries) {
-			if (!entry.op.requiresTarget())
+			// ★ 问**条目级**的 needsTarget()：过滤的容器模式也有坐标，它在世界里也该有框
+			//   （手持过滤没有坐标，(0,0,0) 会画出一个假的框，所以必须跳过）。
+			if (!entry.needsTarget())
 				continue;
 			BlockPos pos = base.offset(entry.offset);
 			if (!level.hasChunkAt(pos))

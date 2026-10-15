@@ -20,6 +20,12 @@ import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.logistics.funnel.FunnelBlock;
 import com.simibubi.create.content.logistics.funnel.FunnelBlockEntity;
+import com.simibubi.create.content.logistics.box.PackageItem;
+import com.simibubi.create.content.logistics.box.PackageStyles;
+import com.simibubi.create.content.logistics.filter.AttributeFilterWhitelistMode;
+import com.simibubi.create.content.logistics.filter.FilterItemStack;
+import com.simibubi.create.content.logistics.item.filter.attribute.ItemAttribute;
+import com.simibubi.create.content.logistics.item.filter.attribute.attributes.InTagAttribute;
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlock;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlockEntity;
@@ -64,6 +70,8 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.ItemTags;
+import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -167,6 +175,7 @@ public class SequencedArmSelfTest {
 		checkStructureTransform();
 		checkLegacyJumpShift();
 		checkCallRepeats(server);
+		checkFilterOperation(server);
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
@@ -207,7 +216,9 @@ public class SequencedArmSelfTest {
 			}
 			for (ArmProgramTask task : program.tasks) {
 				for (ArmProgramEntry entry : task.entries) {
-					if (entry.op.requiresTarget() && entry.offset.equals(BlockPos.ZERO))
+					// 问**条目级**的 needsTarget()：过滤的容器模式也指着一个世界目标，
+					// 它的 (0,0,0) 一样可能不是本意（手持过滤没有目标，不该被这条警告盯上）。
+					if (entry.needsTarget() && entry.offset.equals(BlockPos.ZERO))
 						LOGGER.warn("[selftest] preset {} 的 {} 操作目标是零偏移，可能不是本意", preset.getKey(),
 							entry.op);
 					// §7.7 v3 的不变量：每条分支各带自己的落点，设了跳转就必须有落点。
@@ -1345,11 +1356,19 @@ public class SequencedArmSelfTest {
 
 	/** 走目标方块**自己的物品能力**放一个铁锭（不碰 BE 内部字段，与"世界里真的放了一个"一致）。 */
 	private static boolean putOneInto(ServerLevel level, BlockPos pos) {
+		return putOneInto(level, pos, new ItemStack(Items.IRON_INGOT));
+	}
+
+	/**
+	 * 同上，但放进**指定的物品**（「过滤」的自检要摆"第一格是金锭、第二格是铁锭"这类组合）。
+	 * 同样只走方块自己的能力，不碰 BE 内部字段。
+	 */
+	private static boolean putOneInto(ServerLevel level, BlockPos pos, ItemStack stack) {
 		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
 		if (handler == null)
 			return false;
 		for (int slot = 0; slot < handler.getSlots(); slot++) {
-			if (handler.insertItem(slot, new ItemStack(Items.IRON_INGOT), false)
+			if (handler.insertItem(slot, stack.copy(), false)
 				.isEmpty())
 				return true;
 		}
@@ -2743,16 +2762,18 @@ public class SequencedArmSelfTest {
 	 * ④ 顺带钉边界：{@code (0,0,0)} 什么都不改（界面靠它决定"不记撤销"）。
 	 *
 	 * <p><b>怎么让它变红</b>（心里清楚改哪一行会红）：
-	 * ① 把 {@code shiftAllOffsets} 里的 {@code if (!entry.op.requiresTarget()) continue;} 删掉
-	 * ⇒ {@code 无目标条目没被动} 变 false，报出"③"那一行错误；
-	 * ② 把那个双层循环的外层改成只遍历 {@code tasks.get(0)} ⇒ {@code 多任务一起搬} 变 false（"②"）；
-	 * ③ 把 {@code (0,0,0)} 那道早退删掉 ⇒ {@code 零位移不记一步} 变 false（"④"）；
-	 * ④ 把 {@code entry.offset = shift(...)} 改成 {@code entry.offset = new BlockPos(dx,dy,dz)}
-	 * （丢掉了原值）⇒ {@code 逐条 +Δ} 变 false（"①"）。
+	 * ① 把 {@code shiftAllOffsets} 里那个 {@code if (!entry.needsTarget()) continue;} 改回
+	 * {@code entry.op.requiresTarget()} ⇒ {@code 容器过滤也搬了} 变 false；
+	 * ② 把 {@code needsTarget()} 里返回 {@code true} 那半删掉 ⇒ {@code 没有目标条目没被动}
+	 * 变 false（手持过滤被当成了有目标）；
+	 * ③ 把那个双层循环的外层改成只遍历 {@code tasks.get(0)} ⇒ {@code 多任务一起搬} 变 false；
+	 * ④ 把 {@code (0,0,0)} 那道早退删掉 ⇒ {@code 零位移不记一步} 变 false；
+	 * ⑤ 把 {@code entry.offset = shift(...)} 改成 {@code entry.offset = new BlockPos(dx,dy,dz)}
+	 * （丢掉了原值）⇒ {@code 逐条 +Δ} 变 false。
 	 */
 	private static void checkShiftAllOffsets() {
 		// 夹具：**两个任务**（"多任务都覆盖到了"要两个才测得出），每个任务里混着
-		// 有目标（TAKE/MINE）与无目标（WAIT/SIGNAL）的条目。
+		// 有目标（TAKE/MINE）、**条目级**有目标（过滤的容器模式）、无目标（WAIT/SIGNAL）的条目。
 		ArmProgram program = new ArmProgram();
 		ArmProgramTask first = new ArmProgramTask();
 		first.name = "t1";
@@ -2762,8 +2783,20 @@ public class SequencedArmSelfTest {
 		ArmProgramEntry wait = new ArmProgramEntry();
 		wait.op = OperationType.WAIT;
 		wait.offset = new BlockPos(7, 0, -7); // 无意义的值：**故意非零**，才分得清"没动"与"本来就是 0"
+		// ★ 过滤的铁律：同一份程序里放三条过滤，只有"容器模式"那条有坐标 ——
+		//   这就是 needsTarget() 与 requiresTarget() 分家的唯一现场。
+		ArmProgramEntry filterHeld = new ArmProgramEntry();
+		filterHeld.op = OperationType.FILTER;
+		filterHeld.filterSource = ArmProgramEntry.FilterSource.HELD;
+		filterHeld.offset = new BlockPos(9, 9, 9); // 故意非零：手持模式没有坐标，它不该被搬
+		ArmProgramEntry filterContainer = new ArmProgramEntry();
+		filterContainer.op = OperationType.FILTER;
+		filterContainer.filterSource = ArmProgramEntry.FilterSource.CONTAINER;
+		filterContainer.offset = new BlockPos(2, 0, -3);
 		first.entries.add(take);
 		first.entries.add(wait);
+		first.entries.add(filterHeld);
+		first.entries.add(filterContainer);
 		ArmProgramTask second = new ArmProgramTask();
 		second.name = "t2";
 		ArmProgramEntry mine = new ArmProgramEntry();
@@ -2777,7 +2810,7 @@ public class SequencedArmSelfTest {
 		program.tasks.add(first);
 		program.tasks.add(second);
 
-		int expectedTargets = 2;
+		int expectedTargets = 3; // 取出 + 挖掘 + **容器过滤**
 		boolean precondition = take.op.requiresTarget() && mine.op.requiresTarget()
 			&& !wait.op.requiresTarget() && !signal.op.requiresTarget() && program.tasks.size() == 2;
 
@@ -2785,9 +2818,12 @@ public class SequencedArmSelfTest {
 		// 逐条 +Δ（按**原值 + Δ**算期望，不是写死的数：写死的数在改夹具时会变成"自检自己错了"）
 		boolean targetsShifted = take.offset.equals(new BlockPos(11, -18, 8))
 			&& mine.offset.equals(new BlockPos(6, -20, 10));
-		// 无目标条目**一点没动**（这正是"只动 requiresTarget"那条取舍的落点）
+		// ★ 条目级判据的两条对账：容器过滤跟着搬、手持过滤一点不动
+		boolean containerFilterShifted = filterContainer.offset.equals(new BlockPos(12, -20, 2));
+		boolean heldFilterUntouched = filterHeld.offset.equals(new BlockPos(9, 9, 9));
+		// 无目标条目**一点没动**（这正是"只动需要目标的条目"那条取舍的落点）
 		boolean othersUntouched = wait.offset.equals(new BlockPos(7, 0, -7))
-			&& signal.offset.equals(new BlockPos(3, 3, 3));
+			&& signal.offset.equals(new BlockPos(3, 3, 3)) && heldFilterUntouched;
 		// 多任务都覆盖到了：两个任务各有至少一条被搬过（第一个任务那条）。
 		boolean allTasksCovered = take.offset.getX() == 11 && mine.offset.getX() == 6;
 		boolean countRight = changed == expectedTargets;
@@ -2795,16 +2831,20 @@ public class SequencedArmSelfTest {
 		int zeroChanged = program.shiftAllOffsets(0, 0, 0);
 		boolean zeroIsNoop = zeroChanged == 0 && second.entries.get(0).offset.equals(beforeZero);
 
-		LOGGER.info("[selftest] 坐标偏移: 有目标条目+Δ={} 无目标条目没被动={} 多任务一起搬={} 计数正确={} 零位移不记一步={}",
-			targetsShifted, othersUntouched, allTasksCovered, countRight, zeroIsNoop);
+		LOGGER.info("[selftest] 坐标偏移: 有目标条目+Δ={} 容器过滤也搬了={} 没目标条目没被动={} 多任务一起搬={} "
+			+ "计数正确={} 零位移不记一步={}", targetsShifted, containerFilterShifted, othersUntouched,
+			allTasksCovered, countRight, zeroIsNoop);
 		if (!precondition)
 			LOGGER.error("[selftest] 坐标偏移自检**没跑起来**：夹具的动作分类与预设不符"
 				+ "（requiresTarget 改了？这条等于没测）");
-		if (!(targetsShifted && othersUntouched && allTasksCovered && countRight && zeroIsNoop))
+		if (!(targetsShifted && containerFilterShifted && othersUntouched && allTasksCovered && countRight
+			&& zeroIsNoop))
 			LOGGER.error("[selftest] 批量坐标平移有断言为假：有目标条目+Δ={}（应为 11,-18,8 / 6,-20,10）"
-				+ " 无目标条目没被动={}（应为 7,0,-7 / 3,3,3） 多任务一起搬={} 计数={}（应为 {}）"
+				+ " 容器过滤也搬了={}（应为 12,-20,2） 没目标条目没被动={}（应为 7,0,-7 / 3,3,3 / 9,9,9）"
+				+ " 多任务一起搬={} 计数={}（应为 {}）"
 				+ " 零位移不记一步={} —— 这条一旦为假，游戏里就是「搬了一半」或「等待条目也多了个坐标」",
-				targetsShifted, othersUntouched, allTasksCovered, changed, expectedTargets, zeroIsNoop);
+				targetsShifted, containerFilterShifted, othersUntouched, allTasksCovered, changed, expectedTargets,
+				zeroIsNoop);
 	}
 
 	/** 假玩家（自检里点界面的那些路径共用）；不可用时返回 null 并说一声，不把自检判红。 */
@@ -4117,7 +4157,365 @@ public class SequencedArmSelfTest {
 	 *   <li>把 {@code noteSuffix} 的 {@code note.contains("*&#47;")} 判断去掉（一律用块注释）
 	 *       ⇒ 含 {@code *&#47;} 的备注把注释提前闭合 ⇒ 不变量①必须红（保底形式那条用例）；</li>
 	 *   <li>{@code ArmProgram.save} 里把 {@code if (!note.isEmpty())} 改成 {@code if (false)}
-	 *       ⇒ 程序备注丢 ⇒ "程序备注进 NBT"那行必须报红。</li>
+	 *       ⇒ 程序备注丢 ⇒ "程序备注进 NBT"那行必须报红；</li>
+	 *   <li>把 {@code ArmProgramEntry.needsTarget()} 的过滤那一支删掉 ⇒ 容器模式的坐标与
+	 *       {@code source=} 都不再写出来 ⇒ 「过滤容器」那份语料的不变量①必须红。</li>
+	 * </ol>
+	 */
+	/**
+	 * 「过滤」操作的自检（用户口径：幽灵物品 + 过滤位置二选一）。
+	 *
+	 * <p><b>为什么这里的断言全都用真物品、真数据组件</b>：过滤的语义**完全**是 Create 本体的
+	 * （{@code FilterItemStack.of(幽灵物品)} 按物品类型选 {@code ListFilterItemStack} /
+	 * {@code AttributeFilterItemStack} / {@code PackageFilterItemStack}）。拿假对象/mock 去测，
+	 * 测到的是我们自己写的那层壳，而真正会出错的地方恰好是"数据组件摆得对不对"
+	 * （{@code FILTER_ITEMS} 是 {@code ItemContainerContents}、属性过滤是
+	 * {@code ATTRIBUTE_FILTER_MATCHED_ATTRIBUTES} 这个 {@code List<ItemAttributeEntry>}）。
+	 *
+	 * <p>每条断言后面都写清了"改哪一行会让它变红"—— 没有反证的守卫不算验证过。
+	 *
+	 * <p>过滤的语义归属：比对**完全**交给 {@code FilterItemStack.of(幽灵物品)} 选出来的包装类
+	 * （列表 / 属性 / 包裹），我们不自己写比对逻辑。候选的两种来源（手持 / 外部容器的第一格）
+	 * 与三条出口（成功后 / 失败后 / 空过滤器算成功）都由 {@code ProgramRuntime.filter} 决定。
+	 */
+	private static void checkFilterOperation(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+
+		// ——— ① 物品过滤（列表过滤器 create:filter，里面只有铁锭）———
+		// 反证：把字段名从 `minecraft.iron_ingot` 改成别的 / 把列表写成空列表 ⇒ goldMatches 会变真
+		ItemStack listFilter = new ItemStack(BuiltInRegistries.ITEM.get(ResourceLocation.parse("create:filter")));
+		listFilter.set(AllDataComponents.FILTER_ITEMS, ItemContainerContents.fromItems(List.of(
+			new ItemStack(Items.IRON_INGOT), new ItemStack(Items.OAK_PLANKS))));
+		// ⚠️ 组件全空时 `FilterItemStack.of` 会**故意退回裸包装器**（本体为了性能，见 FilterItemStack:26-33），
+		//    所以这里补一个自定名组件，让 Create 真的走 "按滤波器物品类型分派" 那条路。
+		listFilter.set(DataComponents.CUSTOM_NAME, Component.literal("自检过滤器"));
+		FilterItemStack list = FilterItemStack.of(listFilter);
+		boolean ironMatches = list.test(level, new ItemStack(Items.IRON_INGOT), false);
+		boolean plankMatches = list.test(level, new ItemStack(Items.OAK_PLANKS), false);
+		boolean goldMatches = list.test(level, new ItemStack(Items.GOLD_INGOT), false);
+
+		// ——— ② 属性过滤（create:attribute_filter + "在标签里" 属性）———
+		// 反证：把属性换成 `InTagAttribute(ItemTags.LOGS)` ⇒ plankByTag 会变假
+		ItemStack tagFilter = new ItemStack(BuiltInRegistries.ITEM.get(ResourceLocation.parse("create:attribute_filter")));
+		tagFilter.set(AllDataComponents.ATTRIBUTE_FILTER_WHITELIST_MODE, AttributeFilterWhitelistMode.WHITELIST_DISJ);
+		tagFilter.set(AllDataComponents.ATTRIBUTE_FILTER_MATCHED_ATTRIBUTES,
+			List.of(new ItemAttribute.ItemAttributeEntry(new InTagAttribute(ItemTags.PLANKS), false)));
+		FilterItemStack byTag = FilterItemStack.of(tagFilter);
+		boolean plankByTag = byTag.test(level, new ItemStack(Items.OAK_PLANKS), false);
+		boolean ironByTag = byTag.test(level, new ItemStack(Items.IRON_INGOT), false);
+
+		// ——— ④ 包裹过滤（create:package_filter + 一个地址）———
+		// 反证：把 filter 的地址改成 "码头-B" ⇒ sameAddress 会变假
+		ItemStack packageFilter =
+			new ItemStack(BuiltInRegistries.ITEM.get(ResourceLocation.parse("create:package_filter")));
+		packageFilter.set(AllDataComponents.PACKAGE_ADDRESS, "码头-A");
+		FilterItemStack byAddress = FilterItemStack.of(packageFilter);
+		ItemStack boxA = PackageStyles.getRandomBox();
+		PackageItem.addAddress(boxA, "码头-A");
+		ItemStack boxB = PackageStyles.getRandomBox();
+		PackageItem.addAddress(boxB, "码头-B");
+		boolean sameAddress = byAddress.test(level, boxA, false);
+		boolean otherAddress = byAddress.test(level, boxB, false);
+
+		// ——— ⑤ 空过滤器 = 匹配一切（本体口径：FilterItemStack.isEmpty() ⇒ test 恒真）———
+		// 反证：让程序在 filter.isEmpty() 时走失败出口 ⇒ emptyMatchesEverything 变假
+		FilterItemStack emptyFilter = FilterItemStack.of(ItemStack.EMPTY);
+		boolean emptyIsEmpty = emptyFilter.isEmpty();
+		boolean emptyMatchesEverything = emptyFilter.test(level, new ItemStack(Items.DIAMOND), false)
+			&& emptyFilter.test(level, new ItemStack(Items.DIRT), false);
+
+		// ——— ③⑥⑦⑧ 走**真解释器**（照 checkCallRepeats 的手法：建臂 → setProgram → runtime.tick）———
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 76, 200, spawn.getZ() + 76);
+		BlockPos depotPos = armPos.offset(2, 0, 0);
+		BlockPos vaultPos = armPos.offset(-2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldDepot = level.getBlockState(depotPos);
+		BlockState oldVault = level.getBlockState(vaultPos);
+		boolean heldMatch = false;
+		boolean heldMismatch = false;
+		boolean heldEmpty = false;
+		boolean containerMatch = false;
+		boolean containerMismatch = false;
+		boolean containerEmpty = false;
+		boolean firstSlotOnly = false;
+		boolean routeSuccess = false;
+		boolean routeFailure = false;
+		String detail;
+		try {
+			BlockState depotState = stateOf("create:depot");
+			BlockState vaultState = stateOf("create:item_vault");
+			if (depotState == null || vaultState == null) {
+				LOGGER.error("[selftest] 过滤自检**没跑起来**：找不到 create:depot / create:item_vault");
+				return;
+			}
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			level.setBlockAndUpdate(depotPos, depotState);
+			// 容器那几条用**物品保险箱**（`create:item_vault`，默认 20 槽）而不是置物台：
+			// 置物台只有一格，"第一格是金锭、第二格是铁锭"这种组合根本摆不出来，而那条正是用户选的
+			// "只看第一格"口径唯一的反证入口。保险箱自己有 `Capabilities.ItemHandler.BLOCK`
+			//（`ItemVaultBlockEntity.registerCapabilities`），而**单方块本身就是它的 controller**
+			//（构造里 `radius = length = 1`），所以不用拼多方块结构。
+			// ⚠️ 过滤**不需要**目标是 Create 交互点（`needsInteractionPoint()` 只认取/放/卸/组装），
+			//   所以保险箱这种非交互点方块对"外部容器模式"是合法的目标。
+			level.setBlockAndUpdate(vaultPos, vaultState);
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 过滤自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
+
+			// ③ 手持过滤：手上放铁锭 → 符合；改装金锭 → 同一份条目变成不符合；手空 → 总是失败。
+			//    反证：把 filter() 里 HELD 那一支读成 overflow / 读错槽 ⇒ 三条一起变味。
+			//    手持模式不碰世界（needsTarget() 为假）⇒ 不需要模拟到位，一句 beginEntry 就进执行态。
+			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.HELD, listFilter, depotPos.subtract(armPos)));
+			arm.setHeldItem(new ItemStack(Items.IRON_INGOT));
+			heldMatch = runFilterEntry(arm, 80, false);
+			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.HELD, listFilter, depotPos.subtract(armPos)));
+			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT));
+			heldMismatch = !runFilterEntry(arm, 80, false);
+			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.HELD, listFilter, depotPos.subtract(armPos)));
+			arm.setHeldItem(ItemStack.EMPTY);
+			heldEmpty = !runFilterEntry(arm, 80, false);
+
+			// ⑧ 出口路由（真解释器 + 成功后/失败后跳转）：同一条程序、只换手上那一份，
+			//    符合时必须落到"成功后"的落点、不符合时必须落到"失败后"的落点。
+			//    反证：把 filter() 里的 succeed/applySkip 互换 ⇒ 两条一起红。
+			arm.setProgram(routeProgram(depotPos.subtract(armPos)));
+			arm.setHeldItem(new ItemStack(Items.IRON_INGOT));
+			routeSuccess = runRoute(arm) == 0; // 0 = 成功后跳回条目 1
+			arm.setProgram(routeProgram(depotPos.subtract(armPos)));
+			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT));
+			routeFailure = runRoute(arm) == 1; // 1 = 失败后跳到条目 2（那条抛错 ⇒ 停在下标 1）
+			arm.setHeldItem(ItemStack.EMPTY);
+
+			// ⑥/⑦ 外部容器：容器模式取**第一个非空槽**（只看第一格）。
+			//    ⚠️ 容器模式 needsTarget() 为真 ⇒ 要先**真伸到那一格**才执行；而自检不跑运动学
+			//    （`arm.tick()` 要真实动力网络）⇒ runFilterEntry 的 simulateArrival 每轮把
+			//    `chasedPointProgress` 置 1 当作"已到位"。少了它，条目永远停在 MOVING、
+			//    一次都执行不到（上一版 ⑦ 就是这么变成"容器模式永远失败"的假红的）。
+			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
+				vaultPos.subtract(armPos)));
+			containerEmpty = !runFilterEntry(arm, 400, true);
+			arm.setHeldItem(ItemStack.EMPTY);
+
+			// ⑦ [金锭, 铁锭] + 幽灵铁锭 ⇒ **失败**（第一格是金锭，不能"找任意一格符合的"）。
+			//    反证：把 filter() 里那个 firstNonEmptySlot 换成"遍历所有槽找匹配的" ⇒ 这条变真。
+			//    槽序为什么可信：`putOneInto` 与 `firstNonEmptySlot` 都从 0 号槽往大扫，
+			//    而且**都走同一个能力入口**（`Capabilities.ItemHandler.BLOCK, 方向 UP`），
+			//    探测与读取还都是 `extractItem(slot, 1, true)` —— 同一次调用，不存在"探测说非空、
+			//    读出来却是别的东西"这种不一致（不需要再赌 `getStackInSlot` 与它是否同序）。
+			boolean goldFirst = putOneInto(level, vaultPos, new ItemStack(Items.GOLD_INGOT));
+			boolean ironSecond = putOneInto(level, vaultPos, new ItemStack(Items.IRON_INGOT));
+			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
+				vaultPos.subtract(armPos)));
+			boolean bothMismatch = !runFilterEntry(arm, 400, true);
+			// 反例：把第一格换成铁锭 ⇒ 同一份条目必须成功（证明上一条不是"容器模式永远失败"）
+			clearContainer(level, vaultPos);
+			putOneInto(level, vaultPos, new ItemStack(Items.IRON_INGOT));
+			putOneInto(level, vaultPos, new ItemStack(Items.GOLD_INGOT));
+			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
+				vaultPos.subtract(armPos)));
+			boolean firstMatch = runFilterEntry(arm, 400, true);
+			firstSlotOnly = goldFirst && ironSecond && bothMismatch && firstMatch;
+			containerMatch = firstMatch;
+			containerMismatch = bothMismatch;
+			// ⚠️ 这两个标签曾经写反（bothMismatch 印成"符合"、还标注"应为 false"），
+			//    而断言要的恰恰是"金锭在前 ⇒ 不符 = true" —— 误导性的文案会让人去改断言而不是查夹具。
+			detail = "容器=[金锭,铁锭]→不符=" + bothMismatch + "（应为 true） 容器=[铁锭,金锭]→符合=" + firstMatch
+				+ "（应为 true） 摆进保险箱=" + goldFirst + "/" + ironSecond;
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+			level.setBlockAndUpdate(depotPos, oldDepot);
+			level.setBlockAndUpdate(vaultPos, oldVault);
+		}
+
+		LOGGER.info("[selftest] 过滤: 物品(铁符合={} 金不符={}) 列表标签(木板符合={}) 属性过滤(木板符合={} 铁不符={}) "
+			+ "包裹(同址={} 异址={}) 空过滤器匹配一切={}(空={}) 手持(符合={} 不符={} 空={}) "
+			+ "容器(符合={} 不符={} 空={}) 只看第一格={} 出口路由(成功={} 失败={}) （{}）",
+			ironMatches, !goldMatches, plankMatches, plankByTag, !ironByTag, sameAddress, !otherAddress,
+			emptyMatchesEverything, emptyIsEmpty, heldMatch, heldMismatch, heldEmpty, containerMatch, containerMismatch,
+			containerEmpty, firstSlotOnly, routeSuccess, routeFailure, detail);
+
+		if (!ironMatches || goldMatches || !plankMatches)
+			LOGGER.error("[selftest] 过滤①失败：列表过滤器没按物品比（铁符合={} 金不符={} 木板符合={}）—— "
+				+ "改的是 FILTER_ITEMS 那个组件或幽灵物品本身", ironMatches, !goldMatches, plankMatches);
+		if (!plankByTag || ironByTag)
+			LOGGER.error("[selftest] 过滤②失败：属性过滤（在标签里）没生效（木板符合={} 铁不符={}）—— "
+				+ "改的是 ATTRIBUTE_FILTER_MATCHED_ATTRIBUTES 里的那条属性", plankByTag, !ironByTag);
+		if (!sameAddress || otherAddress)
+			LOGGER.error("[selftest] 过滤④失败：包裹过滤没按地址比（同址={} 异址={}）—— 改的是 PACKAGE_ADDRESS",
+				sameAddress, !otherAddress);
+		if (!emptyIsEmpty || !emptyMatchesEverything)
+			LOGGER.error("[selftest] 过滤⑤失败：空过滤器没有「匹配一切」（isEmpty={} 匹配={}）—— "
+				+ "空过滤器时不该走 test，本体口径是直接算成功", emptyIsEmpty, emptyMatchesEverything);
+		if (!heldMatch || !heldMismatch)
+			LOGGER.error("[selftest] 过滤③失败：手持模式的比对跑错了（铁锭符合={} 金锭不符={}）—— 两种可能："
+				+ "① filter() 里 HELD 那一支读的不是 getHeldItem()（读成 overflow / 读错槽）；"
+				+ "② 条目压根没执行到 filter()（判据见 runFilterEntry 的注释：必须看见过 EXECUTING 才算跑了）",
+				heldMatch, heldMismatch);
+		if (!heldEmpty)
+			LOGGER.error("[selftest] 过滤⑥失败：手上没有物品时没有走失败后（用户口径：没有物品就总是不符合）");
+		if (!containerMatch || !containerMismatch || !firstSlotOnly)
+			LOGGER.error("[selftest] 过滤⑦失败：外部容器没有「只看第一格」（符合=[铁锭,金锭]={} 不符=[金锭,铁锭]={} "
+				+ "只看第一格={}）—— 两种可能：① firstNonEmptySlot 被换成「遍历找匹配的」（那会变成 符合=true 不符=false）；"
+				+ "② 条目压根没执行到（容器模式要先伸到位，见 runFilterEntry 的 simulateArrival 说明）（{}）", containerMatch,
+				containerMismatch, firstSlotOnly, detail);
+		if (!containerEmpty)
+			LOGGER.error("[selftest] 过滤⑥失败：容器里一个非空格都没有时没有走失败后（用户口径：没有物品就总是不符合）");
+		if (!routeSuccess || !routeFailure)
+			LOGGER.error("[selftest] 过滤⑧失败：出口路由错了（符合→成功后={} 不符→失败后={}）—— "
+				+ "filter() 里 succeed/applySkip 用反了，或条目的落点没生效", routeSuccess, routeFailure);
+	}
+
+	/** 「过滤」条目的最小程序：主任务 = [过滤]，成功后不设（收工）——单独跑一条时"成功"= 条目走完。 */
+	private static ArmProgram filterProgram(ArmProgramEntry.FilterSource source, ItemStack filterItem,
+		BlockPos offset) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检过滤";
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.FILTER;
+		entry.filterSource = source;
+		entry.filterItem = filterItem.copy();
+		entry.offset = offset;
+		task.entries.add(entry);
+		program.tasks.add(task);
+		return program;
+	}
+
+	/**
+	 * 跑一条「过滤」条目，返回"它是不是**成功**走完了"。
+	 *
+	 * <p><b>判据为什么不能是 {@code getLastFailure()}</b>（上一版就是它，于是 ③⑥⑦ 读到的全是假值）：
+	 * 「不符 / 手上没有物品 / 容器里没有物品」走的是 {@code applySkip(entry.onTimeout)}，而 FILTER 条目的
+	 * {@code onTimeout} 默认是 {@code NONE} ⇒ 落到 {@code halt()}；而 {@code halt()} **只写 {@code error}**
+	 * （停机原因，护目镜上是单独一行：{@code SequencedArmBlockEntity:891}），**从不写 {@code lastFailure}**
+	 * —— 那个字段是"重试中的黄字提示"，只有 {@code CONTINUE} / {@code SKIP_TO} / {@code UNTIL_FAIL}
+	 * 三条出口会写。于是 {@code lastFailure == null} 在"成功"与"停机"两种情况下**都成立**，
+	 * 它根本不是成败判据（"不符"被读成了"成功"，"手空"同样）。
+	 *
+	 * <p>现在改看**运行时状态**，并且要求"**看见过执行态**"才算成功：
+	 * <ul>
+	 *   <li>{@code HALTED} ⇒ 失败（用户口径：不符 / 没有物品就是走失败后；NONE 出口把它变成停机）；</li>
+	 *   <li>先看见 {@code EXECUTING}、之后又回到 {@code IDLE} ⇒ 成功（{@code succeed} 会
+	 *       {@code resetEntryCounters()} 把状态恢复成 IDLE）。为什么必须两步都在：单看"最后不是停机"
+	 *       会把"压根没执行到 filter()"（转速为 0、目标没解析出来）也判成成功 —— 那是自检最怕的假绿。</li>
+	 * </ul>
+	 * 从而窗口内既没成功也没停机的，一律判失败（**不默认成功**）。
+	 *
+	 * @param ticks           给多少 tick —— 外部容器模式要先**真伸到那一格**才执行
+	 *                        （{@code needsTarget()} 为真），比手持模式多给两个数量级
+	 * @param simulateArrival 容器模式专用：自检不跑运动学（{@code arm.tick()} 要真实动力网络，
+	 *                        见「认领窗口」「收回时序」那几条的同样处理）—— 每轮把 {@code chasedPointProgress}
+	 *                        置 1 当作"已到位"，其余全走**真实入口** {@code runtime.tick()}。
+	 *                        ⚠️ 少了这一步，容器模式永远停在 {@code MOVING}：一条条目都执行不到，
+	 *                        三条容器断言会一起变成假的"不符"（这就是上一版 ⑦ 的第二个根因）。
+	 */
+	private static boolean runFilterEntry(SequencedArmBlockEntity arm, int ticks, boolean simulateArrival) {
+		boolean executed = false;
+		for (int i = 0; i < ticks; i++) {
+			if (simulateArrival)
+				arm.chasedPointProgress = 1f;
+			arm.runtime.tick(arm);
+			if (arm.runtime.isHalted())
+				return false; // 失败出口（onTimeout 默认 NONE ⇒ halt，只写 error）
+			if (arm.runtime.state == ProgramRuntime.EntryState.EXECUTING)
+				executed = true;
+			else if (executed && arm.runtime.state == ProgramRuntime.EntryState.IDLE)
+				return true; // 执行过、又回到空闲 ⇒ 走的是成功出口
+		}
+		return false;
+	}
+
+	/**
+	 * 「过滤」的**出口路由**程序：主任务 = [过滤（成功后跳 1）/（失败后跳 2）、抛错]。
+	 *
+	 * <p>条目用 1 基序号（用户可见的编号体系）：{@code 成功 → 跳转 1} = 回到条目 1（自己），
+	 * {@code 失败 → 跳转 2} = 跳到条目 2。
+	 *
+	 * <p>⚠️ 第二条**故意用「抛错」而不是「等待 0」**：等待跑完会走 {@code finishTask}，
+	 * 那会把 {@code entryIndex} 重置成 0 并让程序收工 —— 于是"失败落点"与"成功落点"在
+	 * 观察窗口里**长得一模一样**（下标都是 0）。抛错会真的是"停机 + 游标停在下标 1"，
+	 * 两个出口才区分得开（判据见 {@link #runRoute}）。
+	 */
+	private static ArmProgram routeProgram(BlockPos offset) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检过滤路由";
+		ArmProgramEntry filter = new ArmProgramEntry();
+		filter.op = OperationType.FILTER;
+		filter.filterSource = ArmProgramEntry.FilterSource.HELD;
+		filter.filterItem = new ItemStack(Items.IRON_INGOT);
+		filter.offset = offset;
+		filter.onSuccess = ArmProgramEntry.SkipAction.SKIP_TO;
+		filter.successTarget = "1"; // 回到自己 ⇒ 只有"成功"这一条路能到
+		filter.onTimeout = ArmProgramEntry.SkipAction.SKIP_TO;
+		filter.timeoutTarget = "2"; // 落到第二条 ⇒ 只有"失败"这一条路能到
+		task.entries.add(filter);
+		ArmProgramEntry landing = new ArmProgramEntry();
+		landing.op = OperationType.THROW;
+		landing.errorMessage = "自检：这里是失败后的落点";
+		task.entries.add(landing);
+		program.tasks.add(task);
+		return program;
+	}
+
+	/**
+	 * 跑路由程序，返回**出口编号**：{@code 0} = 走的是"成功后"（跳回条目 1、游标停在下标 0）、
+	 * {@code 1} = 走的是"失败后"（跳到条目 2、停机且游标停在下标 1）、{@code -1} = 两个都没到。
+	 *
+	 * <p>为什么两个出口能区分：成功后是"跳回自己"，所以**会一直重跑**、游标一直回到 0；
+	 * 失败后落到的那条是「抛错」⇒ 立刻停机，游标**留**在下标 1。
+	 * 反证：把实现里的两个出口互换，这两条断言必然同时红。
+	 */
+	private static int runRoute(SequencedArmBlockEntity arm) {
+		for (int i = 0; i < 120; i++) {
+			arm.runtime.tick(arm);
+			if (arm.runtime.isHalted())
+				return arm.runtime.entryIndex == 1 ? 1 : -1;
+			// 成功后跳回自己：`succeed` 会写下"成功 → 跳转 1" 并把游标放回下标 0
+			String failure = arm.runtime.getLastFailure();
+			if (failure != null && failure.startsWith("成功") && arm.runtime.entryIndex == 0)
+				return 0;
+		}
+		return -1;
+	}
+
+	/** 把目标容器清空（走方块自己的能力，不看内部字段）——自检要摆不同的第一格。 */
+	private static void clearContainer(ServerLevel level, BlockPos pos) {
+		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
+		if (handler == null)
+			return;
+		for (int slot = 0; slot < handler.getSlots(); slot++) {
+			ItemStack extracted = handler.extractItem(slot, 64, false);
+			if (!extracted.isEmpty())
+				slot--; // 同一格可能还有（栈不合法时）
+		}
+	}
+
+	/**
+	 * 脚本往返（§12.4 的两条不变量）。
+	 *
+	 * <p>不变量①：{@code compile(decompile(p)) ≡ p}（逐字段）；
+	 * 不变量②：{@code decompile(compile(t)) == canonical(t)}（反编译是幂等的规范形式）。
+	 *
+	 * <p>反证清单（改哪一行会让这里红）：
+	 * <ol>
+	 *   <li>把 {@code ScriptDecompiler.writeSuffixes} 里 {@code if (entry.count != 1)} 改成 {@code if (false)}
+	 *       ⇒ 抽到取物条目的 count 会丢 ⇒ {@code [selftest] 脚本不变量①…} 必须报出「count」那条差异；</li>
+	 *   <li>把 {@code time(...)} 的单位后缀全改成 {@code "t"} ⇒ 单位丢失 ⇒ 不变量①必须红；</li>
+	 *   <li>把 {@code ScriptParser.attachComment} 里的 {@code ctx.owner} 改成永远 {@code PROGRAM}
+	 *       ⇒ 条目备注全挂到程序备注上 ⇒ {@code 注释归属} 与不变量①同时红；</li>
+	 *   <li>把 {@code noteSuffix} 的 {@code note.contains("*&#47;")} 判断去掉（一律用块注释）
+	 *       ⇒ 含 {@code *&#47;} 的备注把注释提前闭合 ⇒ 不变量①必须红（保底形式那条用例）；</li>
+	 *   <li>{@code ArmProgram.save} 里把 {@code if (!note.isEmpty())} 改成 {@code if (false)}
+	 *       ⇒ 程序备注丢 ⇒ "程序备注进 NBT"那行必须报红；</li>
+	 *   <li>把 {@code ArmProgramEntry.needsTarget()} 的过滤那一支删掉 ⇒ 容器模式的坐标与
+	 *       {@code source=} 都不再写出来 ⇒ 「过滤容器」那份语料的不变量①必须红。</li>
 	 * </ol>
 	 */
 	private static void checkScriptRoundTrip(MinecraftServer server) {
@@ -4562,6 +4960,14 @@ public class SequencedArmSelfTest {
 			return where + "卸货上限变了：" + a.unloadAmount + " → " + b.unloadAmount;
 		if (!ItemStack.matches(a.icon, b.icon))
 			return where + "图标变了";
+		// 「过滤」的两个新字段也必须逐字段往返 —— 加了字段却忘了写进文本的**症状是静默的**
+		//（过滤器默认空 = 匹配一切，看起来"能跑"），所以比较本身也是这条不变量的守卫。
+		if (a.filterSource != b.filterSource)
+			return where + "过滤位置变了：" + a.filterSource + " → " + b.filterSource;
+		if (!ItemStack.matches(a.filterItem, b.filterItem))
+			return where + "幽灵过滤器物品变了：" + (a.filterItem.isEmpty() ? "未设置"
+				: a.filterItem.getHoverName()
+					.getString());
 		// 频率：**逐字段比物品与染色**（§12.2：参与频率身份的只有这两项；但这里连组件一起比，
 		// 因为不变量 #1 要的是"模型逐字段不变"，而不是"频率身份不变"）
 		if ((a.frequency == null) != (b.frequency == null))
@@ -4702,6 +5108,30 @@ public class SequencedArmSelfTest {
 		corpus.put("空物品槽", """
 			task main
 			  signal recv on freq={} + iron_ingot
+			""");
+		// 「过滤」两模式（用户口径：手持模式不写坐标，容器模式写坐标 + face=）。
+		// 手持那条用**简写 id**、容器那条用**完整 SNBT**（带组件）—— 两种物品写法各走一遍。
+		// ⚠️ 完整 SNBT 那条**不能带空格**：词法器会把 `{…}` 内部的空格切开（现有语料里的
+		//    `{id:"minecraft:black_banner",count:1,components:{…}}` 也是不带空格的写法），
+		//    带空格的 SNBT 要写成 `item={` + 无空格内容。这里用染色 SNBT —— 它是**另一条**
+		//    规范形式分支（唯一组件是染色时会写成 `#RRGGBB`），所以这条同时钉住"SNBT 读进来
+		//    与简写写出去"这条不对称路径仍然无损。
+		// ⚠️⚠️ **坐标必须紧跟关键字**（`filter 12 64 -30 source=…`），不能写在 `item=` 后面：
+		//    `ScriptParser.parseEntry` 对「不碰目标」的操作（过滤的 requiresTarget() 是 false）
+		//    只调一次 `optionalPosition(rest)`，而它看的是**紧接着关键字的那三个记号**是不是整数
+		//    —— 把坐标挪到后缀后面，`rest[0]` 就是 `source=`，坐标永远吃不到，后缀循环再把 `12`
+		//    当成"不认识的一段"报错（原来这两行就是这么红起来的）。
+		//    顺序与反编译器的规范形式一致：**位置 → source= → face= → item=**（与 `take 1 0 0 count=3`
+		//    同一套"位置在前、后缀在后"的既有约定）。
+		corpus.put("过滤手持", """
+			task main
+			  filter source=held item=minecraft:iron_ingot
+			""");
+		corpus.put("过滤容器", """
+			task main
+			  filter 12 64 -30 source=container face=north item=create:filter
+			  filter 0 0 2 source=container item={id:"minecraft:leather_helmet",count:1,components:{"minecraft:dyed_color":12801229}}
+			  filter source=held item={}
 			""");
 		return java.util.Collections.unmodifiableMap(corpus);
 	}

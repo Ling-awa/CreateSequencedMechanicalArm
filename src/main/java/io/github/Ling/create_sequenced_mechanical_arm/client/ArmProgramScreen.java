@@ -206,6 +206,37 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private static final int FIELD_X_SIGNAL = 115;
 	/**
+	 * 「过滤」专用的第二行起点：GUI **96**（= 第一个**过滤幽灵槽**的右沿 92 再留 4px）。
+	 *
+	 * <p>为什么不能沿用 {@link #FIELD_X}（77）：过滤要占用两个幽灵槽（0 号图标 + 1 号幽灵过滤器物品，
+	 * 见 {@code ArmProgramEntry.ghostSlots()}），槽位在 GUI 53..71 与 73..91 —— 从 77 起会把第二个槽
+	 * 连同里面的过滤器物品一起压住（这正是用户实测"滚动选择框的左边把幽灵物品槽位占用了"那类问题，
+	 * 而 {@code checkGhostSlotClearance} 会真的把这条抓红）。
+	 *
+	 * <p>与 {@link #FIELD_X_SIGNAL} 同一个算式（"第二行内容从**激活的最后一个槽**右边起"），
+	 * 只是过滤只激活两个槽，所以比它多 19px 可用宽度。右沿仍然是 {@code FIELD_X + FIELD_W = 197}。
+	 */
+	private static final int FIELD_X_FILTER = 96;
+	/** 过滤位置选择框的宽：42 = 标签上限 32px（中文「外部容器」36 **放不下** ⇒ 用「外部容器」的短写
+	 * 「容器」，英文用 {@code Held / Vault}；Create 的 Label **不裁剪**，选项名放不下就是糊出框）。 */
+	private static final int FILTER_SRC_W = 42;
+	/** 过滤容器坐标框的宽（不留朝向时）：{@code 197 − (96 + 42 + 2) = 57} ⇒ 约 9 个字符（够 {@code 12,64,-30}）。 */
+	private static final int FILTER_COORD_W = FIELD_X + FIELD_W - (FIELD_X_FILTER + FILTER_SRC_W + 2);
+	/** 过滤容器朝向框的宽（留朝向时坐标框让到 {@code 197 − 173 − 2 = 22}）。 */
+	private static final int FILTER_FACE_W = 24;
+	/** 过滤容器朝向框的 x（右沿 197，与第一行那个选择框对齐）。 */
+	private static final int FILTER_FACE_X = FIELD_X + FIELD_W - FILTER_FACE_W;
+	/**
+	 * 过滤容器**同时带朝向**时坐标框的宽：{@code 197 − 173 − 2 − (96 + 46 + 2) = 22}。
+	 *
+	 * <p>为什么它是一个具名常量而不是在 {@code buildBaseControls} 里现场算：那三个框必须**一起**
+	 * 铺到右沿 197（用户第四十二轮的口径），而"加起来正好 101"这件事只能靠自检
+	 * （{@code filterContainerRowProblem}）钉住 —— 常量与自检要引用**同一个数**，否则改了宽度
+	 * 只是"控制台报红"，而现场算的那个 expr 还可以悄悄和它不一致。
+	 */
+	private static final int FILTER_COORD_W_FACE =
+		FIELD_X + FIELD_W - FILTER_FACE_W - 2 - (FIELD_X_FILTER + FILTER_SRC_W + 2);
+	/**
 	 * 「收发信号」第二行的**模式**控件（接收 / 发送 / 中断）：起点同 {@link #FIELD_X_SIGNAL}，宽 30。
 	 *
 	 * <p>算式（用户反馈第二轮重新算的账）：115..145 **30** ＋ 2 ＋ 147..177 **30**（数值）
@@ -488,7 +519,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 幽灵槽激活数量：只有「等待信号」要**两个**（红石链接频率是一对物品），其余情况只用图标槽那个。
+	 * 幽灵槽激活数量：图标恒占 0 号；「收发信号」再加**两个**（红石链接频率是一对物品）、
+	 * 「过滤」再加**一个**（幽灵过滤器物品）；其余情况只用图标槽那个。
 	 *
 	 * <p>在 {@code init()} 里算（布局阶段），**不要**放到渲染里 —— 渲染是每帧的事，而槽位的可用性是布局信息；
 	 * 原本写在 {@code renderEditor} 里，导致"界面刚建好、还没渲染"的那一小段时间状态是过期的
@@ -509,8 +541,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return;
 		}
 		ArmProgramEntry entry = entry(new Card(false, editing.taskIndex, editing.entryIndex));
-		// 「收发信号」= 图标 + 一对频率（3 个）；其余 = 只有图标（1 个）
-		menu.targetSlotsActive = entry != null && entry.op.hasSignalMode() ? 3 : 1;
+		// 槽位数**只问模型**（{@code ArmProgramEntry.ghostSlots()}）：图标恒占 0 号，
+		// 「收发信号」加一对频率（1/2 号）、「过滤」加一个幽灵过滤器物品（1 号）。
+		// 原来这里写的是 `hasSignalMode() ? 3 : 1` 的二分 —— 加了过滤之后那种写法必然漏掉过滤
+		// （症状：槽 1 既不激活也不显示 ⇒ 幽灵过滤器物品**放不进去**）。
+		menu.targetSlotsActive = entry != null ? entry.ghostSlots() : 1;
 	}
 
 	/** 现在编辑的是"某个属性"吗（而不是条目/任务本体）。 */
@@ -1951,10 +1986,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return entry.hasHardFailureExit();
 	}
 
-	/** 需要"交互面"的操作（左键/右键语义）。 */
+	/** 需要"交互面"的操作（左键/右键语义）；与 {@code ArmEntryText.needsFace} / 反编译器同一判据。 */
 	private static boolean needsFace(OperationType op) {
+		// 「过滤」也在这里：容器模式要坐标 + 朝向（用户点名的口径），手持模式那一支自己会跳过朝向。
 		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK;
+			|| op == OperationType.USE_SNEAK || op == OperationType.FILTER;
 	}
 
 	/**
@@ -2255,9 +2291,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		ArmProgramEntry entry = editing == null || editing.task ? null
 			: entry(new Card(false, editing.taskIndex, editing.entryIndex));
 		boolean signal = !editingProperty() && entry != null && entry.op.hasSignalMode();
+		// 「过滤」的幽灵过滤器物品走**槽 1**（0 号恒为自定义图标，见 ArmProgramEntry.ghostSlots()）。
+		// 编辑属性时推空（那时候槽既不显示也不该生效 —— 与图标/频率同一处理）。
+		boolean filter = !editingProperty() && entry != null && entry.op == OperationType.FILTER;
 		ItemStack icon = editingProperty() ? ItemStack.EMPTY : currentIcon();
 		ItemStack first = signal && entry.frequency != null ? entry.frequency.getFirst()
-			.getStack() : ItemStack.EMPTY;
+			.getStack() : filter ? entry.filterItem : ItemStack.EMPTY;
 		ItemStack second = signal && entry.frequency != null ? entry.frequency.getSecond()
 			.getStack() : ItemStack.EMPTY;
 		pushGhostSlot(0, icon);
@@ -2369,6 +2408,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 						menu.ghostInventory.getStackInSlot(2));
 					dirty = true;
 				}
+				// ★ 「过滤」的幽灵过滤器物品：槽 1 里的东西真正写进条目。
+				//   与上面频率那两段一样**必须守 `!editingProperty()`** —— 编辑属性时幽灵槽是主动推空的
+				//   （`targetSlotsActive = 0`），照写就会把已经放好的过滤器用"空栈"抹掉并落盘
+				//   （那条之后就永远"匹配一切"了，而界面上看不出区别）。
+				//   槽位与 `ArmProgramEntry.ghostSlots()` 是同一个约定（1 号 = 过滤器，0 号 = 图标）。
+				if (signal != null && signal.op == OperationType.FILTER) {
+					signal.filterItem = menu.ghostInventory.getStackInSlot(1)
+						.copy();
+					dirty = true;
+				}
 			}
 		} else if (editSnapshot != null) {
 			program = ArmProgram.load(editSnapshot, registries());
@@ -2408,7 +2457,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		int center = leftPos + (AllGuiTextures.SCHEDULE.getWidth() - 8) / 2;
 		graphics.drawString(font, hint, center - font.width(hint) / 2, topPos + 44, 0x505050, false);
 
-		// 幽灵槽：**只画当前用得到的那些**（槽 0 = 图标；槽 1/2 = 「等待信号」的一对频率）。
+		// 幽灵槽：**只画当前用得到的那些**（槽 0 = 图标；槽 1/2 = 「收发信号」的一对频率，
+		// 「过滤」时槽 1 = 幽灵过滤器物品）。
 		// 用不上时既不画框、也不激活（槽里的物品由 openEditor 推空清掉，见 sendGhostSlots）。
 		for (int i = 0; i < menu.targetSlotsActive && i < menu.ghostInventory.getSlots(); i++) {
 			AllGuiTextures.SCHEDULE_EDITOR_ADDITIONAL_SLOT.render(graphics, leftPos + 53 + 20 * i, topPos + 87);
@@ -2750,7 +2800,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		int count = 0;
 		for (ArmProgramTask task : program.tasks)
 			for (ArmProgramEntry entry : task.entries)
-				if (entry.op.requiresTarget())
+				// ★ 与 shiftAllOffsets **必须同一判据**（条目级 needsTarget()）：过滤的容器模式也在平移范围内，
+				//   这里少算一条就会出现"按钮说会改 0 条、实际改了一条"（或反过来白压一步撤销）。
+				if (entry.needsTarget())
 					count++;
 		return count;
 	}
@@ -2890,12 +2942,58 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			// 退出是终结操作：第二行什么都不需要
 			case BREAK -> {
 			}
+			// 过滤：第二行 = **过滤位置**（必填）+（容器模式才有的）坐标与朝向。
+			// ★ 起点 {@code FIELD_X_FILTER}（GUI 96）：这个操作占了两个幽灵槽，第二行必须让开它们 ——
+			//   与「收发信号」让开三个槽是同一条规矩（见 FIELD_X_SIGNAL 的说明）。
+			//   用户口径：**手持模式不写坐标**，所以那三格只在容器模式出现。
+			case FILTER -> {
+				inlinePicker(FIELD_X_FILTER, FILTER_SRC_W, tr("entry.filter_source"),
+					tr("hint.entry_filter_source"), filterSourceLabels(), entry.filterSource.ordinal(), i -> {
+						ArmProgramEntry.FilterSource picked =
+							ArmProgramEntry.FilterSource.values()[Mth.clamp(i, 0,
+								ArmProgramEntry.FilterSource.values().length - 1)];
+						if (entry.filterSource == picked)
+							return;
+						pushUndo();
+						entry.filterSource = picked;
+						dirty = true;
+						// 换位置会**整体换掉第二行**（手持 ⇄ 容器），必须重建控件
+						//（与「收发信号」切模式时同一条理由）。
+						rebuildPending = true;
+					});
+				if (entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER) {
+					// 与「使用」那一族同一套写法（坐标框 + 朝向框**一起把第二行铺到右沿 197**）：
+					// 不留朝向时坐标框拿满余量，留了就得让出 26px。第一行那个选择框到 197，
+					// 所以这里也到 197（用户第四十二轮定的口径）。
+					boolean face = needsFace(entry.op);
+					int coordW = face ? FILTER_COORD_W_FACE : FILTER_COORD_W;
+					BlockPos origin = cardOriginOrZero();
+					BlockPos world = origin.offset(entry.offset);
+					textField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, coordW, tr("entry.coords"),
+						tr("hint.entry_filter_coords"), world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
+							BlockPos parsed = parseCoords(v);
+							if (parsed != null) {
+								pushUndo();
+								entry.offset = parsed.subtract(origin);
+							}
+						});
+					if (face)
+						inlinePicker(FILTER_FACE_X, FILTER_FACE_W, tr("entry.face"), tr("hint.entry_face"),
+							labels(Direction.values()), entry.face.ordinal(), i -> {
+								pushUndo();
+								entry.face = Direction.values()[i];
+								rebuildPending = true;
+							});
+				}
+			}
 			default -> {
 				// 走到这里的都是"需要坐标"的动作：坐标（+ 左右键才有朝向）
 				// ★ P1「坐标模型统一」（§19）：条目属性里的「坐标空间」（rel/abs 滚轮）已删 ——
 				//   条目坐标只有一种语义（相对执行它的那条臂），不再有空间记号。用户第四十轮起
 				//   录制原点住在**卡**上，这个框拿它当"世界位置 ↔ 偏移"的换算参考点（见下方说明）。
-				if (!entry.op.requiresTarget())
+				// ★ 问**条目级**的 needsTarget()：过滤在上面自己那一支就把坐标建完了，
+				//   这里挡住的是"没有目标"的操作（等待类 / 控制类）。
+				if (!entry.needsTarget())
 					return;
 
 				boolean face = needsFace(entry.op);
@@ -3136,6 +3234,25 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				case RECEIVE -> "opt.signal_receive";
 				case SEND_ON -> "opt.signal_send_on";
 				case SEND_OFF -> "opt.signal_send_off";
+			}));
+		return list;
+	}
+
+	/**
+	 * 「过滤」的**过滤位置**两个选项（手持 / 容器，用户口径的"二选一"）。
+	 *
+	 * <p>与 {@link #signalModeLabels} 同一条理由**不能走通用的 {@link #labels(Enum[])}**：
+	 * 那个按枚举名派生成 {@code opt.held} / {@code opt.container}（后者恰好是**任务循环**那个
+	 * "一直重复"的键），而这里要的是 {@code opt.filter_held} / {@code opt.filter_container}
+	 * —— 键命不中时选择框里画的就是**裸键名**，而这两个键名都超宽（42−10=32），会直接糊出框。
+	 * 顺序按 ordinal 走（下标 i ↔ {@code FilterSource.values()[i]}），枚举增删项也不会错位。
+	 */
+	private static List<Component> filterSourceLabels() {
+		List<Component> list = new ArrayList<>(ArmProgramEntry.FilterSource.values().length);
+		for (ArmProgramEntry.FilterSource source : ArmProgramEntry.FilterSource.values())
+			list.add(tr(switch (source) {
+				case HELD -> "opt.filter_held";
+				case CONTAINER -> "opt.filter_container";
 			}));
 		return list;
 	}
@@ -3674,6 +3791,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (signalKeep != null && problem == null)
 				problem = signalKeep;
 
+			// 「过滤」的幽灵过滤器物品：槽 1 必须真的接上，且编辑属性后按「完成」不能把它抹掉。
+			String filterKeep = screen.filterItemKeepProblem();
+			if (filterKeep != null && problem == null)
+				problem = filterKeep;
+
 			// 撤销/重做在满栈时仍要成对可逆（第二十四轮审计）。
 			String undoRedo = screen.undoRedoProblem();
 			if (undoRedo != null && problem == null)
@@ -4036,6 +4158,62 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * 自检：**幽灵过滤器物品真的接上了吗**，以及"编辑属性后按完成"不能把它抹掉。
+	 *
+	 * <p>为什么值得单独一条：过滤器物品是「过滤」这条操作的必要输入之一，而它的提交路径与
+	 * 「收发信号」的频率**共用同一套幽灵槽机制**（槽 1）。频率那一边已经踩过一次坑
+	 * （见 {@code signalFrequencyKeepProblem}：编辑属性时槽被主动推空，照写就会把已绑好的东西抹掉），
+	 * 过滤是同一段代码旁边的第二个分支 —— 谁在那边少写一个 {@code !editingProperty()}
+	 * 都会**静默**变成"永远匹配一切（空过滤器）"，界面上完全看不出来。
+	 *
+	 * <p>断言的是**真实的用户路径**：进编辑器（槽 1 就是过滤器槽）→ 按「完成」→ 写回条目并落盘。
+	 * 反证：把 {@code closeEditor} 里过滤那一段的 {@code !editingProperty()} 去掉、
+	 * 或把 {@code ArmProgramEntry.ghostSlots()} 里过滤那一支删掉 ⇒ 这条必红。
+	 */
+	@Nullable
+	private String filterItemKeepProblem() {
+		if (program.tasks.isEmpty())
+			return "自检前提不成立：烟雾程序里没有任务";
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry filter = new ArmProgramEntry();
+		filter.op = OperationType.FILTER;
+		task.entries.add(filter);
+		int index = task.entries.size() - 1;
+		ArmProgramEntry readBack = task.entries.get(index);
+		try {
+			// ① 这个操作在编辑器里必须激活**两个**幽灵槽（0 = 图标、1 = 过滤器物品）。
+			//    只激活一个的话槽 1 既不画也不收点击（InactiveItemHandlerSlot）⇒ 过滤器放不进去。
+			editingProp = null;
+			editing = new EditTarget(false, 0, index, null);
+			init(minecraft, 427, 240);
+			if (menu.targetSlotsActive != 2)
+				return "「过滤」的幽灵槽数应当是 2（图标 + 过滤器），实际 " + menu.targetSlotsActive;
+			// ② 按「完成」：槽 1 里的物品必须真的写进 entry.filterItem（照频率那两段的写法）。
+			//    这一句同时是"槽 1 就是过滤器槽"的唯一约定 —— 换到别的槽这条会红。
+			menu.ghostInventory.setStackInSlot(1, new ItemStack(net.minecraft.world.item.Items.IRON_INGOT));
+			closeEditor(true);
+			if (readBack.filterItem.isEmpty())
+				return "按「完成」后幽灵槽 1 里的物品没有写进 filterItem（过滤器放不进去 = 永远匹配一切）";
+			if (readBack.filterItem.getItem() != net.minecraft.world.item.Items.IRON_INGOT)
+				return "写进 filterItem 的不是槽 1 里的那个物品";
+			// ③ 编辑**某个属性**再按「完成」：幽灵槽那时被主动推空，过滤器物品**不能**被动
+			ItemStack kept = new ItemStack(net.minecraft.world.item.Items.GOLD_INGOT);
+			readBack.filterItem = kept;
+			editing = new EditTarget(false, 0, index, "on_success");
+			closeEditor(true);
+			if (readBack.filterItem.isEmpty())
+				return "编辑「过滤」的属性后按「完成」，幽灵过滤器物品被清空了（这条之后会永远「匹配一切」）";
+			if (!ItemStack.isSameItemSameComponents(readBack.filterItem, kept))
+				return "编辑「过滤」的属性后按「完成」，幽灵过滤器物品被改成了别的东西";
+			return null;
+		} finally {
+			task.entries.remove(index);
+			editing = null;
+			editingProp = null;
+		}
+	}
+
+	/**
 	 * 自检：撤销/重做在**栈满**之后仍然成对可逆（第二十四轮审计）。
 	 *
 	 * <p>起因：`redo()` 修剪撤销栈写的是 `removeFirst()`，而 `Deque.push` = `addFirst` —— 删掉的正是
@@ -4241,11 +4419,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	@Nullable
 	private String checkGhostSlotClearance(@Nullable ArmProgramEntry entry) {
-		// 期望的可用槽数：编辑属性 = 0；任务本体 = 1（只有图标）；条目本体 = 1（图标）、
-		// 「收发信号」本体 = 3（图标 + 一对频率）
+		// 期望的可用槽数**只问模型**（{@code ArmProgramEntry.ghostSlots()}）：编辑属性 = 0；任务本体 = 1（只有图标）；
+		// 条目本体 = 1（图标）、「收发信号」= 3（图标 + 一对频率）、「过滤」= 2（图标 + 幽灵过滤器物品）。
+		// 抄一份在这里的老写法（`hasSignalMode() ? 3 : 1`）在加过滤之后就会把过滤判成 1 ⇒ 自检红，
+		// 而那个红是**判据写了两份**的红，不是布局坏了 —— 所以这里也去问模型。
 		int expect = editingProperty() ? 0
 			: editing != null && editing.task ? 1
-				: entry != null && entry.op.hasSignalMode() ? 3 : 1;
+				: entry != null ? entry.ghostSlots() : 1;
 		if (menu.targetSlotsActive != expect)
 			return "幽灵槽激活数应当是 " + expect + "，实际 " + menu.targetSlotsActive;
 		// 只查**激活的**槽：未激活的槽既不画也点不到（比如非「收发信号」时第二个槽根本不存在），
@@ -4334,6 +4514,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				case SIGNAL -> entry.isSignalSend() ? 3 : 1;
 				case WAIT_REDSTONE, CALL, THROW -> 1;
 				case BREAK -> 0;
+				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 + 朝向 = 3
+				//（用户口径：手持模式不写坐标；容器模式要坐标 + face=）。
+				case FILTER -> entry.needsTarget() ? 3 : 1;
 				default -> needsFace(entry.op) ? 2 : 1;
 			};
 			if (boxes != expected)
@@ -4355,6 +4538,73 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		if (!sawWait || !sawFace || !sawRetryWindow || !sawHardFail)
 			return "自检数据里缺少 等待/朝向/会无限等/有硬失败 四类动作中的某一类";
+		// ★ 「过滤」的**容器模式**要真建一次（上面的循环用烟雾数据，它那条过滤是默认的**手持**模式）：
+		//   容器模式会多出坐标框与朝向框，而这两样正好长在幽灵槽右边那 101px 里 ——
+		//   宽度算错在游戏里只表现为"文字/输入糊出框"，只有把控件真建出来量一次才看得见。
+		//   反证：把 FILTER 的 expected 改回 `needsFace(...) ? 2 : 1`（或把 FIELD_X_FILTER 改回 77）
+		//   ⇒ 这条立刻红（盒子数不对 / 控件压在幽灵槽 1 上）。
+		String filterRow = filterContainerRowProblem();
+		if (filterRow != null)
+			return filterRow;
+		return null;
+	}
+
+	/**
+	 * 「过滤」容器模式第二行的几何自检（§ 用户口径：容器模式 = 过滤位置 + 坐标 + 朝向）。
+	 *
+	 * <p>钉三件事：① 真建出 **3** 个 DATA_AREA 盒子（位置 / 坐标 / 朝向）；② 每一个都不越过第二行右沿
+	 * {@code FIELD_X + FIELD_W = 197}；③ 没有一个压在**幽灵槽 1**（过滤器的那个槽，GUI 74..91）上 ——
+	 * 这条是用户实测踩过的那个坑（第二行起点必须让开槽位），{@code checkGhostSlotClearance} 只查
+	 * "控件矩形与槽矩形相交"，所以这里复用同一条判据、但用**容器模式**的那套控件。
+	 */
+	@Nullable
+	private String filterContainerRowProblem() {
+		if (program.tasks.isEmpty())
+			return "过滤第二行自检前提不成立：烟雾程序里没有任务";
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry probe = new ArmProgramEntry();
+		probe.op = OperationType.FILTER;
+		probe.filterSource = ArmProgramEntry.FilterSource.CONTAINER;
+		probe.offset = new BlockPos(1, 2, 3);
+		task.entries.add(probe);
+		int index = task.entries.size() - 1;
+		try {
+			editingProp = null;
+			editing = new EditTarget(false, 0, index, null);
+			init(minecraft, 427, 240);
+			if (editorBoxes.size() != 3)
+				return "过滤（外部容器）的第二行应当是 3 个控件（位置/坐标/朝向），实际 " + editorBoxes.size();
+			// 三个框的宽度必须与常量**逐一对上**（现场算的 expr 与自检引用的常量若不一致，
+			// 布局类断言只会说"越界"，看不出是宽度算错了）。
+			int wantLeft = FIELD_X_FILTER + FILTER_SRC_W + 2;
+			int srcBox = editorBoxes.get(0)[2];
+			int coordBox = editorBoxes.get(1)[2];
+			if (srcBox != FILTER_SRC_W)
+				return "过滤位置框的宽度不是常量（" + srcBox + " ≠ " + FILTER_SRC_W + "）";
+			if (coordBox != FILTER_COORD_W_FACE)
+				return "过滤坐标框的宽度不是常量（" + coordBox + " ≠ " + FILTER_COORD_W_FACE + "）";
+			if (editorBoxes.get(1)[0] - leftPos != wantLeft)
+				return "过滤坐标框的起点不对（" + (editorBoxes.get(1)[0] - leftPos) + " ≠ " + wantLeft + "）";
+			for (int[] box : editorBoxes) {
+				int right = box[0] - leftPos + box[2];
+				if (right > FIELD_X + FIELD_W)
+					return "过滤（外部容器）的控件越界（右沿 " + right + " > " + (FIELD_X + FIELD_W) + "）";
+				int left = box[0] - leftPos;
+				// 幽灵槽 1（过滤器槽）在 GUI 74..91：左沿必须 ≥ 92（FIELD_X_FILTER = 96，留 4px）
+				if (left < 74 + 18)
+					return "过滤（外部容器）的控件压在过滤器幽灵槽上（左沿 " + left + " < 92）";
+			}
+			// 每个选项都得放得下（Create 的 Label 不裁剪）：位置框 46-10=36、「外部容器」实测 36
+			for (Component option : filterSourceLabels()) {
+				int width = font.width(option);
+				if (width > FILTER_SRC_W - 10)
+					return "过滤位置选项放不下（" + option.getString() + " " + width + " > " + (FILTER_SRC_W - 10) + "）";
+			}
+		} finally {
+			editing = null;
+			editingProp = null;
+			task.entries.remove(index);
+		}
 		return null;
 	}
 

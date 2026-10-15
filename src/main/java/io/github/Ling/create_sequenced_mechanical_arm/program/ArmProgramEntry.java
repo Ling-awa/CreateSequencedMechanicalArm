@@ -147,6 +147,32 @@ public class ArmProgramEntry {
 	 */
 	public ItemStack icon = ItemStack.EMPTY;
 
+	/**
+	 * FILTER 的**幽灵过滤器物品**：拿它当"过滤器"，去比候选那一份物品（用户口径）。
+	 *
+	 * <p>放什么就用什么规则 —— {@code create:filter}（列表）、{@code create:attribute_filter}（属性）、
+	 * {@code create:package_filter}（包裹地址），全由 Create 的 {@code FilterItemStack.of}
+	 * 按物品类型自己选，我们**不重写比对逻辑**（见 {@code ProgramRuntime.filter}）。
+	 * 空 = 没放过滤器 = <b>匹配一切</b>（Create 本体口径：{@code FilterItemStack.isEmpty()} ⇒ test 为真），
+	 * 但候选那一份**必须非空**才算成功（用户口径：没有物品就总是不符合）。
+	 */
+	public ItemStack filterItem = ItemStack.EMPTY;
+	/**
+	 * FILTER 的**过滤位置**（用户口径二选一）：手上那份存货，还是一个外部容器坐标。
+	 *
+	 * <p>存的是**枚举名**而不是 ordinal（与本文件其它枚举同一惯例）：以后增删项不会把老卡的
+	 * "外部容器"读成"手持"。缺键回落 {@link FilterSource#HELD}。
+	 */
+	public FilterSource filterSource = FilterSource.HELD;
+
+	/** FILTER 的过滤位置（§用户口径：必要输入 = 幽灵物品 + 过滤位置）。 */
+	public enum FilterSource {
+		/** 手上那份存货（{@code SequencedArmBlockEntity.getHeldItem()}）。 */
+		HELD,
+		/** 一个外部容器：取它**第一个非空槽**的那一份当候选（只看第一格，不看整箱）。 */
+		CONTAINER
+	}
+
 	/** TAKE 的数量。 */
 	public int count = 1;
 	/**
@@ -303,6 +329,44 @@ public class ArmProgramEntry {
 	}
 
 	/**
+	 * <b>这一条</b>要不要一个目标位置 —— <b>"要不要目标"唯一的那处判据</b>。
+	 *
+	 * <p>为什么不能继续只问 {@link OperationType#requiresTarget()}：过滤的位置是**二选一**的条目级属性 ——
+	 * 手持模式根本不碰世界（连着一条坐标都没有意义），容器模式却要像「使用」那样先伸到那一格去读。
+	 * 于是"这个条目有没有目标"变成了**条目级**的事（同一个 FILTER，两种模式答案不同）。
+	 *
+	 * <p>⚠️ 凡是"这个条目有没有 / 要不要一个目标位置"的地方都必须问这一个方法：
+	 * 运行时预检查（{@code ProgramRuntime.beginEntry}）、认领（{@code pinOffset} /
+	 * {@code entryOffset}）、GUI 的坐标与朝向行、卡上"有目标条目"的计数与整套平移、
+	 * 蓝图旋转（{@code SequencedArmBlockEntity.transform}）、插卡时的超范围提示、
+	 * 操作表的描框、撤销按坐标匹配、胶囊文字里的坐标。
+	 * 写在两处必然分叉 —— 症状分别是"容器模式不伸过去"和"手持模式凭空多出一个目标框"。
+	 *
+	 * <p>反过来，{@link OperationType#requiresTarget()} 保留原义：那是**操作类型天生**要不要坐标，
+	 * 仍在两处使用（{@link OperationType#recordable()} 与 {@link OperationType#isControl()} 那一族），
+	 * 别顺手换成这一条。
+	 */
+	public boolean needsTarget() {
+		return op.requiresTarget() || (op == OperationType.FILTER && filterSource == FilterSource.CONTAINER);
+	}
+
+	/**
+	 * 这个条目在编辑器里要占用几个**幽灵槽**（从 0 号起连续）—— 菜单激活数、屏幕渲染、
+	 * 自检期望值全都问这一个方法。
+	 *
+	 * <p>槽位的分工：0 号恒为**自定义图标**；1 号起是"这个操作自己的物品"——
+	 * 「收发信号」用 1/2 号记一对频率，{@link OperationType#FILTER} 用 1 号放幽灵过滤器物品。
+	 * 判据收在这里的理由与 {@link OperationType#hasSignalMode()} 当初一样：
+	 * 菜单（{@code targetSlotsActive}）、屏幕（{@code updateTargetSlots}）、自检（{@code checkGhostSlotClearance}）
+	 * 三处各写一遍的话，加了新操作就会有地方忘了改 —— 表现是"槽画出来了但放不进东西"。
+	 */
+	public int ghostSlots() {
+		if (op == OperationType.FILTER)
+			return 2;
+		return op.hasSignalMode() ? 3 : 1;
+	}
+
+	/**
 	 * 只有**硬失败**（做不成，等也没用）的条目 —— 挖掘 / 调用：能设「失败后」但**没有时限**。
 	 *
 	 * <p>攻击**没有**失败出口：挥一击就是挥一击（不筛选、不判断有没有东西），永远返回"完成"。
@@ -359,6 +423,15 @@ public class ArmProgramEntry {
 		tag.putString("uamt", unloadAmount.name());
 		if (!icon.isEmpty())
 			tag.put("icon", icon.saveOptional(registries));
+		// 过滤位置：**缺省（HELD）不写这个键** —— 与 sigmode 同一手法，只含手持过滤的卡存取前后
+		// 逐字节不变（老卡零扰动）。模式名写成字符串，不用 ordinal。
+		if (op == OperationType.FILTER && filterSource != FilterSource.HELD)
+			tag.putString("fsrc", filterSource.name());
+		// 幽灵过滤器物品：与 icon 同一写法（只在设过时写）。⚠️ 用 saveOptional 而不是 save：
+		// `DataComponents.CUSTOM_DATA` 在 1.21 是**不稳定**的组件，`save` 会往日志喷一条
+		// "不稳定组件被序列化"的警告（icon 那一行就是为了这个才用 saveOptional 的）。
+		if (op == OperationType.FILTER && !filterItem.isEmpty())
+			tag.put("fitem", filterItem.saveOptional(registries));
 		return tag;
 	}
 
@@ -397,6 +470,10 @@ public class ArmProgramEntry {
 		entry.unloadAmount = enumOf(UnloadAmount.class, tag.getString("uamt"), UnloadAmount.ONE_STACK);
 		if (tag.contains("icon"))
 			entry.icon = ItemStack.parseOptional(registries, tag.getCompound("icon"));
+		// 过滤位置：缺键（老卡 / 没设过）= HELD ⇒ 行为就是"看手上那一份"（枚举名解析，见 enumOf）
+		entry.filterSource = enumOf(FilterSource.class, tag.getString("fsrc"), FilterSource.HELD);
+		if (tag.contains("fitem"))
+			entry.filterItem = ItemStack.parseOptional(registries, tag.getCompound("fitem"));
 
 		// ——— v1 → v2 迁移（§7.7 语义改版）———
 		// v1 有 force/forceTimeout（"重试到限时"）与 onFail（"立刻失败时怎么办"）两个分支。
@@ -449,9 +526,17 @@ public class ArmProgramEntry {
 	/** 护目镜 / 调试用的一行描述。 */
 	public String describe() {
 		StringBuilder sb = new StringBuilder(op.name());
-		if (op.requiresTarget())
+		// 问**条目级**的 needsTarget()（不是 op.requiresTarget()）：过滤的容器模式才有坐标可报，
+		// 手持模式报一个 (0,0,0) 会让人以为它要伸到臂自己那一格去（用户口径：手持模式不写坐标）。
+		if (needsTarget())
 			sb.append(' ')
 				.append(offset.toShortString());
+		if (op == OperationType.FILTER)
+			sb.append(" source=")
+				.append(filterSource)
+				.append(" item=")
+				.append(filterItem.isEmpty() ? "未设置" : filterItem.getHoverName()
+					.getString());
 		if (delay > 0)
 			sb.append(" delay=")
 				.append(delay);

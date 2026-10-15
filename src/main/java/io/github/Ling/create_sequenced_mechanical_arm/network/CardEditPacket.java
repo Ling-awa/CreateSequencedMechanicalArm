@@ -215,7 +215,9 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 			ArmProgramEntry entry = task.entries.get(i);
 			// 直接拿世界坐标去比 `entry.offset` 在原点非零时就一条都删不掉（§19.4）。
 			// （`原点 + offset` 在"录制参考系"里仍然成立 —— 撤销与录制用的是同一个参考点。）
-			if (!entry.op.requiresTarget() || !base.offset(entry.offset)
+			// ★ 问**条目级**的 needsTarget()：过滤的容器模式能被"对着那个方块撤销"删掉
+			//   （手持过滤没有坐标，(0,0,0) 不参与匹配）。
+			if (!entry.needsTarget() || !base.offset(entry.offset)
 				.equals(pos))
 				continue;
 			task.entries.remove(i);

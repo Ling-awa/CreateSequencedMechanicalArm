@@ -129,7 +129,10 @@ public class ArmProgram {
 		int changed = 0;
 		for (ArmProgramTask task : tasks) {
 			for (ArmProgramEntry entry : task.entries) {
-				if (!entry.op.requiresTarget())
+				// ★ 问**条目级**的 needsTarget()（用户"过滤位置"二选一）：过滤的容器模式有真坐标，
+				//   整套平移必须带上它 —— 漏了它就会出现"箱子搬了、过滤还在看旧址"。
+				//   手持过滤没有坐标、不在这里动（给它加一个数只会制造噪声）。
+				if (!entry.needsTarget())
 					continue;
 				entry.offset = shift(entry.offset, dx, dy, dz);
 				changed++;

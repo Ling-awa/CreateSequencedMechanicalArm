@@ -272,7 +272,9 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 		int outOfRange = 0;
 		for (ArmProgramTask task : program.tasks) {
 			for (ArmProgramEntry entry : task.entries) {
-				if (!entry.op.requiresTarget())
+				// ★ 问**条目级**的 needsTarget()：过滤的容器模式也有一个世界目标，
+				//   它一样该参与"有多少条超出这条臂的范围"的提示（手持过滤没有目标，跳过）。
+				if (!entry.needsTarget())
 					continue;
 				// ★ 世界目标 = **臂的位置 + 偏移**（卡上的录制原点不参与！§19.7）。
 				// 原来这里写的是 `program.origin.offset(entry.offset)`，那在"插卡不再重基"之后

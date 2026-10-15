@@ -13,6 +13,7 @@ import com.simibubi.create.content.kinetics.belt.behaviour.TransportedItemStackH
 import com.simibubi.create.content.kinetics.belt.transport.TransportedItemStack;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
+import com.simibubi.create.content.logistics.filter.FilterItemStack;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.ArmEffects;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.TargetInteraction;
 
@@ -391,7 +392,9 @@ public class ProgramRuntime {
 
 	/** 目标解析 + 移动（或直接执行无坐标操作）。前摇已在外层处理。 */
 	private void beginEntry(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
-		if (!entry.op.requiresTarget()) {
+		// ★ 问**条目级**的 needsTarget()：过滤的容器模式必须像「使用」那样先伸到那一格去
+		//   （否则是隔空读别人的箱子）。手持过滤则原地执行 —— 它不碰世界。
+		if (!entry.needsTarget()) {
 			// 等待类：**先收回待机位**再等（用户实测："执行等待的时候不会收回去"）。
 			// 收回只是让手臂折回去（服务端只改相位，动画由客户端插值），所以**不占用等待时间** ——
 			// 计时从进入这一条就开始，收回与计时并行；等下一条要伸出去时，手臂已经在回家的路上或到家了。
@@ -636,6 +639,7 @@ public class ProgramRuntime {
 			case ATTACK -> attack(arm, task, entry);
 			case MINE -> mine(arm, task, entry);
 			case USE, USE_SNEAK -> use(arm, task, entry);
+			case FILTER -> filter(arm, task, entry);
 			case WAIT -> {
 				timer = entry.waitTicks();
 				state = EntryState.WAITING;
@@ -1018,6 +1022,103 @@ public class ProgramRuntime {
 		}
 	}
 
+	/**
+	 * 过滤（{@link OperationType#FILTER}）：把候选那一份物品交给 Create 自己的过滤规则判一次。
+	 *
+	 * <p><b>用户口径（照做，不要"优化"）</b>：
+	 * <ol>
+	 *   <li>候选 = {@code HELD}（臂此刻握着的那份存货）或 {@code CONTAINER}（目标容器的
+	 *       <b>第一个非空槽</b> —— 只看第一格，不看整箱）；</li>
+	 *   <li>候选为空 ⇒ <b>总是走失败后</b>，无论过滤器是什么；</li>
+	 *   <li>过滤器为空（没放幽灵物品）⇒ <b>匹配一切</b>（Create 本体口径：
+	 *       {@code FilterItemStack.isEmpty()} 为真时 {@code test} 恒真）；</li>
+	 *   <li>符合 ⇒ {@code succeed} 走成功后；不符合 ⇒ {@code applySkip(onTimeout)} 走失败后。</li>
+	 * </ol>
+	 *
+	 * <p><b>为什么不自己写比对逻辑</b>：用户要求"完全遵从机械动力本体的过滤逻辑：物品过滤、包裹过滤、
+	 * 列表过滤、属性过滤"。那套语义全在 {@code FilterItemStack.of(幽灵物品)} 选出来的包装类里
+	 * （{@code ListFilterItemStack} / {@code AttributeFilterItemStack} / {@code PackageFilterItemStack}）
+	 * —— 幽灵物品里放什么滤波器，就用什么规则。抄一份到我们这边，Create 一改就分叉。
+	 *
+	 * <p><b>{@code matchNBT} 传 false</b>（本体默认那一档，也是我们界面上唯一提供的那一档）。
+	 * 注意 {@code ListFilterItemStack.test} 会**无视**这个参数、改用自己的
+	 * {@code FILTER_ITEMS_RESPECT_NBT} 组件（`FilterItemStack.java:141-146`），
+	 * 所以"列表过滤要不要比 NBT"仍然归滤波器物品自己管 —— 那正是"遵从本体"。
+	 *
+	 * <p><b>只读</b>：这一条不取走、不放入、不改动任何物品，也不对目标方块发起交互（不调 {@code use}）。
+	 * 容器模式仍然会**先伸到那一格**（{@code needsTarget()} 为真 ⇒ {@code beginEntry} 走移动那一支），
+	 * 否则"读外部容器"就成了隔空取物。
+	 */
+	private void filter(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
+		Level level = arm.getLevel();
+		if (level == null) {
+			handleFailure(arm, task, entry, "世界未加载");
+			return;
+		}
+		ItemStack candidate;
+		if (entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER) {
+			// 外部容器：与「取出」完全同一套取库存的路径（`getMovingHandler` 是"臂当前目标那一格"的
+			// 物品能力，并在缓存失效时按 `movingOffset` 重解析）。方块不是容器 / 没有物品能力 ⇒
+			// 返回 null ⇒ 走失败后并给出中文理由，**不抛异常**（用户点名要求）。
+			OffsetCarrier carrier = peekTargetHandler(arm, entry);
+			if (carrier.reason() != null) {
+				applySkip(arm, task, entry, entry.onTimeout, carrier.reason());
+				return;
+			}
+			int slot = firstNonEmptySlot(carrier.handler());
+			if (slot < 0) {
+				applySkip(arm, task, entry, entry.onTimeout, "过滤：容器里没有物品");
+				return;
+			}
+			// ★ **只看第一格**（第一个非空槽），不挑"任意一格符合的"（用户选定的口径）。
+			//   反证：把它换成"遍历所有槽找匹配的"，自检里那条「容器 = [金锭, 铁锭]、幽灵 = 铁锭 ⇒ 失败」
+			//   会立刻变绿 —— 那条断言就是钉这个口径的。
+			candidate = carrier.handler()
+				.extractItem(slot, 1, true);
+		} else {
+			candidate = arm.getHeldItem();
+		}
+		if (candidate.isEmpty()) {
+			applySkip(arm, task, entry, entry.onTimeout,
+				entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER ? "过滤：容器里没有物品" : "过滤：手上没有物品");
+			return;
+		}
+		// 幽灵物品 → 包装器：空的、{@code create:filter}、{@code create:attribute_filter}、
+		// {@code create:package_filter} 由 Create 自己按物品类型分派，我们只负责喂给它。
+		FilterItemStack filter = FilterItemStack.of(entry.filterItem);
+		// 空过滤器 = 匹配一切（本体口径）——但不能短路掉上面那条"候选为空"，两者顺序不能换。
+		if (filter.isEmpty()) {
+			succeed(arm, task, entry);
+			return;
+		}
+		if (filter.test(level, candidate, false)) {
+			succeed(arm, task, entry);
+			return;
+		}
+		applySkip(arm, task, entry, entry.onTimeout, "过滤不符：" + candidate.getHoverName()
+			.getString());
+	}
+
+	/**
+	 * 目标那一格的物品能力 + "为什么没有"的现成理由（容器模式的前置解析）。
+	 *
+	 * <p>抽成一个小载体的理由：{@code null} 有两种含义（"不是容器"与"没伸过去"），
+	 * 分开表达才不会把"目标不是容器"报成"容器里没有物品"（用户要求理由要写清楚）。
+	 */
+	private record OffsetCarrier(@Nullable IItemHandler handler, @Nullable String reason) {
+	}
+
+	private static OffsetCarrier peekTargetHandler(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
+		// 先走"臂当前目标"（到位之后就是它，缓存也由它自己按 movingOffset 重解析）；
+		// 没动身时（前置检查那一支）退回按 offset 现场解析 —— 与「取出」的 preCheckFailure 同源。
+		IItemHandler handler = arm.getMovingHandler();
+		if (handler == null)
+			handler = arm.peekHandler(offsetOf(arm, entry));
+		if (handler == null)
+			return new OffsetCarrier(null, "过滤：目标不是容器（没有物品能力）");
+		return new OffsetCarrier(handler, null);
+	}
+
 	private static String describeFailure(SequencedArmBlockEntity arm) {
 		String reason = arm.rightClick.getLastFailure();
 		return reason == null ? "未知" : reason;
@@ -1108,7 +1209,9 @@ public class ProgramRuntime {
 		if (isHalted())
 			return null;
 		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
-		if (entry == null || !entry.op.requiresTarget())
+		// needsTarget()（条目级）：过滤的容器模式**有**目标，但它不认领（下面那句只挑取物/组装）——
+		// 这里换成条目级判据是为了不把"有没有目标"回答错，认领的资格仍由下一句决定。
+		if (entry == null || !entry.needsTarget())
 			return null;
 		if (entry.op != OperationType.TAKE && entry.op != OperationType.DEPLOY)
 			return null;
@@ -1124,7 +1227,8 @@ public class ProgramRuntime {
 	@Nullable
 	public BlockPos entryOffset(SequencedArmBlockEntity arm) {
 		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
-		if (entry == null || !entry.op.requiresTarget())
+		// needsTarget()（条目级）：带速宽限期与"目标是不是带子"都该认过滤的容器模式那一格。
+		if (entry == null || !entry.needsTarget())
 			return null;
 		return offsetOf(arm, entry);
 	}

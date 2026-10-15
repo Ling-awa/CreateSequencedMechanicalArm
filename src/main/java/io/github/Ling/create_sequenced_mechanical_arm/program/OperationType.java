@@ -38,6 +38,21 @@ public enum OperationType {
 	MINE(true),
 	USE(true),
 	USE_SNEAK(true),
+	/**
+	 * 过滤：拿一份物品去比"幽灵过滤器物品"，按 Create 本体那套过滤规则判符合 / 不符合。
+	 *
+	 * <p><b>为什么 {@code requiresTarget} 是 false</b>：过滤位置<b>二选一</b> ——
+	 * {@code HELD}（手上那份存货，{@code SequencedArmBlockEntity.getHeldItem()}）或
+	 * {@code CONTAINER}（一个要坐标的外部容器）。**类型本身不天生要求坐标**，
+	 * 所以这条判据只能按<b>条目</b>问（见 {@link ArmProgramEntry#needsTarget()}）——
+	 * 运行时预检查、GUI 的坐标/朝向行、录制门禁、坐标平移、范围提示全部走那一个方法。
+	 *
+	 * <p>⚠️ 也正是因为这个 false，它**不会**出现在 {@link #recordable()}（世界里录进卡的操作）里 ——
+	 * 过滤是纯判断、不对世界做动作，跟"等红石"一样属于"在编辑器里加"的操作；
+	 * 外部容器的坐标在编辑器第二行填（容器模式下 {@code needsTarget()} 为真，
+	 * 所以那三格坐标框照常出现）。
+	 */
+	FILTER(false),
 	WAIT(false),
 	WAIT_REDSTONE(false),
 	/**

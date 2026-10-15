@@ -130,7 +130,10 @@ public final class ScriptDecompiler {
 
 	private void writeOperands(ArmProgramEntry entry) {
 		OperationType op = entry.op;
-		if (op.requiresTarget()) {
+		// ★ 问**条目级**的 needsTarget()：过滤的容器模式坐标是必填项（永远写），
+		//   手持模式则退到下面那一支 —— 只在 offset 偏离默认值时才写（模型里它照样存在，
+		//   不写就会在往返里丢掉，那是不变量①的红）。
+		if (entry.needsTarget()) {
 			// 需要目标的操作：坐标是必填项，**永远写**（少写三个整数，读回来就是"这个目标在原点"）
 			out.append(' ')
 				.append(position(entry));
@@ -145,6 +148,10 @@ public final class ScriptDecompiler {
 				.append(time(entry.waitAmount, entry.waitUnit));
 			case WAIT_REDSTONE -> out.append(' ')
 				.append(entry.waitForPowered ? "on" : "off");
+			// 过滤：本体操作数 = **过滤位置**（held / container）。位置的规范写法只有本源，
+			// 所以它必须永远写出来（手写省略会让"容器模式"静默读回手持 —— 那是另一种语义）。
+			case FILTER -> out.append(" source=")
+				.append(filterSource(entry.filterSource));
 			case SIGNAL -> {
 				out.append(' ')
 					.append(signalMode(entry.signalMode));
@@ -206,6 +213,12 @@ public final class ScriptDecompiler {
 					.append(" + ")
 					.append(item(frequencyStack(entry, false)));
 			}
+			// 过滤的**幽灵过滤器物品**：复用 icon=/freq= 那套物品写法（简写 id / #RRGGBB / 完整 SNBT），
+			// 所以"列表过滤器"（create:filter 带 FILTER_ITEMS 组件）会写成完整 SNBT，
+			// 手写的 `item=create:filter` 读回来则是"没配过条目的列表过滤器"（= 匹配一切）。
+			// 空栈写成 `{}`（与 freq 的空槽一致）—— 空过滤器是个有意义的默认值，不能省掉。
+			case FILTER -> out.append(" item=")
+				.append(item(entry.filterItem));
 			default -> {
 				// 其余操作没有这类参数
 			}
@@ -236,8 +249,15 @@ public final class ScriptDecompiler {
 
 	/** 哪些操作有"交互面"——与 {@code ArmEntryText.needsFace} 同一判据（那里是显示，这里是写文件）。 */
 	private static boolean needsFace(OperationType op) {
+		// 「过滤」也在：容器模式要坐标 + 朝向（用户口径）。手持模式的面不参与运行，
+		// 但**写不写**这条由"模型里 face 是不是默认值"决定（见 writeSuffixes）—— 与左右键同一处理。
 		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK;
+			|| op == OperationType.USE_SNEAK || op == OperationType.FILTER;
+	}
+
+	/** 过滤位置的规范写法（{@code HELD → held}、{@code CONTAINER → container}）。 */
+	private static String filterSource(ArmProgramEntry.FilterSource source) {
+		return source == ArmProgramEntry.FilterSource.CONTAINER ? "container" : "held";
 	}
 
 	/** 备注的规范写法：块注释；含注释终止符 {@code *&#47;} 时退化为 {@code note="…"}（§12.3a 细则 3）。 */

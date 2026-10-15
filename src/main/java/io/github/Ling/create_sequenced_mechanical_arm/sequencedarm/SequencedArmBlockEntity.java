@@ -1489,7 +1489,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		boolean changed = false;
 		for (ArmProgramTask task : program.tasks) {
 			for (ArmProgramEntry entry : task.entries) {
-				if (!entry.op.requiresTarget())
+				// ★ 问**条目级**的 needsTarget()：过滤的容器模式也指着一个真实的方块，
+				//   蓝图旋转/镜像时它的坐标必须一起转 —— 漏了它就指错方向（手持过滤没有坐标，跳过）。
+				if (!entry.needsTarget())
 					continue;
 				entry.offset = transform.applyWithoutOffset(entry.offset);
 				changed = true;

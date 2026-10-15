@@ -753,6 +753,10 @@ public final class ScriptParser {
 		} else {
 			// 不碰目标的操作没有位置参数；但**模型里 offset 照样存在**
 			//（NBT 里 `off` 是无条件写的），所以允许可选写法把非默认值写出来。
+			// ★ 「过滤」也走这一支（它的 requiresTarget 是 false）：**容器模式要接受坐标 + face=**，
+			//   而手持模式不写坐标 —— 判据落在"能不能解析成三个整数"上（optionalPosition），
+			//   于是两种模式共用一条解析路径，不需要在语法里再分一次叉。
+			//   这一点是必须的：条目坐标只能有一种读法（写两份判据必然分叉，决策 68/85）。
 			optionalPosition(rest, parsed);
 		}
 		if (!operands(parsed, rest))
@@ -790,6 +794,9 @@ public final class ScriptParser {
 		entry.unloadRepeat = parsed.repeat;
 		entry.unloadAmount = parsed.amount;
 		entry.icon = parsed.icon;
+		// 过滤的两个新字段（不在 FILTER 上的条目也不会带上它们：解析器只在 FILTER 行里认这两个键）
+		entry.filterItem = parsed.filterItem;
+		entry.filterSource = parsed.filterSource;
 		entry.frequency = parsed.frequency;
 		if (entry.frequency != null)
 			warnFrequencyComponents(parsed);
@@ -1121,6 +1128,39 @@ public final class ScriptParser {
 					if (icon == null)
 						return false;
 					parsed.icon = icon;
+					index++;
+				}
+				// 「过滤」的**过滤位置**（必填，反编译器永远写）：held = 手上那份存货 / container = 外部容器。
+				// 为什么必须必填而不是"缺省 handheld"（语法上是可省的）：模式写错/漏写会让"容器模式"
+				// 静默读成手持 —— 那是两种完全不同的行为，不该靠默认值决定。
+				case "source" -> {
+					if (parsed.op != OperationType.FILTER) {
+						error(token.line(), "source 只对 filter 有意义");
+						return false;
+					}
+					ArmProgramEntry.FilterSource source = switch (value.toLowerCase(Locale.ROOT)) {
+						case "held", "hand" -> ArmProgramEntry.FilterSource.HELD;
+						case "container" -> ArmProgramEntry.FilterSource.CONTAINER;
+						default -> null;
+					};
+					if (source == null) {
+						error(token.line(), "未知过滤位置：" + value + "（可用 held / container）");
+						return false;
+					}
+					parsed.filterSource = source;
+					index++;
+				}
+				// 「过滤」的**幽灵过滤器物品**（必填）：复用 icon=/freq= 那套现成写法
+				//（简写 id、#RRGGBB、完整 SNBT），所以"用 ID 还是用完整 stack"这条与图标完全一致。
+				case "item" -> {
+					if (parsed.op != OperationType.FILTER) {
+						error(token.line(), "item 只对 filter 有意义（条目图标用 icon=）");
+						return false;
+					}
+					ItemStack filter = item(value, token.line());
+					if (filter == null)
+						return false;
+					parsed.filterItem = filter;
 					index++;
 				}
 				case "freq" -> {
@@ -1586,6 +1626,9 @@ public final class ScriptParser {
 		UnloadAmount amount = UnloadAmount.ONE_STACK;
 		boolean sawAmount;
 		ItemStack icon = ItemStack.EMPTY;
+		/** 过滤的幽灵物品与位置（反编译器两者都永远写；这里缺省 = 空过滤器 + 手持，恰好是模型默认值）。 */
+		ItemStack filterItem = ItemStack.EMPTY;
+		ArmProgramEntry.FilterSource filterSource = ArmProgramEntry.FilterSource.HELD;
 		@Nullable
 		Couple<Frequency> frequency;
 		@Nullable

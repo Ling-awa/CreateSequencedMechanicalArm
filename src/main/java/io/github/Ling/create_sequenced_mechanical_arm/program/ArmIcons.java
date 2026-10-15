@@ -42,6 +42,10 @@ public final class ArmIcons {
 			case MINE -> of("minecraft:iron_pickaxe", Items.IRON_PICKAXE);
 			case USE -> of("create:brass_hand", Items.LEVER);
 			case USE_SNEAK -> of("create:brass_hand", Items.LEVER);
+			// 过滤 = **Create 的滤波器物品本身**（create:filter，列表过滤器）——
+			// 图标就是"这条在用一个过滤器"这件事，比另找一个原版物品更直观。
+			// 查不到（Create 被换版本/改名）就退回漏斗：图标只是显示，绝不该让界面炸掉。
+			case FILTER -> of("create:filter", Items.HOPPER);
 			case WAIT -> of("minecraft:clock", Items.CLOCK);
 			case WAIT_REDSTONE -> of("minecraft:redstone_torch", Items.REDSTONE_TORCH);
 			// 控制类（§7.6 v4）
