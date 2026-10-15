@@ -249,10 +249,11 @@ public final class ScriptDecompiler {
 
 	/** 哪些操作有"交互面"——与 {@code ArmEntryText.needsFace} 同一判据（那里是显示，这里是写文件）。 */
 	private static boolean needsFace(OperationType op) {
-		// 「过滤」也在：容器模式要坐标 + 朝向（用户口径）。手持模式的面不参与运行，
-		// 但**写不写**这条由"模型里 face 是不是默认值"决定（见 writeSuffixes）—— 与左右键同一处理。
+		// ★ 「过滤」不在（用户第四十三轮）：容器模式只读内容 ⇒ 只要坐标，不再让玩家填朝向。
+		//   但**写不写**这条仍由"模型里 face 是不是默认值"决定（见 writeSuffixes）——
+		//   手写的 `face=north` 因此在往返里不会丢，只是界面不再提供它。
 		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK || op == OperationType.FILTER;
+			|| op == OperationType.USE_SNEAK;
 	}
 
 	/** 过滤位置的规范写法（{@code HELD → held}、{@code CONTAINER → container}）。 */

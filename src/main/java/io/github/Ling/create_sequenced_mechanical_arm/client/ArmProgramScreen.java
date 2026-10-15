@@ -217,25 +217,24 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 只是过滤只激活两个槽，所以比它多 19px 可用宽度。右沿仍然是 {@code FIELD_X + FIELD_W = 197}。
 	 */
 	private static final int FIELD_X_FILTER = 96;
-	/** 过滤位置选择框的宽：42 = 标签上限 32px（中文「外部容器」36 **放不下** ⇒ 用「外部容器」的短写
-	 * 「容器」，英文用 {@code Held / Vault}；Create 的 Label **不裁剪**，选项名放不下就是糊出框）。 */
-	private static final int FILTER_SRC_W = 42;
-	/** 过滤容器坐标框的宽（不留朝向时）：{@code 197 − (96 + 42 + 2) = 57} ⇒ 约 9 个字符（够 {@code 12,64,-30}）。 */
-	private static final int FILTER_COORD_W = FIELD_X + FIELD_W - (FIELD_X_FILTER + FILTER_SRC_W + 2);
-	/** 过滤容器朝向框的宽（留朝向时坐标框让到 {@code 197 − 173 − 2 = 22}）。 */
-	private static final int FILTER_FACE_W = 24;
-	/** 过滤容器朝向框的 x（右沿 197，与第一行那个选择框对齐）。 */
-	private static final int FILTER_FACE_X = FIELD_X + FIELD_W - FILTER_FACE_W;
 	/**
-	 * 过滤容器**同时带朝向**时坐标框的宽：{@code 197 − 173 − 2 − (96 + 46 + 2) = 22}。
+	 * 过滤位置选择框的宽：**30**。
 	 *
-	 * <p>为什么它是一个具名常量而不是在 {@code buildBaseControls} 里现场算：那三个框必须**一起**
-	 * 铺到右沿 197（用户第四十二轮的口径），而"加起来正好 101"这件事只能靠自检
-	 * （{@code filterContainerRowProblem}）钉住 —— 常量与自检要引用**同一个数**，否则改了宽度
-	 * 只是"控制台报红"，而现场算的那个 expr 还可以悄悄和它不一致。
+	 * <p>★ 用户第四十三轮（看过实机截图后）："可以把手持/容器的框再压短一些" —— 原来是 42，
+	 * 压到 30 之后余下的宽度全给坐标框（{@code 197 − 96 − 30 − 2 = 69}）。
+	 * 选项名必须放得下（Create 的 Label **不裁剪**）：中文「手持 / 容器」= 2 字 ≈ 18px ✔；
+	 * 英文用 **{@code Held / Cont}**（{@code Container} 这种长词放不下）。
+	 * 这条账由 {@code filterContainerRowProblem} 用**实测字体宽度**钉住。
 	 */
-	private static final int FILTER_COORD_W_FACE =
-		FIELD_X + FIELD_W - FILTER_FACE_W - 2 - (FIELD_X_FILTER + FILTER_SRC_W + 2);
+	private static final int FILTER_SRC_W = 30;
+	/**
+	 * 过滤容器坐标框的宽：{@code 197 − (96 + 30 + 2) = 69} ⇒ 约 11 个字符（够 {@code 12,64,-30}）。
+	 *
+	 * <p>★ 用户第四十三轮："比较容器的话，不应该不考虑方位只需要坐标吗" —— 对，读一个容器的内容
+	 * 与朝向无关 ⇒ **容器模式不再有朝向框**，那 26px 全给坐标框（原来有朝向时只剩 22px，长坐标会被裁掉）。
+	 * 模型里 {@code face} 照旧存在（默认 UP），臂解析交互点时用得到，但**不再是这个操作要玩家填的东西**。
+	 */
+	private static final int FILTER_COORD_W = FIELD_X + FIELD_W - (FIELD_X_FILTER + FILTER_SRC_W + 2);
 	/**
 	 * 「收发信号」第二行的**模式**控件（接收 / 发送 / 中断）：起点同 {@link #FIELD_X_SIGNAL}，宽 30。
 	 *
@@ -1988,9 +1987,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	/** 需要"交互面"的操作（左键/右键语义）；与 {@code ArmEntryText.needsFace} / 反编译器同一判据。 */
 	private static boolean needsFace(OperationType op) {
-		// 「过滤」也在这里：容器模式要坐标 + 朝向（用户点名的口径），手持模式那一支自己会跳过朝向。
+		// ★ 「过滤」**不在**这里（用户第四十三轮）：容器模式只读内容，读哪个面都一样 ⇒ 只要坐标。
+		//   模型里的 face 保持默认 UP（臂解析交互点时用得到），但界面上不再给玩家这个框。
 		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK || op == OperationType.FILTER;
+			|| op == OperationType.USE_SNEAK;
 	}
 
 	/**
@@ -2962,14 +2962,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 						rebuildPending = true;
 					});
 				if (entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER) {
-					// 与「使用」那一族同一套写法（坐标框 + 朝向框**一起把第二行铺到右沿 197**）：
-					// 不留朝向时坐标框拿满余量，留了就得让出 26px。第一行那个选择框到 197，
-					// 所以这里也到 197（用户第四十二轮定的口径）。
-					boolean face = needsFace(entry.op);
-					int coordW = face ? FILTER_COORD_W_FACE : FILTER_COORD_W;
+					// ★ 用户第四十三轮："比较容器的话，不应该不考虑方位只需要坐标吗" —— 对：
+					//   读容器内容与朝向无关 ⇒ 容器模式只有**一个坐标框**，它把第二行铺到右沿 197
+					//   （位置框压到 30 之后余下 69px，长坐标也放得下了）。朝向不再是玩家要填的东西，
+					//   模型里的 face 保持默认 UP（臂解析交互点时用得到，见 FILTER_COORD_W 的说明）。
 					BlockPos origin = cardOriginOrZero();
 					BlockPos world = origin.offset(entry.offset);
-					textField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, coordW, tr("entry.coords"),
+					textField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, FILTER_COORD_W, tr("entry.coords"),
 						tr("hint.entry_filter_coords"), world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
 							BlockPos parsed = parseCoords(v);
 							if (parsed != null) {
@@ -2977,13 +2976,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 								entry.offset = parsed.subtract(origin);
 							}
 						});
-					if (face)
-						inlinePicker(FILTER_FACE_X, FILTER_FACE_W, tr("entry.face"), tr("hint.entry_face"),
-							labels(Direction.values()), entry.face.ordinal(), i -> {
-								pushUndo();
-								entry.face = Direction.values()[i];
-								rebuildPending = true;
-							});
 				}
 			}
 			default -> {
@@ -4514,9 +4506,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				case SIGNAL -> entry.isSignalSend() ? 3 : 1;
 				case WAIT_REDSTONE, CALL, THROW -> 1;
 				case BREAK -> 0;
-				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 + 朝向 = 3
-				//（用户口径：手持模式不写坐标；容器模式要坐标 + face=）。
-				case FILTER -> entry.needsTarget() ? 3 : 1;
+				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 = 2
+				//（用户第四十三轮：容器模式**不要朝向** —— 读容器与方位无关）。
+				case FILTER -> entry.needsTarget() ? 2 : 1;
 				default -> needsFace(entry.op) ? 2 : 1;
 			};
 			if (boxes != expected)
@@ -4550,12 +4542,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 「过滤」容器模式第二行的几何自检（§ 用户口径：容器模式 = 过滤位置 + 坐标 + 朝向）。
+	 * 「过滤」容器模式第二行的几何自检（用户口径：容器模式 = 过滤位置 + 坐标，**不要朝向**）。
 	 *
-	 * <p>钉三件事：① 真建出 **3** 个 DATA_AREA 盒子（位置 / 坐标 / 朝向）；② 每一个都不越过第二行右沿
-	 * {@code FIELD_X + FIELD_W = 197}；③ 没有一个压在**幽灵槽 1**（过滤器的那个槽，GUI 74..91）上 ——
-	 * 这条是用户实测踩过的那个坑（第二行起点必须让开槽位），{@code checkGhostSlotClearance} 只查
-	 * "控件矩形与槽矩形相交"，所以这里复用同一条判据、但用**容器模式**的那套控件。
+	 * <p>钉四件事：① 真建出 **2** 个 DATA_AREA 盒子（位置 / 坐标，第四十三轮去掉了朝向）；
+	 * ② 两个框的宽度与常量逐一对上、加起来正好铺到第二行右沿 {@code FIELD_X + FIELD_W = 197}；
+	 * ③ 没有一个压在**幽灵槽 1**（过滤器的那个槽，GUI 74..91）上 —— 这条是用户实测踩过的那个坑
+	 * （第二行起点必须让开槽位）；④ 两个选项名在压短后的 30px 框里**实测**放得下。
+	 *
+	 * <p>反证：把 {@code FILTER_SRC_W} 改回 42 ⇒ 坐标框宽度对不上常量 ⇒ 立刻红；
+	 * 把 {@code FIELD_X_FILTER} 改回 77 ⇒ 控件压在幽灵槽 1 上 ⇒ 立刻红。
 	 */
 	@Nullable
 	private String filterContainerRowProblem() {
@@ -4572,17 +4567,17 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			editingProp = null;
 			editing = new EditTarget(false, 0, index, null);
 			init(minecraft, 427, 240);
-			if (editorBoxes.size() != 3)
-				return "过滤（外部容器）的第二行应当是 3 个控件（位置/坐标/朝向），实际 " + editorBoxes.size();
-			// 三个框的宽度必须与常量**逐一对上**（现场算的 expr 与自检引用的常量若不一致，
+			if (editorBoxes.size() != 2)
+				return "过滤（外部容器）的第二行应当是 2 个控件（位置/坐标），实际 " + editorBoxes.size();
+			// 两个框的宽度必须与常量**逐一对上**（现场算的 expr 与自检引用的常量若不一致，
 			// 布局类断言只会说"越界"，看不出是宽度算错了）。
 			int wantLeft = FIELD_X_FILTER + FILTER_SRC_W + 2;
 			int srcBox = editorBoxes.get(0)[2];
 			int coordBox = editorBoxes.get(1)[2];
 			if (srcBox != FILTER_SRC_W)
 				return "过滤位置框的宽度不是常量（" + srcBox + " ≠ " + FILTER_SRC_W + "）";
-			if (coordBox != FILTER_COORD_W_FACE)
-				return "过滤坐标框的宽度不是常量（" + coordBox + " ≠ " + FILTER_COORD_W_FACE + "）";
+			if (coordBox != FILTER_COORD_W)
+				return "过滤坐标框的宽度不是常量（" + coordBox + " ≠ " + FILTER_COORD_W + "）";
 			if (editorBoxes.get(1)[0] - leftPos != wantLeft)
 				return "过滤坐标框的起点不对（" + (editorBoxes.get(1)[0] - leftPos) + " ≠ " + wantLeft + "）";
 			for (int[] box : editorBoxes) {
@@ -4594,11 +4589,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				if (left < 74 + 18)
 					return "过滤（外部容器）的控件压在过滤器幽灵槽上（左沿 " + left + " < 92）";
 			}
-			// 每个选项都得放得下（Create 的 Label 不裁剪）：位置框 46-10=36、「外部容器」实测 36
+			// 每个选项都得放得下（Create 的 Label 不裁剪）：框 30 ⇒ 留 8px 边距 = 文字上限 22px
 			for (Component option : filterSourceLabels()) {
 				int width = font.width(option);
-				if (width > FILTER_SRC_W - 10)
-					return "过滤位置选项放不下（" + option.getString() + " " + width + " > " + (FILTER_SRC_W - 10) + "）";
+				if (width > FILTER_SRC_W - 8)
+					return "过滤位置选项放不下（" + option.getString() + " " + width + " > " + (FILTER_SRC_W - 8) + "）";
 			}
 		} finally {
 			editing = null;

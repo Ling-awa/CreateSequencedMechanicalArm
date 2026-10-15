@@ -144,13 +144,13 @@ public final class ArmEntryText {
 	/**
 	 * 需要"交互面"的操作（左键/右键语义）—— 与编辑器里的判定同一处依据。
 	 *
-	 * <p>「过滤」在**容器模式**下也要一个面：它虽然只读（不做右键动作），但"臂伸到那一格的哪一面"
-	 * 是这条条目的一组必要信息 —— 用户点名的口径就是"容器模式写坐标 + {@code face=}"。
-	 * 手持模式用不上这个面（{@link #base} 里那一处会顺手省略它，与"手持模式不写坐标"同一条口径）。
+	 * <p>★ 「过滤」**不在**这里（用户第四十三轮："比较容器的话，不应该不考虑方位只需要坐标吗"）：
+	 * 容器模式只读内容，读哪个面都一样 ⇒ 玩家只需填坐标；模型里的 {@code face} 保持默认 UP，
+	 * 臂解析交互点时照旧用得到它，但它不是这个操作要玩家关心的东西。
 	 */
 	public static boolean needsFace(OperationType op) {
 		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK || op == OperationType.FILTER;
+			|| op == OperationType.USE_SNEAK;
 	}
 
 	/**
