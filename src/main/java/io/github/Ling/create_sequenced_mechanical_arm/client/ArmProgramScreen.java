@@ -475,8 +475,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private void updateTargetSlots() {
 		// 编辑**属性**时三个槽都不适用（图标/频率都属于"条目本体"，用户实测抱怨过这里还留着频率槽）
-		if (editing == null || editing.task || editing.propName() != null) {
+		if (editing == null || editing.propName() != null) {
 			menu.targetSlotsActive = 0;
+			return;
+		}
+		// ★ 任务本体也有**图标**槽（用户第四十一轮："任务编辑器也要能像操作一样放自定义图标"）。
+		// ⚠️ 这里以前把"编辑任务"和"编辑属性"并成同一个分支判 0 ⇒ 任务编辑器**一个槽都没有**：
+		// `sendGhostSlots` 照样在往槽 0 推任务图标，但槽没激活就既画不出来也放不进东西
+		// （`InactiveTargetSlot` 会拒收点击），表现就是"任务改不了图标"。
+		if (editing.task) {
+			menu.targetSlotsActive = 1;
 			return;
 		}
 		ArmProgramEntry entry = entry(new Card(false, editing.taskIndex, editing.entryIndex));
@@ -3602,6 +3610,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String taskProblem = screen.checkLayout("EDITOR-TASK");
 			if (taskProblem != null && problem == null)
 				problem = "TASK: " + taskProblem;
+			// ★ 任务编辑器必须有**恰好一个**幽灵槽（就是图标槽）—— 用户第四十一轮报的"任务改不了图标"
+			// 就是这么来的：那时这里判 0，槽既不画也放不进东西。反证：把那支 `editing.task` 删掉
+			// （回到与"编辑属性"合并判 0）⇒ 这条立刻红。
+			String taskSlots = screen.checkGhostSlotClearance(null);
+			if (taskSlots != null && problem == null)
+				problem = "TASK: " + taskSlots;
 
 			// 点击入口自检：真走一遍 mouseClicked，验证"卡片热区在容器屏幕之前拿到点击"。
 			// 顺序写反时 AbstractContainerScreen 会无条件吞掉左右键，而它同样返回 true ——
@@ -4204,9 +4218,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 这里断言两件事：① 需要两个槽的操作必须把两个槽都激活；② 第二行所有控件的左沿必须在两个槽右侧之外。
 	 */
 	@Nullable
-	private String checkGhostSlotClearance(ArmProgramEntry entry) {
-		// 期望的可用槽数：编辑属性 = 0；条目/任务本体 = 1（图标）；「收发信号」本体 = 3（图标 + 一对频率）
-		int expect = editingProperty() ? 0 : entry.op.hasSignalMode() ? 3 : 1;
+	private String checkGhostSlotClearance(@Nullable ArmProgramEntry entry) {
+		// 期望的可用槽数：编辑属性 = 0；任务本体 = 1（只有图标）；条目本体 = 1（图标）、
+		// 「收发信号」本体 = 3（图标 + 一对频率）
+		int expect = editingProperty() ? 0
+			: editing != null && editing.task ? 1
+				: entry != null && entry.op.hasSignalMode() ? 3 : 1;
 		if (menu.targetSlotsActive != expect)
 			return "幽灵槽激活数应当是 " + expect + "，实际 " + menu.targetSlotsActive;
 		// 只查**激活的**槽：未激活的槽既不画也点不到（比如非「收发信号」时第二个槽根本不存在），
