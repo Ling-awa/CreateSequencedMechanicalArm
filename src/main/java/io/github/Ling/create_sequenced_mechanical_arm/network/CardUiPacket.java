@@ -16,6 +16,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * 录入会话状态（模式 / 正在编辑哪个任务）**以及"设原点"**的 C2S 意图包（PLAN.md §5.1、§19.3）。
@@ -30,12 +31,14 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  * 服务端权威写入 —— 这里的两行注释描述的机制没变，只是宿主换了。
  *
  * <p>★ <b>{@code setOrigin} 那一支</b>（§19.3 的中键）：原点也是"卡上的状态"，同样只能由服务端
- * 权威写。客户端只报坐标，服务端写卡（{@link ArmProgram#origin} + {@link ArmProgram#hasOrigin}）。
+ * 权威写。客户端只报坐标，服务端写卡（{@link CardProgramStorage#writeOrigin}）—— 用户第四十轮起
+ * 它<b>不在程序里</b>（见 {@link CardProgramStorage} 的 {@code ArmProgramOrigin} 键注释）。
  * 现有调用方（模式 / 任务切换）一律传 {@code setOrigin=false}，行为一个字都没变。
  *
  * <p>服务端不校验"这个玩家该不该有编辑模式"：编辑的是他自己手上的卡，模式只是 UX 约定。
  */
-public record CardUiPacket(String mode, int task, boolean setOrigin, BlockPos origin) implements CustomPacketPayload {
+public record CardUiPacket(String mode, int task, boolean setOrigin, @Nullable BlockPos origin)
+	implements CustomPacketPayload {
 
 	// 线上取值只有一处定义（`ArmProgram` 的模型常量）—— 这里只是别名，免得两边各写一个 "EDIT"
 	public static final String RECORD = ArmProgram.MODE_RECORD;
@@ -52,7 +55,7 @@ public record CardUiPacket(String mode, int task, boolean setOrigin, BlockPos or
 	 * {@code setOrigin=false} 时**根本不参与编码**，写什么都不影响语义。
 	 */
 	public CardUiPacket(String mode, int task) {
-		this(mode, task, false, BlockPos.ZERO);
+		this(mode, task, false, null);
 	}
 
 	public static final StreamCodec<FriendlyByteBuf, CardUiPacket> STREAM_CODEC = StreamCodec.of(
@@ -62,14 +65,23 @@ public record CardUiPacket(String mode, int task, boolean setOrigin, BlockPos or
 			buf.writeBoolean(packet.setOrigin());
 			// 坐标只在真的设原点时才写：不设时多写 12 字节毫无意义，而且"线上有没有这个字段"
 			// 与语义严格对应（读的一侧照同一个判据读，两边不会错位）。
-			if (packet.setOrigin())
-				buf.writeBlockPos(packet.origin());
+			if (packet.setOrigin()) {
+				// ★ 还有一个"有没有"位：设原点与**清原点**是两个不同的意图，而 (0,0,0) 是
+				// "原点设在世界原点"这个**合法状态**，不能拿它当"清空"（见 writeOrigin 的说明）。
+				BlockPos origin = packet.origin();
+				buf.writeBoolean(origin != null);
+				if (origin != null)
+					buf.writeBlockPos(origin);
+			}
 		},
 		buf -> {
 			String mode = buf.readUtf();
 			int task = buf.readVarInt();
 			boolean setOrigin = buf.readBoolean();
-			return new CardUiPacket(mode, task, setOrigin, setOrigin ? buf.readBlockPos() : BlockPos.ZERO);
+			BlockPos origin = null;
+			if (setOrigin && buf.readBoolean())
+				origin = buf.readBlockPos();
+			return new CardUiPacket(mode, task, setOrigin, origin);
 		});
 
 	@Override
@@ -113,16 +125,20 @@ public record CardUiPacket(String mode, int task, boolean setOrigin, BlockPos or
 	 * 这里写的是"卡以后的坐标以哪为基准"，写错了在游戏里是**静默**的 ——
 	 * 玩家会看到自己录的坐标全部偏掉，而编译期一点提示都没有。
 	 *
-	 * <p>{@code hasOrigin} 必须一起置真：不然写进去的坐标永远不会被读到（录制会被
-	 * {@code card.need_origin} 拒绝）。
+	 * <p>★ <b>写的是卡上的键</b>（用户第四十轮）：{@code CardProgramStorage.writeOrigin} ——
+	 * 原点不属于程序（条目的 offset 永远相对执行它的那条臂），所以它既不进 {@code program}，
+	 * 也不进 `.sma` 文本。{@code program} 参数只剩"这条路径确实读到了这张卡的程序"这一层意思
+	 * （以及让下面那次清单同步拿得到程序），**不再被改写**。
+	 *
+	 * <p>{@code origin == null} = <b>清掉原点</b>（回到"没设"）。用户第四十一轮加的那两个 GUI
+	 * 按钮里，"输入框留空确认"走的就是这一支 —— 之前它只能在客户端直接改卡，会被服务端广播的
+	 * 权威副本顶回去；现在起它与设原点共用同一条服务端权威路径。
 	 */
 	public static void applyOrigin(ServerPlayer player, ItemStack card, ArmProgram program,
-		HolderLookup.Provider registries, BlockPos origin) {
-		program.origin = origin;
-		program.hasOrigin = true;
-		CardProgramStorage.write(card, program, registries);
-		// 与模式/任务那条路一样：写完把权威副本广播回去（程序变了 ⇒ 清单的勾可能跟着变；
-		// 原点本身客户端也要立刻看到，否则"再录一条"的换算还是旧的）
+		HolderLookup.Provider registries, @Nullable BlockPos origin) {
+		CardProgramStorage.writeOrigin(card, origin);
+		// 与模式/任务那条路一样：写完把权威副本广播回去（原点客户端也要立刻看到，
+		// 否则"再录一条"的换算还是旧的；清单的勾不受原点影响，这里只为共用同一条收尾路径）
 		ClipboardPlan.syncTicks(player, program);
 		player.inventoryMenu.broadcastChanges();
 	}

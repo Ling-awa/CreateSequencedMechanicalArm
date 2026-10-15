@@ -36,9 +36,10 @@ public class ArmProgramEntry {
 	 * <p>世界目标 = {@code arm.getBlockPos().offset(offset)}（§19.7）：所以卡里写 {@code 0 0 0}
 	 * 就是"挖臂自己脚下那一格"，与卡片在谁手里、卡上的原点在哪都无关。运行时不加任何东西。
 	 *
-	 * <p>卡上的 {@link ArmProgram#origin} 是**录制参考系**（{@code offset = 世界位置 − origin}）与
-	 * 以后渲染目标框用的；它不是运行时的锚点，插卡也<b>不做平移</b>（P1 那个
-	 * {@code ProgramCoordinates.rebaseTo} 已按 §19.7 删除）。P1 之前这里还有 {@code absolute}
+	 * <p>卡上的**录制原点**（{@code CardProgramStorage.readOrigin}，用户第四十轮起它住在卡上、
+	 * 不在程序里）是**录制参考系**（{@code offset = 世界位置 − 原点}）与画世界目标框用的；
+	 * 它不是运行时的锚点，插卡也<b>不做平移</b>（P1 那个 {@code ProgramCoordinates.rebaseTo}
+	 * 已按 §19.7 删除）。P1 之前这里还有 {@code absolute}
 	 * 字段（真 = 世界绝对坐标），同样已删除 —— 条目坐标没有第二种语义了。
 	 */
 	public BlockPos offset = BlockPos.ZERO;

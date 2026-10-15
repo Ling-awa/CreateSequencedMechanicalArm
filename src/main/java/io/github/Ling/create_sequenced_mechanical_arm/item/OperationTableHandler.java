@@ -1,5 +1,7 @@
 package io.github.Ling.create_sequenced_mechanical_arm.item;
 
+import org.jetbrains.annotations.Nullable;
+
 import com.simibubi.create.AllKeys;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 
@@ -50,8 +52,8 @@ import java.util.Objects;
  *   <li>手持操作表 → 进入会话；<b>换卡</b>（换成别的物品）才重建会话</li>
  *   <li><b>Alt + 滚轮</b> → 唯一的滚轮手势：录入模式切当前操作（界面见 {@link OperationSelectionOverlay}），
  *       编辑模式切"正在编辑的任务"</li>
- *   <li><b>右键方块</b> → 录入一条（记的是<b>世界坐标 + 点击面</b>，进模型时按程序原点换算成偏移），
- *       录进"当前任务"</li>
+ *   <li><b>右键方块</b> → 录入一条（记的是<b>世界坐标 + 点击面</b>，进模型时按**卡上的录制原点**
+ *       换算成偏移），录进"当前任务"</li>
  *   <li><b>潜行右键</b> → 主手卡 + 副手写好字的剪贴板 = 按序号写入备注；否则在"录入模式 / 编辑模式"之间切换</li>
  *   <li><b>中键（选取方块）</b> → 把卡的原点设到指向的方块（指着空气就用玩家脚下）——
  *       操作里写的全是相对坐标，没有原点就没法录制（§19.7）</li>
@@ -95,13 +97,15 @@ public class OperationTableHandler {
 	/** 当前任务名；{@code null} = 卡上一条任务都还没有。 */
 	private static String currentTaskName;
 	/**
-	 * 主手那张卡当前的程序（每 tick 从卡上读一次，与画轮廓共用同一份）。
+	 * 主手那张卡的**录制原点**（每 tick 从卡上读一次）；{@code null} = 没设过。
 	 *
-	 * <p>为什么留一份而不是每处现读：中键与右键两个输入分支都要看 {@link ArmProgram#hasOrigin}
-	 * （没设原点时不能录制，§19.7），而"这张卡有没有原点"必须与画轮廓、状态行读的是**同一份**卡；
-	 * 每处各读一次卡在"服务端刚写完、回包还没到"那一瞬间会给出不一样的说法。
+	 * <p>为什么留一份而不是每处现读：用户第四十轮起原点住在**卡上**、不再住程序里
+	 * （{@code CardProgramStorage.readOrigin}），而"这张卡有没有原点"决定了右键能不能录、
+	 * 到底画哪些轮廓 —— 两处必须看同一份卡；每处各读一次，在"服务端刚写完、回包还没到"
+	 * 那一瞬间会给出不一样的说法（正是上一版那个"客户端放行、服务端才报红"的来源）。
 	 */
-	private static ArmProgram currentProgram = new ArmProgram();
+	@Nullable
+	private static BlockPos currentOrigin;
 	private static ItemStack tracked = ItemStack.EMPTY;
 	/** 客户端 tick 计数 + 上次发删除包的时刻（见 {@link #REMOVE_INTERVAL}）。 */
 	private static int tickCounter;
@@ -133,7 +137,7 @@ public class OperationTableHandler {
 			tracked = ItemStack.EMPTY;
 			// 没拿卡 ⇒ "有没有原点"回到未知的默认（没设）：否则上一张卡的原点会让右键录制
 			// 在这里放行、到服务端才被拒（玩家看到的红字来源就对不上了）。
-			currentProgram = new ArmProgram();
+			currentOrigin = null;
 			OperationSelectionOverlay.INSTANCE.tick(false);
 			ClipboardChecklistOverlay.INSTANCE.hide();
 			return;
@@ -143,7 +147,8 @@ public class OperationTableHandler {
 		// 客户端那份缓存还停在"没有任务"，于是切模式仍然优先提示"没有任务"，直到开过一次面板才对上。
 		// 读程序本来就是每 tick 都要做的事（画轮廓），顺手比对，零额外开销。
 		ArmProgram program = CardProgramStorage.read(card, level.registryAccess());
-		currentProgram = program;
+		// 录制原点也是"卡上的状态"，与程序同一处、同一频率地读（见 currentOrigin 的字段注释）
+		currentOrigin = CardProgramStorage.readOrigin(card);
 		Mode cardMode = CardUiPacket.EDIT.equals(program.editorMode) ? Mode.EDITING : Mode.RECORDING;
 		int cardTask = program.tasks.isEmpty() ? -1
 			: Math.max(0, Math.min(program.editorTask, program.tasks.size() - 1));
@@ -214,14 +219,15 @@ public class OperationTableHandler {
 	 * 没有形状（空气 / 被破坏）时退化成整方块大小的框，并换成<b>红色</b> —— 红色 = 那里的方块已经没了，
 	 * 金色 = 目标还在。未加载的区块直接跳过：那种情况下判不出"方块还在不在"，满世界画红框只会误导。
 	 *
-	 * <p>P1「坐标模型统一」（§19）：条目里存的是<b>相对原点的偏移</b>，所以世界位置要按
-	 * {@code program.origin.offset(entry.offset)} 算；同时"只画绝对条目"这道过滤也删了
-	 * —— 新模型里没有"绝对条目"这回事，所有带坐标的条目都该看得见（P2 才做原点的蓝框）。
+	 * <p>用户第四十轮起原点住在**卡上**（{@code CardProgramStorage.readOrigin}，null = 没设过），
+	 * 条目里存的仍是<b>相对该原点的偏移</b>，所以世界位置要按 {@code 原点 + offset} 算。
+	 * 新模型里没有"绝对条目"这回事，所有带坐标的条目都该看得见。
 	 *
 	 * <p>⚠️ 这里画的**不是运行时的目标**（§19.7）：运行时条目相对的是<b>执行它的那条臂</b>
 	 * （{@code 臂位置 + 偏移}），而卡上的原点只是**录制参考系** —— 框画在
-	 * {@code origin + offset} 上是为了"在原地复现你录的那个位置"，与臂无关。
-	 * 原点没设（{@code hasOrigin=false}）时这条公式只是显示用的近似，且此时根本录不进新条目。
+	 * {@code 原点 + offset} 上是为了"在原地复现你录的那个位置"，与臂无关。
+	 * 原点没设（{@code readOrigin == null}）时这条公式只是显示用的近似（退回 (0,0,0)），
+	 * 且此时根本录不进新条目 —— 那种卡只可能来自"导入了一份没有原点的脚本"。
 	 */
 	private static void drawOutlines(Level level, ArmProgram program) {
 		// ★ 原点：**完整方块的蓝框**，与方块形状、有没有方块都无关（用户要求："无论方块形状、是否有方块
@@ -229,11 +235,14 @@ public class OperationTableHandler {
 		//   `ArmInteractionPoint:198-199`：输出端 `0xDDC166`（金）、输入端 `0x7FCDE0`（蓝）；
 		//   下面操作框用的那个金就是同一个来源，所以这里用同一个上游出处、不自己调色。
 		//   key 用常量字符串：Outliner 的 key 必须是稳定值类型，否则每 tick 会累积一份。
-		if (program.hasOrigin && level.hasChunkAt(program.origin))
+		BlockPos origin = currentOrigin;
+		if (origin != null && level.hasChunkAt(origin))
 			Outliner.getInstance()
-				.showAABB("sequenced_arm:origin", new AABB(program.origin))
+				.showAABB("sequenced_arm:origin", new AABB(origin))
 				.colored(0x7FCDE0)
 				.lineWidth(1 / 16f);
+		// 没设原点时条目框按裸偏移画（= 旧行为：那时候"没设"就等于原点在 (0,0,0)）
+		BlockPos base = origin == null ? BlockPos.ZERO : origin;
 
 		ArmProgramTask task = currentTask < 0 ? null : program.task(currentTask);
 		if (task == null)
@@ -241,7 +250,7 @@ public class OperationTableHandler {
 		for (ArmProgramEntry entry : task.entries) {
 			if (!entry.op.requiresTarget())
 				continue;
-			BlockPos pos = program.origin.offset(entry.offset);
+			BlockPos pos = base.offset(entry.offset);
 			if (!level.hasChunkAt(pos))
 				continue;
 			BlockState state = level.getBlockState(pos);
@@ -390,10 +399,10 @@ public class OperationTableHandler {
 	 * <p>★ <b>没设原点时不发录制包</b>（§19.7）：操作里写的全是相对坐标，没有原点就没有相对坐标。
 	 * 服务端那条守卫（{@code card.need_origin}）是权威，这一条只是"在本地就说清楚"——
 	 * 否则玩家看到的会是一条过了半秒才回来的红字，而这一下右键到底录没录进去也看不出来。
-	 * 判据就是卡上的 {@link ArmProgram#hasOrigin} 本身（每 tick 读一次，与状态行同一份）。
+	 * 判据就是{@link #currentOrigin}本身（每 tick 从卡上读一次，见字段注释）。
 	 */
 	private static void record(LocalPlayer player, BlockPos pos, Direction face) {
-		if (!currentProgram.hasOrigin) {
+		if (currentOrigin == null) {
 			feedback(player, "card.need_origin", ChatFormatting.RED);
 			return;
 		}
@@ -403,7 +412,7 @@ public class OperationTableHandler {
 			feedback(player, "card.not_interactable", ChatFormatting.RED);
 			return;
 		}
-		// 记的是**世界坐标**（客户端只报位置与面，服务端按卡上程序的原点换算成偏移，§19.7）；
+		// 记的是**世界坐标**（客户端只报位置与面，服务端按**卡上**那个原点换算成偏移，§19.7）；
 		// 运行时的世界目标是"臂位置 + 偏移" —— **卡上的原点不参与**，插卡也不再做任何平移。
 		PacketDistributor.sendToServer(new CardEditPacket(CardEditPacket.Action.ADD_ENTRY, pos, face, currentOp()));
 	}

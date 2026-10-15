@@ -52,8 +52,9 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
  * </pre>
  *
  * <p>条目的坐标一律<b>相对执行这条程序的那条臂</b>（§19.7）：臂跑 {@code 臂位置 + 偏移}，
- * 插卡<b>不做任何平移</b>。文本头 {@code @origin x y z} 是**可选的录制参考点**（没有这一行 ⇒
- * 原点未设置，那张卡不能录制），它只服务录制与渲染。卡片与 GUI 会在阶段 3 取代这套命令。
+ * 插卡<b>不做任何平移</b>。录制原点（用户第四十轮起它作为**卡级**属性存在，见
+ * {@code CardProgramStorage.readOrigin}）只服务录制与渲染，既不进这份程序、也不进脚本文本。
+ * 卡片与 GUI 会在阶段 3 取代这套命令。
  */
 @EventBusSubscriber(modid = Create_sequenced_mechanical_arm.MODID)
 public class SequencedArmCommands {
@@ -138,7 +139,7 @@ public class SequencedArmCommands {
 	 * <p>P1 起没有"形态对不对"这道检查。★ <b>导出的坐标是"相对执行它的那条臂"的偏移</b>
 	 * （§19.7）：导到另一条臂上时臂会照着<b>自己的位置</b>跑同一份相对坐标 ——
 	 * "搬一份程序到另一条臂"因此天然成立，不需要任何平移（曾经那步 {@code rebaseTo} 已删除）。
-	 * 臂内文本头里的 origin 是臂自己的位置（`read` 会把原点重置成自己），导出时随文本一起走。
+	 * 卡上的录制原点（用户第四十轮的卡级属性）**不跟着这份文本走**，导出也不动它。
 	 */
 	private static int export(CommandSourceStack source) {
 		ServerPlayer player = source.getPlayer();
@@ -309,9 +310,9 @@ public class SequencedArmCommands {
 			return 0;
 		}
 		ArmProgram program = compiled.value();
-		// P1「坐标模型统一」（§19）删掉了"脚本形态必须与手持卡形态一致"那道硬错：
-		// 卡上没有形态了，脚本里也没有坐标空间记号 —— 文本头的 `@origin` 是**数据**（原点在哪），
-		// 不是"这份数据是什么"的声明，导入时照收（它本来就该跟着文本走，否则导出的原点白写）。
+		// P1「坐标模型统一」（§19）删掉了"脚本形态必须与手持卡形态一致"那道硬错：卡上没有形态了。
+		// 用户第四十轮起脚本里连 `@origin` 都没有（原点住在卡上，解析到它直接报错）⇒
+		// 导入一份脚本**不会**改掉这张卡原有的录制原点 —— 这正是"原点不该跟着文本走"的意义。
 		if (!program.isWithinLimits()) {
 			source.sendFailure(tr("code.import_over_limit", ScriptCompiler.summarize(program)));
 			return 0;

@@ -9,7 +9,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 
 /**
@@ -42,39 +41,21 @@ public class ArmProgram {
 	}
 
 	/**
-	 * <b>程序原点</b>：<b>可选的</b>参考点，只管两件事（PLAN.md §19.7 的用户口径）：
-	 * <ol>
-	 *   <li><b>录制</b>：把世界位置换算成相对坐标（{@code offset = 世界位置 − origin}，见
-	 *       {@code CardEditPacket.addEntry}）；</li>
-	 *   <li><b>渲染</b>：以后在世界里画目标框（{@code origin + offset}）。</li>
-	 * </ol>
+	 * ★ <b>这里曾经有个 {@code origin}/{@code hasOrigin}</b>（一份程序一个录制参考点）——
+	 * 用户第四十轮把它<b>搬到了卡上</b>（{@code CardProgramStorage#readOrigin}）。
 	 *
-	 * <p>★ <b>它不参与运行时、也不参与插卡</b>：条目的 {@link ArmProgramEntry#offset}
-	 * <b>永远相对"执行它的那条臂"</b>（世界目标 = {@code arm.getBlockPos().offset(offset)}，
-	 * 见 {@code ProgramRuntime.offsetOf} / {@code preCheckFailure}）。插卡时<b>不做任何平移</b>
-	 * —— 曾经的 {@code ProgramCoordinates.rebaseTo} 已删除：它会把卡上的 {@code 0 0 0}
-	 * 平移到臂的位置，于是"卡里写 0 0 0"在臂里变成"指向世界原点"，正是用户报的那个 bug。
+	 * <p>为什么它不属于程序：条目的 {@link ArmProgramEntry#offset} <b>永远相对"执行它的那条臂"</b>
+	 * （世界目标 = {@code arm.getBlockPos().offset(offset)}，见 {@code ProgramRuntime.offsetOf}），
+	 * 运行时<b>不看</b>原点、插卡也<b>不做任何平移</b>（曾经的 {@code ProgramCoordinates.rebaseTo}
+	 * 已删除：它会把卡上的 {@code 0 0 0} 平移到臂的位置，于是"卡里写 0 0 0"在臂里变成"指向世界原点"，
+	 * 正是用户报的那个 bug）。原点只剩两件事：录制时把世界坐标换算成偏移
+	 * （{@code offset = 世界位置 − 原点}）、以及在世界上画那个蓝框。
 	 *
-	 * <p>因此 {@link #hasOrigin} 才必须存在：没有原点时 {@code offset} <b>没有参考系</b>
-	 * （操作里写的都是相对坐标），所以录制必须被拒绝（见 {@code CardEditPacket.addEntry}）。
-	 *
-	 * <p>进 `.sma` 文本头（{@code @origin x y z}）：§17 之后盘上只有文本，只写卡上等于
-	 * "导出 → 改 → 导入"一圈回来坐标就变了。<b>没设原点时不写这一行</b>。
+	 * <p>而这两件事都是"玩家手上这张卡"的语境 ⇒ 宿主是卡（还有 {@code .sma} 文本：原点写进文本
+	 * 等于"导出 → 改 → 导入"一圈回来坐标的参考系会跟着别人走，所以文本里也彻底删掉了
+	 * {@code @origin} 头，解析到它直接报错）。臂内那份程序压根不与录制打交道，复制来复制去只会
+	 * 制造"这个数到底是谁的"的疑问。
 	 */
-	public BlockPos origin = BlockPos.ZERO;
-
-	/**
-	 * 原点是否<b>设置过</b>（PLAN.md §19.7：原点可选）。
-	 *
-	 * <p>为什么不能拿 {@code origin.equals(BlockPos.ZERO)} 当"没设"：玩家完全可能真的把原点设在
-	 * 世界原点 (0,0,0)，那时"设过"与"没设"是两件事 —— 前者能录制，后者不能。
-	 *
-	 * <p>落盘形态：设过 ⇒ 写 {@code origin} 键（{@code NbtUtils.writeBlockPos}，int[3]）；
-	 * 没设 ⇒ 不写这个键，读回来 {@code hasOrigin = false} + {@link #origin} 归零。
-	 * 文本形态：设过 ⇒ 首行 {@code @origin x y z}；没设 ⇒ 没有这一行。
-	 */
-	public boolean hasOrigin;
-
 	public final List<ArmProgramTask> tasks = new ArrayList<>();
 
 	/**
@@ -123,6 +104,71 @@ public class ArmProgram {
 			editorTask = last;
 	}
 
+	/**
+	 * 把<b>所有任务里</b>有目标的条目的 {@link ArmProgramEntry#offset} 各加上 {@code (dx,dy,dz)}，
+	 * 返回真正被改动的条目数。
+	 *
+	 * <p>这是任务列表页那个「坐标偏移」按钮的<b>全部逻辑</b>（界面只负责解析文本、压一次撤销、落盘）。
+	 * 为什么必须住在模型里：它要能被<b>服务端启动自检</b>直接调用，而 GUI 类在专用服务器上根本不可用
+	 * （§5.2）—— 判据写在界面里就等于"只有开客户端才测得到"。
+	 *
+	 * <p><b>只动 {@code requiresTarget()} 的条目</b>：其它操作（等待 / 等红石 / 收发信号 / 调用 /
+	 * 退出 / 抛错）的 {@code offset} 没有任何意义（运行时压根不读它，见 §19.7 的
+	 * "世界目标 = 臂位置 + offset"），给它们加一个数只会制造噪声：`.sma` 文本里多出一行
+	 * 谁都没写的坐标，玩家之后看到会以为是目标，删起来还得一条条排查。
+	 *
+	 * <p>{@code (0,0,0)} 直接返回 0、一个条目都不碰：界面按返回值决定"要不要记一步撤销"，
+	 * 空操作压栈就是白记一步（撤销一次看起来什么都没发生）。
+	 *
+	 * <p>坐标用 long 相加再夹回 {@link BlockPos} 的合法区间：两个 3000 万的坐标相加会 int 溢出，
+	 * 溢出后的坐标是负数/乱数，落盘之后<b>没有任何报错</b>，只会让臂跑去地图另一头。
+	 */
+	public int shiftAllOffsets(int dx, int dy, int dz) {
+		if (dx == 0 && dy == 0 && dz == 0)
+			return 0;
+		int changed = 0;
+		for (ArmProgramTask task : tasks) {
+			for (ArmProgramEntry entry : task.entries) {
+				if (!entry.op.requiresTarget())
+					continue;
+				entry.offset = shift(entry.offset, dx, dy, dz);
+				changed++;
+			}
+		}
+		return changed;
+	}
+
+	/** 单个坐标的加法（long 中间量 + 夹回合法区间），见 {@link #shiftAllOffsets}。 */
+	private static BlockPos shift(BlockPos pos, int dx, int dy, int dz) {
+		int x = clampCoord((long) pos.getX() + dx);
+		int y = clampCoord((long) pos.getY() + dy);
+		int z = clampCoord((long) pos.getZ() + dz);
+		return new BlockPos(x, y, z);
+	}
+
+	/**
+	 * 坐标的合法区间 —— 与<b>脚本解析器同一个数</b>（{@code ScriptParser.COORD_LIMIT = 30000000}）。
+	 *
+	 * <p>为什么是 3 千万：`.sma` 文本里手写的坐标不能超过它（超了是带行号的硬错），
+	 * 而界面上平移出来的坐标**一样要存成文本** —— 两边取不同的上限，就会出现"界面上搬得出来、
+	 * 落盘时被编译器拒掉"，症状是"改完保存失败"而不是"坐标太大"。
+	 *
+	 * <p>为什么这里夹住而不是抛异常：平移是<b>批量</b>操作 —— 一条越界的条目让整批半途而废
+	 * （前面几条已改、后面几条没改）比夹住更难排查，而夹住的后果是可预期的（停在世界的边界上）。
+	 *
+	 * <p>{@code public} 是给界面与自检用的：界面上那个输入框必须**用同一个数**拒掉超限的输入
+	 * （否则"输进去 4000 万"要等到保存那一步才失败，玩家看到的提示是"保存失败"而不是"坐标太大"）。
+	 */
+	public static final int COORD_LIMIT = 30_000_000;
+
+	private static int clampCoord(long value) {
+		if (value > COORD_LIMIT)
+			return COORD_LIMIT;
+		if (value < -COORD_LIMIT)
+			return -COORD_LIMIT;
+		return (int) value;
+	}
+
 	public boolean isEmpty() {
 		return tasks.isEmpty();
 	}
@@ -161,13 +207,9 @@ public class ArmProgram {
 
 	public CompoundTag save(HolderLookup.Provider registries) {
 		CompoundTag tag = new CompoundTag();
-		// 原点**只在设过时才写**（§19.7：原点是可选的）。
-		// 用 `NbtUtils.writeBlockPos`（写成 int[3]）：与 `arm` 方块实体里 `"Offset"` 的写法一致 ——
-		// 全工程只有这一种"方块坐标进 NBT"的形式，读的一侧才不会漏掉某个形状。
-		// ⚠️ 没设时不写这个键（而不是写 (0,0,0)）：否则"设过原点 (0,0,0)"与"没设"落盘后就分不清了
-		// ⇒ 读回来 hasOrigin=true、玩家能录制，而卡上其实从没设过原点。
-		if (hasOrigin)
-			tag.put("origin", NbtUtils.writeBlockPos(origin));
+		// ⚠️ 这里曾经写过 `origin` 键（录制原点）—— 用户第四十轮把它搬到了卡上
+		// （{@code CardProgramStorage.writeOrigin}）。**不要把原点加回来**：它既不参与运行时
+		// （世界目标 = 臂坐标 + offset），也不该让"编辑一条程序"顺手改掉别人卡上的参考点。
 		ListTag list = new ListTag();
 		for (ArmProgramTask task : tasks)
 			list.add(task.save(registries));
@@ -183,12 +225,8 @@ public class ArmProgram {
 
 	public static ArmProgram load(CompoundTag tag, HolderLookup.Provider registries) {
 		ArmProgram program = new ArmProgram();
-		// ★ 原点按"**有没有 origin 键**"恢复（§19.7）：有 ⇒ 设过；没有 ⇒ 没设 + 坐标归零。
-		// 键比坐标更能表达"设过没有" —— (0,0,0) 是一个**合法的原点值**，不是"没设"的哨兵
-		// （玩家真的可能对着世界原点按中键）。
-		program.hasOrigin = tag.contains("origin");
-		program.origin = program.hasOrigin ? NbtUtils.readBlockPos(tag, "origin")
-			.orElse(BlockPos.ZERO) : BlockPos.ZERO;
+		// ⚠️ 老标签里可能还有 `origin` 键：**刻意不读**（用户明确说不做兼容）。原点现在住在卡上，
+		// 读进来的话"这份程序带着别人的参考点到处走"就会重新出现（录制换算会用到它）。
 		program.editorMode = tag.contains("emode") ? tag.getString("emode") : MODE_RECORD;
 		program.editorTask = Math.max(0, tag.getInt("etask"));
 		// 备注**不在这里夹**：夹（截断）会让"文本 → 模型 → 文本"丢字（不变量 #1 死在这一步）。
@@ -205,10 +243,9 @@ public class ArmProgram {
 
 	public List<String> describe() {
 		List<String> out = new ArrayList<>();
-		// 原点放第一行（§19.6）：它决定"录制时的世界位置怎么换算成偏移"，诊断时（`/sma info`）
-		// 第一眼就要看到 —— 用户实测那次"看起来像绝对坐标"的排查，正是靠"原点 + 偏移"一起看才定位的。
-		// 没设就说"未设置"：这一行的存在意义就是让人一眼看出"这张卡还不能录制"。
-		out.add("原点 " + (hasOrigin ? origin.toShortString() : "未设置"));
+		// ⚠️ 这里原来第一行是「原点 xxx / 未设置」。用户第四十轮把原点搬到了卡上（它不参与运行时、
+		// 也不进 `.sma` 文本）⇒ 这份**程序**的自我描述里不该再有它。`/sma info` 看的是臂里跑的那份程序，
+		// 它压根不与录制打交道，报一个从别处抄来的参考点只会误导排查。
 		for (ArmProgramTask task : tasks)
 			task.describeInto(out, i -> "  [" + i + "] ");
 		return out;

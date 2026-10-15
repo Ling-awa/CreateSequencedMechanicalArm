@@ -215,11 +215,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		clearTransmissions();
 		program.tasks.clear();
 		program.tasks.addAll(newProgram.tasks);
-		// 原点与"设过没有"跟着一起走（§19.7）：插卡**不做任何平移**，所以臂内那份与卡上那份
-		// 是同一个原点；漏掉这两行会让臂里的原点停在 (0,0,0)，而条目 offset 是玩家录的
-		// —— 将来要按"臂内 origin + offset"画框时那个数就错了。
-		program.origin = newProgram.origin;
-		program.hasOrigin = newProgram.hasOrigin;
+		// ⚠️ 这里曾经把卡上的 `origin`/`hasOrigin` 一起复制进臂内 —— 用户第四十轮删掉了这一步：
+		// 原点现在住在**卡**上（`CardProgramStorage.readOrigin`），臂运行时**完全不用它**
+		// （世界目标 = 臂位置 + offset，§19.7），复制进臂只会让"这个数是谁的"变得说不清。
 		runtime.onProgramReplaced(this); // 任务数可能变了：槽位与频率缓存都要重来
 	}
 
@@ -1483,8 +1481,8 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 *（只取旋转/镜像、不含结构平移）。数学上正确：旋转是线性的，`R(目标) − R(臂) = R(目标 − 臂)`。
 	 *
 	 * <p>相对偏移之外的情况这里不用管：P1「坐标模型统一」之后条目坐标只有一种语义
-	 * （**相对执行它的那条臂**，§19.7；卡上的 origin 只服务录制与渲染），
-	 * 而臂内的那个 origin 只是"臂的位置"的一个便利副本（`read` 里重置，`setProgram` 里跟着卡走）。
+	 * （**相对执行它的那条臂**，§19.7；卡上的录制原点只服务录制与渲染、且<b>不在臂内这份程序里</b>，
+	 * 用户第四十轮已把它从模型搬到卡上）。
 	 */
 	@Override
 	public void transform(BlockEntity be, StructureTransform transform) {
@@ -1658,12 +1656,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			}
 			ArmProgram loaded = ProgramText.fromText(text, registries);
 			program.tasks.clear();
-			// 端点：臂内的原点就是**臂自己**（§19.2 第 1 条）。臂本体盘上只存文本，文本头里的 origin
-			// 是**卡上**那个录制参考点；进臂后它没有第二个含义（运行时是"臂位置 + 偏移"，§19.7），
-			// 这里显式重置只是为了"以后要画臂内目标框时有个对的数"，免得载入一份原点在别处的文本后
-			// 那个数过期。⚠️ `hasOrigin` **不在这里置真**：它是"卡上设过录制基准没有"的状态，
-			// 与臂无关（臂里的程序压根不参与录制）；写盘时它照样过 `ArmProgram.save` 的往返。
-			program.origin = worldPosition;
+			// ⚠️ 这里原来有一句 `program.origin = worldPosition`（"臂内的原点就是臂自己"）。
+			// 用户第四十轮把原点搬到了卡上 ⇒ 臂内那份程序里根本没有原点这个字段，
+			// 也不该凭空造一个：臂运行时用的是"臂位置 + 偏移"（§19.7），与原点无关。
 			if (loaded != null) {
 				program.tasks.addAll(loaded.tasks);
 				runtime.load(tag.getCompound("Runtime"));

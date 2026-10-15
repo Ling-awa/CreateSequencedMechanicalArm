@@ -39,8 +39,9 @@ import net.minecraft.world.item.ItemStack;
  *
  * <p>规范形式速查：
  * <ul>
- *   <li>程序头 {@code &#64;origin x y z}（原点）**只在设过原点时**出现（对应 {@link ArmProgram#hasOrigin}）；
- *       没设就没有这一行（§19.7：原点可选，条目坐标永远相对执行它的那条臂）；</li>
+ *   <li>★ <b>没有 {@code &#64;origin} 头</b>（用户第四十轮）：原点不属于程序，它作为参考值存在**卡上**
+ *       （{@code CardProgramStorage.readOrigin}）—— 条目坐标永远相对**执行这条程序的那条臂**（§19.7）；
+ *       手写 {@code @origin …} 会被编译器硬报错（{@link ScriptParser} 的说明）；</li>
  *   <li>物品：{@code stack.getComponents().isEmpty()} ⇒ 只写 id；唯一组件是染色 ⇒ {@code #RRGGBB}；
  *       其余 ⇒ 完整 SNBT（键顺序由原版 codec 决定，是确定的）；空栈 ⇒ {@code {}}；</li>
  *   <li>坐标：需要目标的操作**永远写** {@code x y z}（三个整数，相对**执行这条程序的那条臂**
@@ -79,15 +80,12 @@ public final class ScriptDecompiler {
 	}
 
 	private void write(ArmProgram program) {
-		// 程序头 = 原点（PLAN.md §19.2 第 2 条），但**只在设过原点时才写**（§19.7：原点可选）。
-		// ⚠️ 顺序是硬要求：程序备注（块注释）也归"文件最前面"，两者若反过来，
-		//    编译器从第二行才看到 @origin，那条注释就会挂到"上一个拥有备注的东西"（= 上一个任务）上。
-		// 不写原点不会丢坐标：条目的 offset 永远相对**执行它的那条臂**，卡上的 origin 只服务
-		// 录制与渲染 ⇒ 没设原点的程序照样无损往返（这一行有没有，由 hasOrigin 记着）。
-		if (program.hasOrigin)
-			out.append(header(program))
-				.append('\n');
-		// 程序备注 = 程序头之后、第一条 task 之前的块注释（§12.3a 表格最后一行）
+		// ⚠️ 这里曾经第一行写 `@origin x y z`（录制原点）。用户第四十轮把原点搬到了**卡上**
+		// （`CardProgramStorage` 的 `ArmProgramOrigin` 键）⇒ 文本里不再有这一行，解析到它直接报错。
+		// 为什么原点不该跟着文本走：条目的 offset 永远相对**执行它的那条臂**（§19.7），原点只是
+		// "录制时减哪个数 + 画蓝框"的参考系；写进文本会让它随 `/sma code export` 复制给别人、
+		// 又在导入时把别人卡上的参考点顶掉。**不要再把这一行加回来。**
+		// 程序备注 = 第一条 task 之前的块注释（§12.3a 表格最后一行）
 		if (notBlank(program.note))
 			out.append(comment(program.note))
 				.append('\n');
@@ -167,12 +165,6 @@ public final class ScriptDecompiler {
 				// 其余操作没有必要操作数
 			}
 		}
-	}
-
-	/** 程序头：{@code @origin 100 64 -3}（**只在 {@link ArmProgram#hasOrigin} 时写**，见 write 里的说明）。 */
-	private static String header(ArmProgram program) {
-		return ScriptParser.HEADER + " " + program.origin.getX() + " " + program.origin.getY() + " "
-			+ program.origin.getZ();
 	}
 
 	/** 坐标：{@code 1 2 3}（三个整数，相对**执行这条程序的那条臂**；§19.7 起不再有任何空间记号）。 */

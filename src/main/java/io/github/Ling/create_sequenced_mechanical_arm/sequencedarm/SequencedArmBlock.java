@@ -235,10 +235,11 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	 * <p>三个语义要点：
 	 * <ol>
 	 *   <li>★ <b>不做任何坐标平移</b>（§19.7 的用户口径）：条目的 {@code offset} 永远相对
-	 *       "执行它的那条臂"，插卡只是把这份程序搬进臂里。卡上的 {@code origin} 不参与运行时、
-	 *       也不参与插卡 —— 它只服务录制与渲染。曾经的 {@code ProgramCoordinates.rebaseTo}
-	 *       会把卡上的 {@code 0 0 0} 平移到臂的位置，于是"卡里写 0 0 0"在臂里变成"指向世界原点"
-	 *       （用户实测：想挖自己脚下，臂却跑去挖 (0,0,0)），那个函数已删除；</li>
+	 *       "执行它的那条臂"，插卡只是把这份程序搬进臂里。卡上的录制原点（用户第四十轮起它住在
+	 *       卡上、不在程序里）不参与运行时、也不参与插卡 —— 它只服务录制与渲染。曾经的
+	 *       {@code ProgramCoordinates.rebaseTo} 会把卡上的 {@code 0 0 0} 平移到臂的位置，
+	 *       于是"卡里写 0 0 0"在臂里变成"指向世界原点"（用户实测：想挖自己脚下，臂却跑去挖 (0,0,0)），
+	 *       那个函数已删除；</li>
 	 *   <li>卡片"是绝对卡还是相对卡"这件事已经<b>不存在</b>（P1 删掉了绝对坐标操作表），
 	 *       所以没有任何形态检查；</li>
 	 *   <li>卡片本身不被消耗（可反复插到多条臂上），需要清空有别的入口。</li>
@@ -273,7 +274,7 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 			for (ArmProgramEntry entry : task.entries) {
 				if (!entry.op.requiresTarget())
 					continue;
-				// ★ 世界目标 = **臂的位置 + 偏移**（卡上的 origin 不参与！§19.7）。
+				// ★ 世界目标 = **臂的位置 + 偏移**（卡上的录制原点不参与！§19.7）。
 				// 原来这里写的是 `program.origin.offset(entry.offset)`，那在"插卡不再重基"之后
 				// 只会在 origin 恰好被重置成臂位置时才碰巧对；现在按运行时的同一条公式算。
 				BlockPos target = arm.getBlockPos()

@@ -128,9 +128,12 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		// ★ **没有原点就不能录制**（PLAN.md §19.7 的用户口径）：操作里写的坐标全是**相对坐标**，
 		// 而相对谁由原点决定 —— 没设原点时"减去原点"连该减什么都不知道。所以这里**拒绝**，
 		// 并把"怎么设原点"说在提示里（中键，见 OperationTableHandler 的选取方块分支）。
+		// 用户第四十轮起原点住在**卡上**（`CardProgramStorage.readOrigin`，null = 没设过）——
+		// 它不再跟着程序走，所以这里必须**现读卡**，不能从 `program` 里拿。
 		// ⚠️ 拒绝必须在**建任务之前**：否则玩家先被塞一个空任务，再看到"没有原点"，
 		// 那张卡的状态已经被这次失败的录制改过了。
-		if (!program.hasOrigin) {
+		BlockPos origin = CardProgramStorage.readOrigin(card);
+		if (origin == null) {
 			feedback(player, "card.need_origin", ChatFormatting.RED);
 			return;
 		}
@@ -149,7 +152,7 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = packet.op();
-		// ★ 条目坐标**一律相对执行它的那条臂**（PLAN.md §19.7），所以录制时用 origin 把世界位置
+		// ★ 条目坐标**一律相对执行它的那条臂**（PLAN.md §19.7），所以录制时用**卡上的原点**把世界位置
 		// 换算成偏移：`offset = 世界位置 − origin`。注意 origin 在这里是**纯录制参考点**，
 		// 它不参与运行时（运行时是 `臂位置 + offset`）。
 		// 世界位置回显也按 `origin + offset` 算 —— 界面上给玩家看的必须是那个位置。
@@ -157,7 +160,7 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		// ⚠️ 卡上的原点不会因为"插进过某条臂"而改变（插卡不做任何平移了，§19.7）：它只由
 		//    "中键设原点"改（CardUiPacket 的 setOrigin 那一支）。要改基准就再中键一次。
 		BlockPos world = packet.pos();
-		entry.offset = world.subtract(program.origin);
+		entry.offset = world.subtract(origin);
 		entry.face = packet.face();
 		// ★ 副手剪贴板 = 待办清单（用户第二十七轮）：录一条就把"下一个还没做的行"写成备注。
 		// 判据与 HUD 上那句"当前：xxx"共用 ClipboardChecklist.consumed 一处 ——
@@ -202,12 +205,17 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 			return;
 		int index = Math.max(0, Math.min(program.editorTask, program.tasks.size() - 1));
 		ArmProgramTask task = program.tasks.get(index);
+		// 撤销按**世界位置**匹配（条目里存的是"相对卡上原点的偏移"，见 §19.4 风险那条）。
+		// 原点没设（`readOrigin == null`）时退回 (0,0,0)：这种卡只能来自"导入一份没有原点的脚本"
+		// （录制被 `card.need_origin` 拒了），此时 offset 就是裸坐标 —— 与用户第四十轮之前
+		// "没设原点 = 原点在 (0,0,0)"的行为一致，不能因为搬了家就悄悄少掉一条撤销路径。
+		BlockPos recorded = CardProgramStorage.readOrigin(card);
+		BlockPos base = recorded == null ? BlockPos.ZERO : recorded;
 		for (int i = task.entries.size() - 1; i >= 0; i--) {
 			ArmProgramEntry entry = task.entries.get(i);
-			// 比的是**世界位置**（§19.4 风险那条）：条目里存的是"相对原点的偏移"，
-			// 直接拿世界坐标去比 `entry.offset` 在原点非零时就一条都删不掉。
-			// （`origin + offset` 在"录制参考系"里仍然成立 —— 撤销与录制用的是同一个参考点。）
-			if (!entry.op.requiresTarget() || !program.origin.offset(entry.offset)
+			// 直接拿世界坐标去比 `entry.offset` 在原点非零时就一条都删不掉（§19.4）。
+			// （`原点 + offset` 在"录制参考系"里仍然成立 —— 撤销与录制用的是同一个参考点。）
+			if (!entry.op.requiresTarget() || !base.offset(entry.offset)
 				.equals(pos))
 				continue;
 			task.entries.remove(i);

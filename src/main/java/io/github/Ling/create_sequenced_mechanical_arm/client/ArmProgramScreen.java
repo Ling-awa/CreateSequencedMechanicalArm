@@ -47,6 +47,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Wa
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmRegistration;
 
 import io.netty.buffer.Unpooled;
@@ -253,6 +254,21 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int ADD_PROP_HIT_LEFT = 0;
 	private static final int ADD_PROP_HIT_RIGHT = 16;
 
+	/**
+	 * 任务页底栏那两颗新按钮（「原点坐标」/「坐标偏移」）的位置与尺寸。
+	 *
+	 * <p>为什么接在 x=87 起：底栏原来只有三颗 18px 的 IconButton（21 / 45 / 63，右沿 81），
+	 * 再往右到面板内侧 236 是一整条空地 —— 而**不是**一路排到右边的确认键（那颗在
+	 * {@code leftPos + width - 42}，属于"整个界面"而不是"这一页"，见 {@code init}）。
+	 * 宽度 64：本仓库的字体口径是"汉字约 9px、ASCII 约 5–6px"（见 {@code SIGNAL_MODE_W} 那段账），
+	 * 中文「原点坐标」4 字 ≈ 36px、英文最长 "Origin" / "Offset" ≈ 33–36px，两端各留 10px 以上；
+	 * 这个账由自检 {@code checkBottomButtons} 用**实测字体宽度**兜住（按钮贴图不裁剪文字，
+	 * 放不下就是糊到按钮外面去，编译与服务端自检都看不出来）。
+	 */
+	private static final int BOTTOM_BTN_SET_ORIGIN_X = 87;
+	private static final int BOTTOM_BTN_SHIFT_X = 155;
+	private static final int BOTTOM_BTN_W = 64;
+
 	private final ArmProgramMenu menu;
 
 	private ArmProgram program;
@@ -339,6 +355,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 上一次命中的热区名字（只给自检用 —— 点击热区是手算的，必须能被自动验证）。 */
 	private String lastHit = "";
 
+	/**
+	 * 「原点坐标」/「坐标偏移」那两个输入框：现在开着哪一个（{@code null} = 都没开）。
+	 *
+	 * <p><b>为什么不复用 {@link #editing}</b>：那个状态说的是"某张卡片正在被编辑"（它带着
+	 * task/entry/prop 三个定位），而这两个框编辑的是**卡级的东西**（原点）或**整份程序的东西**
+	 * （全体偏移），与哪张卡片、哪个任务都无关。硬塞进去只会让 {@code updateTargetSlots} /
+	 * {@code buildEditor} / 幽灵槽那一串都得再加一层"其实不是在编辑卡片"的分支。
+	 */
+	@Nullable
+	private Dialog editingDialog;
+
+	/** 两个输入框：设卡上的录制原点 / 批量平移所有有目标条目的偏移。 */
+	private enum Dialog {
+		ORIGIN, OFFSET
+	}
+
+	/** 当前输入框里那个文本框（确认时读它的值；重建时换新的）。 */
+	@Nullable
+	private EditBox dialogField;
+	/** 框里当前显示的错误（空 = 没出错）；只在这一次输入框开着期间有效。 */
+	private String dialogError = "";
+
+	/** 输入框（DATA_AREA 盒子 + 文本框）的排版 —— 与编辑器第二行同一个位置与宽度。 */
+	private static final int DIALOG_FIELD_X = FIELD_X;
+	private static final int DIALOG_FIELD_W = FIELD_W;
 	private final List<GuiEventListener> editorWidgets = new ArrayList<>();
 
 	public ArmProgramScreen(ArmProgramMenu menu, Inventory inventory, Component title) {
@@ -481,6 +522,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			buildEditor();
 			return;
 		}
+		// 两个输入框开着时同理：只建它自己的文本框与两颗按钮（列表页的按钮全不建）。
+		if (editingDialog != null) {
+			buildDialog();
+			return;
+		}
 
 		// 底部三个按钮（位置照样板：21 / 45 / 63，确认键右下）
 		IconButton switchPage = new IconButton(leftPos + 21, topPos + 196, AllIcons.I_VIEW_SCHEDULE);
@@ -497,6 +543,27 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		insert.withCallback(this::insertAfterPointer);
 		insert.setToolTip(page == Page.ENTRIES ? tr("btn.insert_entry") : tr("btn.insert_task"));
 		addRenderableWidget(insert);
+
+		// ★ 任务列表页专有的两颗按钮（用户第二十七轮之后的新需求：卡上的原点与"整套搬一下"）。
+		//   为什么只画在任务页：它们动的是**整张卡**（原点）与**所有任务**（偏移），
+		//   操作页是"某一任务里的某几条"，在那儿摆一颗"整份一起动"的按钮只会让人以为它只管当前任务。
+		//   位置接着底栏那一排往右排：x=87 / 155，各 64 宽（3 个 IconButton 到 GUI 81 为止，
+		//   两颗按钮到 219，都在面板内侧 236 以内）。宽度按最长的那个译文倒推（中文 4 字 ≈ 36px、
+		//   英文 "Origin" / "Offset" ≈ 36px），具体数由 {@code checkBottomButtons} 那条自检
+		//   用实测字体宽度钉住（Create 的按钮贴图不会裁剪文字，放不下就是画到按钮外面去）。
+		if (page == Page.TASKS) {
+			TextButton setOrigin = new TextButton(leftPos + BOTTOM_BTN_SET_ORIGIN_X, topPos + 196, BOTTOM_BTN_W,
+				18, tr("btn.set_origin"));
+			setOrigin.withCallback(() -> openDialog(Dialog.ORIGIN));
+			setOrigin.setToolTip(tr("tip.set_origin"));
+			addRenderableWidget(setOrigin);
+
+			TextButton shift = new TextButton(leftPos + BOTTOM_BTN_SHIFT_X, topPos + 196, BOTTOM_BTN_W, 18,
+				tr("btn.shift_coords"));
+			shift.withCallback(() -> openDialog(Dialog.OFFSET));
+			shift.setToolTip(tr("tip.shift_coords"));
+			addRenderableWidget(shift);
+		}
 
 		IconButton confirm = new IconButton(leftPos + bg.getWidth() - 42, topPos + bg.getHeight() - 30,
 			AllIcons.I_CONFIRM);
@@ -733,7 +800,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		AllGuiTextures.SCHEDULE.render(graphics, leftPos, topPos);
 		ArmProgramTask current = task(currentTask);
 		Component heading;
-		if (editing != null)
+		if (editingDialog != null)
+			heading = editingDialog == Dialog.ORIGIN ? tr("title.origin") : tr("title.shift");
+		else if (editing != null)
 			heading = tr("title_editing", editingProp == null ? tr("edit.op") : editingProp.name);
 		else if (page == Page.TASKS)
 			heading = tr("title_tasks", program.tasks.size());
@@ -742,12 +811,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		int center = leftPos + (AllGuiTextures.SCHEDULE.getWidth() - 8) / 2;
 		graphics.drawString(font, heading, center - font.width(heading) / 2, topPos + 4, 0x505050, false);
 
-		if (editing == null)
+		if (editingDialog != null)
+			renderDialog(graphics);
+		else if (editing == null)
 			renderCards(graphics, partialTick);
 		else
 			renderEditor(graphics);
 
-		if (!status.isEmpty())
+		if (!status.isEmpty() && editingDialog == null)
 			graphics.drawString(font, status, leftPos + 16, topPos + 216, 0xE0A030, false);
 	}
 
@@ -1532,7 +1603,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	protected void renderForeground(GuiGraphics graphics, int mouseX, int mouseY, float partialTicks) {
 		super.renderForeground(graphics, mouseX, mouseY, partialTicks);
 		// 照上游：空跑一遍 action（click=-1）只为出悬停提示 —— 所以每个热区分支都必须有 click==0 守卫
-		if (editing == null)
+		if (editing == null && editingDialog == null)
 			action(graphics, mouseX, mouseY, -1);
 	}
 
@@ -1540,7 +1611,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	public boolean mouseClicked(double mouseX, double mouseY, int button) {
 		// 右侧滑块（用户第二十七轮续十三要求）：先于卡片热区 —— 它在 x=240..244，
 		// 而 action() 只认 x<205，两者本来不重叠；放在前面只是为了让"拖滚动条"这件事读起来最清楚。
-		if (editing == null && button == 0 && barHit(mouseX, mouseY)) {
+		if (editing == null && editingDialog == null && button == 0 && barHit(mouseX, mouseY)) {
 			int thumbH = barThumbHeight();
 			int thumbY = barThumbY(1f);
 			int my = (int) mouseY - topPos;
@@ -1557,7 +1628,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// （1.21 源码 :331-413，最后一行无条件 `return true`），所以"先 super 后 action"会让
 		// 卡片热区永远收不到点击 —— 现象是"悬停有提示、点下去什么都没发生"（实测）。
 		// 上游 ScheduleScreen 也是先 action、后 super。
-		if (action(null, mouseX, mouseY, button))
+		// ⚠️ 输入框开着时**完全不走卡片热区**：卡片列表那时根本没画（renderBg 走的是 renderDialog），
+		// 而 action() 的命中是纯坐标计算（看不出画没画）—— 不挡的话点"背包里"就会顺手改掉指针/
+		// 打开某个条目的编辑器。
+		if (editingDialog == null && action(null, mouseX, mouseY, button))
 			return true;
 		if (minecraft == null || minecraft.player == null)
 			return false; // 自检/无玩家时不碰容器屏幕（它会解引用 player）
@@ -1585,7 +1659,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	@Override
 	public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
-		if (editing != null)
+		// 输入框开着时同样不走列表滚动（列表没画，滚它只会让关掉输入框之后列表位置莫名变掉）
+		if (editing != null || editingDialog != null)
 			return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
 
 		// Shift+滚轮：胶囊行横向翻（上游 :916-955）—— 一格 = 一个胶囊，一次滚一整格
@@ -2399,6 +2474,248 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		editingProp.buildEditor();
 	}
 
+	// ————————————— 卡级输入框：设原点 / 整套平移（用户新需求，与编辑器同一套观感） —————————————
+
+	/** 打开一个输入框（{@code ORIGIN} 或 {@code OFFSET}），清掉上一次的错误。 */
+	private void openDialog(Dialog which) {
+		editingDialog = which;
+		dialogError = "";
+		rebuildPending = true;
+	}
+
+	private void closeDialog() {
+		editingDialog = null;
+		dialogField = null;
+		dialogError = "";
+		rebuildPending = true;
+	}
+
+	/**
+	 * 建输入框的控件：**同一套观感**（左边垃圾桶、上面标题、中间那个 {@code DATA_AREA} 文本框），
+	 * 位置与编辑器那个子面板逐像素对齐 —— 用户的话是"复用属性编辑器那套输入框 GUI 的观感/控件"。
+	 *
+	 * <p>垃圾桶在这一页只有一种含义：**清掉输入框**（原点那一个是真的有用的操作：留空 + 确认 =
+	 * 把卡上的原点删回"没设"）。它不是"删除条目" —— 那件事属于卡片热区，不在这里。
+	 */
+	private void buildDialog() {
+		if (editingDialog == null)
+			return;
+		editorBoxes.clear();
+
+		IconButton confirmBtn = new IconButton(leftPos + 56 + 168, topPos + 65 + 22, AllIcons.I_CONFIRM);
+		confirmBtn.withCallback(this::confirmDialog);
+		confirmBtn.setToolTip(tr(editingDialog == Dialog.ORIGIN ? "btn.origin_confirm" : "btn.shift_confirm"));
+		addEditorWidget(confirmBtn);
+
+		IconButton clearBtn = new IconButton(leftPos + 56 - 45, topPos + 65 + 22, AllIcons.I_TRASH);
+		clearBtn.withCallback(() -> {
+			if (dialogField != null)
+				dialogField.setValue("");
+			dialogError = "";
+			// 重建一次：下一次 buildDialog 会按"初值"（原点 = 当前卡上那个，偏移 = 空）**重新建框** ——
+			// 光 setValue 是不保险的（编辑器那边"重建时会主动清掉上一个输入框"是有先例的坑），
+			// 重建之后框里到底是什么值是可以一眼确定的。
+			rebuildPending = true;
+		});
+		clearBtn.setToolTip(tr("btn.clear_field"));
+		addEditorWidget(clearBtn);
+
+		// 文本框初值：原点 = **当前卡上那个**（`cardOriginOrZero` 在没设时给 (0,0,0)，这里要的是
+		// "没设就留空"⇒ 必须读原始的那份，不能用那个 ZERO 兜底）；偏移 = 留空（要玩家自己填增量，
+		// 预填 0,0,0 会让人以为"确认一下就生效"）。
+		String initial = "";
+		if (editingDialog == Dialog.ORIGIN) {
+			BlockPos origin = CardProgramStorage.readOrigin(menu.getCard());
+			if (origin != null)
+				initial = origin.getX() + " " + origin.getY() + " " + origin.getZ();
+		}
+		dialogField = null;
+		textField(DIALOG_FIELD_X, ROW2_Y, DIALOG_FIELD_W,
+			tr(editingDialog == Dialog.ORIGIN ? "entry.origin_coords" : "entry.shift_coords"),
+			tr(editingDialog == Dialog.ORIGIN ? "hint.entry_origin_coords" : "hint.entry_shift_coords"), initial, 32,
+			v -> { /* 只负责收字：解析与报错都在「确认」那一下做（边打字边报错会一路飘红） */ });
+		for (GuiEventListener listener : editorWidgets)
+			if (listener instanceof EditBox box && dialogField == null)
+				dialogField = box;
+	}
+
+	/** 画输入框那一页（面板 + 标题 + 文本框底 + 错误行）。 */
+	private void renderDialog(GuiGraphics graphics) {
+		graphics.fillGradient(0, 0, width, height, -1072689136, -804253680);
+		AllGuiTextures.SCHEDULE_EDITOR.render(graphics, leftPos - 2, topPos + 40);
+		AllGuiTextures.PLAYER_INVENTORY.render(graphics, leftPos + 38, topPos + 122);
+		graphics.drawString(font, playerInventoryTitle, leftPos + 46, topPos + 128, 0x505050, false);
+
+		Component hint = editingDialog == Dialog.ORIGIN ? tr("hint.origin_here") : tr("hint.shift_here");
+		int center = leftPos + (AllGuiTextures.SCHEDULE.getWidth() - 8) / 2;
+		graphics.drawString(font, hint, center - font.width(hint) / 2, topPos + 44, 0x505050, false);
+
+		for (int[] box : editorBoxes)
+			renderDataArea(graphics, box[0], box[1], box[2]);
+
+		// 错误行：写在文本框**下面那一行**（框本身只有 18 高、里面塞不下第二行），
+		// 红字 + 按像素折行 —— 用户要求"非法输入要在框里给出明确提示，不要静默失败"。
+		// 折行宽度 185：左沿 GUI 40 + 185 = 225 ≤ 面板内侧 236（Create 的 Label/文字都不裁剪，
+		// 放不下就会画到面板外面去）。最多画 3 行，再长就截断：下面是玩家背包。
+		if (!dialogError.isEmpty()) {
+			List<net.minecraft.util.FormattedCharSequence> lines =
+				font.split(Component.literal(dialogError), 185);
+			for (int i = 0; i < Math.min(3, lines.size()); i++)
+				graphics.drawString(font, lines.get(i), leftPos + 40, topPos + 108 + i * 10, 0xE0A030, false);
+		}
+	}
+
+	/**
+	 * 「确认」：按当前开着的那个输入框分派。两条路都**先把非法输入挡在这里**（不静默失败）。
+	 */
+	private void confirmDialog() {
+		if (editingDialog == null)
+			return;
+		String text = dialogField == null ? "" : dialogField.getValue();
+		if (editingDialog == Dialog.ORIGIN)
+			confirmOrigin(text);
+		else
+			confirmShift(text);
+	}
+
+	/**
+	 * 设卡上的录制原点。空输入 = <b>清掉原点</b>（回到"没设"）。
+	 *
+	 * <p>为什么必须走 {@link CardUiPacket} 而不是在客户端写 NBT：原点住在**卡**上，而这张卡是
+	 * 服务端权威写的（与模式 / 当前任务同一条路径，§19.3）—— 客户端直接改本地那份
+	 * {@code CUSTOM_DATA}，下一次服务端广播权威副本就把它顶回去了（玩家看到的是"设了又自己变回去"）。
+	 *
+	 * <p>清原点与设原点**走同一条路**（用户第四十一轮）：{@code CardUiPacket} 的 {@code origin}
+	 * 现在是可空的，{@code null} 就是"删掉这个键"这个意图 —— 早先版本拿它表达不了这个意图
+	 *（写 (0,0,0) 等于"原点设在世界原点"，那是另一个合法状态，见
+	 * {@code CardProgramStorage.writeOrigin} 的说明），所以当时只能在本地改卡、绕过服务端权威。
+	 */
+	private void confirmOrigin(String text) {
+		BlockPos parsed = parseTriple(text);
+		if (parsed == null) {
+			// 空 = 清（用户口径）；有字但解析不出来 = 报错，绝不当作 (0,0,0)
+			if (!text.trim()
+				.isEmpty()) {
+				dialogError = tr("err.coords", text.trim()).getString();
+				rebuildPending = true;
+				return;
+			}
+			// ★ null = 清原点，同样只发意图，卡由服务端写
+			PacketDistributor.sendToServer(new CardUiPacket(CardUiPacket.EDIT, currentTask, true, null));
+			status = tr("status.origin_cleared").getString();
+			rebuildPending = true;
+			return;
+		}
+		// ★ 只发意图，卡由**服务端**写（`CardUiPacket.setOrigin` 那一支 → `CardProgramStorage.writeOrigin`）——
+		//   这就是用户点名要走的那条路（客户端直接改 NBT 会在下一次权威副本回来时被顶掉）。
+		PacketDistributor.sendToServer(new CardUiPacket(CardUiPacket.EDIT, currentTask, true, parsed));
+		status = tr("status.origin_set", parsed.getX() + " " + parsed.getY() + " " + parsed.getZ()).getString();
+		rebuildPending = true;
+	}
+
+	/**
+	 * 「坐标偏移」：把卡上**所有任务里所有有目标条目**的 offset 一起搬 {@code (dx,dy,dz)}。
+	 *
+	 * <p>真正的平移在模型里（{@link ArmProgram#shiftAllOffsets}，理由见那段注释）；这里只做四件事：
+	 * 解析文本 → 压一次撤销 → 调它 → 走编辑器既有的落盘路径写回卡。
+	 *
+	 * <p><b>一次点击 = 一步撤销</b>：{@code pushUndo()} 只在"真的会改"时压一次，
+	 * 于是 Ctrl+Z 一下把整套偏移退回去，而不是退 N 次（N = 被改的条目数）。
+	 * {@code (0,0,0)} 根本不进来（先判掉）—— 空操作压栈就是白记一步。
+	 */
+	private void confirmShift(String text) {
+		BlockPos delta = parseTriple(text);
+		if (delta == null) {
+			if (text.trim()
+				.isEmpty())
+				dialogError = tr("err.need_coords").getString();
+			else
+				dialogError = tr("err.coords", text.trim()).getString();
+			rebuildPending = true;
+			return;
+		}
+		if (delta.equals(BlockPos.ZERO)) {
+			// 用户口径：什么都不改（也**不记撤销**）
+			dialogError = tr("err.zero_shift").getString();
+			rebuildPending = true;
+			return;
+		}
+		// 先数"有几个条目会被改到"，再决定压不压撤销：卡上一个有目标的条目都没有时压一步是白记
+		// （用户明确要求 (0,0,0) 那种空操作不许进撤销栈）。数的时候**不调 pushUndo**，
+		// 所以这一步同时也不会清掉 redo 栈 —— "弹掉刚压的那一步"那种写法会把重做弄丢。
+		if (targetCount() == 0) {
+			dialogError = tr("err.no_targets").getString();
+			rebuildPending = true;
+			return;
+		}
+		pushUndo(); // ★ 一次点击 = 一步撤销（整套平移只记一步，不是每条一步）
+		int changed = program.shiftAllOffsets(delta.getX(), delta.getY(), delta.getZ());
+		// 改完**立刻落盘**（用户要求"改完就能用，不需要玩家再点一次保存"）：
+		// 走编辑器既有那条路（整份程序 → 文本 → 卡），与关界面时的保存是同一个入口。
+		CardProgramStorage.StoreResult stored = CardProgramStorage.write(menu.getCard(), program, registries());
+		if (stored != CardProgramStorage.StoreResult.OK) {
+			// 写不下去（太大 / 有写不进脚本的物品）：**说出来**，别静默失败。
+			// ⚠️ 本地这份平移**不还原**：还原要照卡上那份重新读一遍程序，而那会连带把
+			//   {@code currentTask}/{@code pointerIndex} 弄越界（新程序可能任务更少）——
+			//   为一条错误提示冒"界面索引越界"的风险不值。留在内存里也没关系：
+			//   关界面时 {@code removed()} 还会把这份程序发一次，服务端照旧**整份接受或整份拒绝**
+			//   （那条路自己会报 {@code card.editor_too_large} 之类的红字），权威副本不会漂。
+			// 撤销栈里那一步**留着** —— 它存的正是平移之前的状态，Ctrl+Z 仍然是干净的。
+			dialogError = tr(stored == CardProgramStorage.StoreResult.TOO_LARGE
+				? "err.shift_too_large"
+				: "err.shift_encodable", ProgramText.MAX_BYTES)
+					.getString();
+			rebuildPending = true;
+			return;
+		}
+		dirty = true;
+		status = tr("status.shifted", changed, delta.getX() + " " + delta.getY() + " " + delta.getZ()).getString();
+		closeDialog();
+	}
+
+	/** 卡上所有任务里"有目标"的条目数（{@link ArmProgram#shiftAllOffsets} 会改到的就是这些）。 */
+	private int targetCount() {
+		int count = 0;
+		for (ArmProgramTask task : program.tasks)
+			for (ArmProgramEntry entry : task.entries)
+				if (entry.op.requiresTarget())
+					count++;
+		return count;
+	}
+
+	/**
+	 * {@code "x y z"} / {@code "x,y,z"} → BlockPos；解析不出来返回 {@code null}
+	 * （调用方据此报错，**不退回 (0,0,0)**：把 (0,0,0) 当"没填"会让一次手滑把整份程序搬到原点）。
+	 *
+	 * <p>空格和逗号**都吃**（用户明确要求），两者的任意混用也吃（{@code "1, 2 ,3"}）。
+	 * 三个分量都必须是整数、且落在 ±{@link ArmProgram#COORD_LIMIT} 之内 —— 上限与脚本解析器同一个数
+	 * （那一个数住在 {@link ArmProgram} 里，界面与批量平移共用）：坐标最终要写成 `.sma` 文本，
+	 * 这里放进去一个超限的数，落盘那一步会被编译器拒掉，症状就成了"保存失败"而不是"坐标太大"。
+	 */
+	@Nullable
+	private static BlockPos parseTriple(String text) {
+		if (text == null)
+			return null;
+		String trimmed = text.trim();
+		if (trimmed.isEmpty())
+			return null;
+		String[] parts = trimmed.split("[\\s,]+");
+		if (parts.length != 3)
+			return null;
+		int[] value = new int[3];
+		for (int i = 0; i < 3; i++) {
+			try {
+				long parsed = Long.parseLong(parts[i]);
+				if (parsed > ArmProgram.COORD_LIMIT || parsed < -ArmProgram.COORD_LIMIT)
+					return null;
+				value[i] = (int) parsed;
+			} catch (NumberFormatException bad) {
+				return null;
+			}
+		}
+		return new BlockPos(value[0], value[1], value[2]);
+	}
+
 	/**
 	 * 动作的**基础内容**（必填，第二行）：随动作类型整体切换 —— 用户反馈"选了等待还让我填坐标"。
 	 *
@@ -2504,8 +2821,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			default -> {
 				// 走到这里的都是"需要坐标"的动作：坐标（+ 左右键才有朝向）
 				// ★ P1「坐标模型统一」（§19）：条目属性里的「坐标空间」（rel/abs 滚轮）已删 ——
-				//   一份程序一个原点，条目不再有空间记号。原点的编辑入口（数值框 / 中键 / 整体偏移）
-				//   是 P2/P3 的事，这一轮不做。
+				//   条目坐标只有一种语义（相对执行它的那条臂），不再有空间记号。用户第四十轮起
+				//   录制原点住在**卡**上，这个框拿它当"世界位置 ↔ 偏移"的换算参考点（见下方说明）。
 				if (!entry.op.requiresTarget())
 					return;
 
@@ -2514,17 +2831,18 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// （77..197）对齐。有「面」的操作用它原来的宽度（88..120），坐标框只占 77..109。
 				int coordW = face ? 32 : FIELD_W;
 				// 框里回显的是**世界位置**（= 原点 + 偏移）：这个框编辑的是"我要打的那个世界位置"，
-				// 而模型里存的是相对**原点**（录制参考系）的偏移，所以写回去时要减去原点。
+				// 而模型里存的是相对**卡上那个录制原点**的偏移，所以写回去时要减去原点。
 				// ⚠️ 注意与运行时的区别（§19.7）：臂跑这条条目时用的是 `臂位置 + offset`，
-				//    卡上的 origin 不参与 —— 这个框只在"你还记得 origin 在哪"时才对得上世界位置
-				//    （原点没设时 origin=(0,0,0)，框里显示的就是裸偏移；这一点待用户拍板，见本轮报告）。
-				BlockPos world = program.origin.offset(entry.offset);
+				//    卡上的原点不参与 —— 这个框只在"你还记得原点在哪"时才对得上世界位置
+				//    （原点没设时退回 (0,0,0)，框里显示的就是裸偏移）。
+				BlockPos origin = cardOriginOrZero();
+				BlockPos world = origin.offset(entry.offset);
 				textField(FIELD_X, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
 					world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
 						BlockPos parsed = parseCoords(v);
 						if (parsed != null) {
 							pushUndo();
-							entry.offset = parsed.subtract(program.origin);
+							entry.offset = parsed.subtract(origin);
 						}
 					});
 				if (face)
@@ -2838,16 +3156,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		pushUndo();
 		int index = Mth.clamp(at, 0, task.entries.size());
-		// ★ 新条目**必须给一个有意义的位置**（§19.6 用户实测踩到的坑）：条目 offset 是**相对录制原点**
-		//   的偏移（运行时的世界目标 = `臂位置 + offset`，§19.7），而新卡还没设原点（origin=(0,0,0)）
-		//   ⇒ 把偏移留成 0 就等于"目标 = 世界原点"（离臂几十上百格、必然超范围），玩家看到的就是
-		//   "臂在用绝对坐标"那种怪现象。默认取"你正看着的那个方块"，没看着就取你脚下 ——
+		// ★ 新条目**必须给一个有意义的位置**（§19.6 用户实测踩到的坑）：条目 offset 是**相对卡上录制原点**
+		//   的偏移（运行时的世界目标 = `臂位置 + offset`，§19.7）⇒ 把偏移留成 0 就等于"目标 = 原点那一格"，
+		//   玩家看到的就是"新操作不知道指哪"。默认取"你正看着的那个方块"，没看着就取你脚下 ——
 		//   与"录一条"的直觉一致（等价于当场录了一条只有位置、还没选动作的条目）。
-		//   ⚠️ 原点没设（`hasOrigin=false`）时这里写出的偏移只是"相对世界原点"的裸坐标，
-		//      而世界内录制是被 `card.need_origin` 拒绝的 —— 这一处待用户拍板（见本轮报告）。
+		//   ⚠️ 原点没设时退回 (0,0,0)（裸坐标），与世界内录制那边"没设就不让录"不同：这里只是给一个
+		//      默认落点，玩家接着就会在第二行把它改掉，没必要为此堵住"新建条目"。
 		ArmProgramEntry created = new ArmProgramEntry();
 		created.offset = defaultNewEntryWorldPos()
-			.subtract(program.origin);
+			.subtract(cardOriginOrZero());
 		task.entries.add(index, created);
 		pointerIndex = index;
 		openEditor(new Card(false, currentTask, index), null);
@@ -2857,11 +3174,24 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private BlockPos defaultNewEntryWorldPos() {
 		net.minecraft.client.player.LocalPlayer player = minecraft == null ? null : minecraft.player;
 		if (player == null)
-			return program.origin;
+			return cardOriginOrZero();
 		if (minecraft.hitResult instanceof net.minecraft.world.phys.BlockHitResult hit
 			&& hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK)
 			return hit.getBlockPos();
 		return player.blockPosition();
+	}
+
+	/**
+	 * 手上那张卡的**录制原点**；没设过 ⇒ {@link BlockPos#ZERO}（裸偏移的参考点）。
+	 *
+	 * <p>为什么不缓存一份字段：原点住在**卡**上（用户第四十轮），而这张卡是服务端权威写的
+	 * （中键 → {@code CardUiPacket} → 回包刷新菜单里的物品）—— 缓存一份就会出现"服务端已经改了、
+	 * 这个框还在按旧基准换算"。读一次 {@code CUSTOM_DATA} 比读整份程序便宜得多
+	 * （{@link #program} 那种每帧编译才是不能接受的）。
+	 */
+	private BlockPos cardOriginOrZero() {
+		BlockPos origin = CardProgramStorage.readOrigin(menu.getCard());
+		return origin == null ? BlockPos.ZERO : origin;
 	}
 
 	private int totalEntries() {
@@ -3184,6 +3514,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			screen.page = Page.TASKS;
 			screen.init(mc, 427, 240);
 			problem = screen.checkLayout("TASKS");
+			// 任务页底栏那两颗新按钮（原点 / 坐标偏移）：位置与文字宽度都必须在面板内放得下
+			String bottomBtn = screen.checkBottomButtons();
+			if (bottomBtn != null && problem == null)
+				problem = "任务页按钮: " + bottomBtn;
 			int taskCards = screen.layout().size();
 			screen.page = Page.ENTRIES;
 			screen.init(mc, 427, 240);
@@ -4480,6 +4814,42 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	/** 自检报告里回显的热区命中记录，例如 {@code header,remove,up,prop:个数,addprop,background}。 */
 	private final List<String> hits = new ArrayList<>();
+
+	/**
+	 * 自检：任务页底栏那两颗新按钮（「原点坐标」/「坐标偏移」）**画得下、也不越出面板**。
+	 *
+	 * <p>为什么值得一条断言：Create 的按钮贴图**不裁剪文字**（同 {@code Label}），译文一变长
+	 * （英文 "Shift coords" 比中文长）就会糊到按钮外面、看起来像两个按钮叠在一起，而编译、
+	 * 服务端自检全都不报错。这条把"实测字体宽度"与按钮宽度对一遍，顺带钉住
+	 * ① 两个按钮都在**面板内容区**（≤236）里；② 它们与左边那三颗 IconButton 不重叠。
+	 *
+	 * <p>反证：把 {@code BOTTOM_BTN_W} 改成 40 ⇒ 英文 "Shift coords" 放不下 ⇒ 这条立刻红。
+	 */
+	@Nullable
+	private String checkBottomButtons() {
+		// ① 底栏左边那三颗 IconButton（21 / 45 / 63）到 GUI 81 为止：新按钮不许压上去
+		if (BOTTOM_BTN_SET_ORIGIN_X < 81)
+			return "「原点坐标」按钮压住了左边那三颗 IconButton（x=" + BOTTOM_BTN_SET_ORIGIN_X + " < 81）";
+		// ② 两颗都要留在**面板内容区**里（236 = 面板内侧边线；再往右就画到面板外）
+		int right = BOTTOM_BTN_SHIFT_X + BOTTOM_BTN_W;
+		if (right > 236)
+			return "两颗按钮越出面板内容区（到 x=" + right + "，上限 236）";
+		if (BOTTOM_BTN_SHIFT_X < BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_W)
+			return "两颗按钮重叠（" + BOTTOM_BTN_SET_ORIGIN_X + ".." + (BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_W)
+				+ " 与 " + BOTTOM_BTN_SHIFT_X + " 起）";
+		for (String key : new String[] { "btn.set_origin", "btn.shift_coords" }) {
+			String shown = tr(key).getString();
+			// 漏译文时 getString() 给的是**键名本身**（前缀很长）⇒ 下面那条宽度断言会顺带抓到它，
+			// 但把话说明白更好读（"没有译文"与"文字太长"是两件不同的事）
+			if (shown.startsWith("create_sequenced_mechanical_arm."))
+				return "按钮文字 " + key + " 没有译文（界面会显示原始 key）";
+			int need = font.width(tr(key));
+			if (need > BOTTOM_BTN_W - 6)
+				return "按钮文字「" + shown + "」放不下：" + need + " > " + (BOTTOM_BTN_W - 6)
+					+ "（按钮贴图不裁剪文字，会糊到按钮外面）";
+		}
+		return null;
+	}
 
 	/**
 	 * 点击热区自检：用<b>绘制时用的坐标</b>反推点击点，再喂回 {@link #action}，逐个验证能否命中。

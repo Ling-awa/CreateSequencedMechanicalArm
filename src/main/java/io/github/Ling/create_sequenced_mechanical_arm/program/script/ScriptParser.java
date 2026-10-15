@@ -49,7 +49,6 @@ import net.minecraft.world.item.component.DyedItemColor;
  *
  * <p>语言面（也是玩家可见错误的用词口径）：
  * <pre>
- *   &#64;origin 100 64 -3
  *   &ast;/文件头注释 = 程序备注&ast;/
  *   task 名字 loop=forever loopN=3 icon=minecraft:diamond
  *     take     10 64 -3 count=3 delay=10            &ast;/ 放铲子 &ast;/
@@ -65,10 +64,14 @@ import net.minecraft.world.item.component.DyedItemColor;
  *     throw    "没材料"
  * </pre>
  *
- * <p>⚠️ <b>P1 坐标模型统一</b>（PLAN.md §19）：文本头是 {@code @origin x y z}，**可选**
- * （没有这一行 ⇒ 原点未设置 {@code hasOrigin=false}，§19.7）；条目坐标<b>不再带任何空间记号</b>，
- * 直接写三个整数，语义是"相对**执行这条程序的臂**"。{@code @abs} / {@code @rel} 两个记号已删除：
- * 旧脚本不迁移（用户确认不做兼容），报错时会明确说"坐标一律相对执行它的那条臂"。
+ * <p>⚠️ <b>P1 坐标模型统一</b>（PLAN.md §19）：条目坐标<b>不带任何空间记号</b>，直接写三个整数，
+ * 语义是"相对**执行这条程序的臂**"。{@code @abs} / {@code @rel} 两个记号已删除（旧脚本不迁移）。
+ *
+ * <p>⚠️ <b>{@code @origin} 头也已删除</b>（用户第四十轮）：原点只剩"录制时的参考系"与"渲染蓝框"
+ * 两个用途，而条目的 offset 永远相对执行它的那条臂 ⇒ 它不属于这份程序，现在作为**卡级**属性存在
+ * （{@code CardProgramStorage.readOrigin}）。解析到这一行<b>硬报错</b>并说清"存在卡上"，
+ * 不静默忽略 —— 忽略会让"导出的文本里还写着它"一路通过，而那份文本换个卡导入时基准其实已经变了。
+ * 这和 {@code @abs} / {@code @rel} 报的是同一个道理：坐标的参考系只有一种，脚本里出现的"第二种"必须当场说破。
  *
  * <p>⚠️ 一处刻意的取舍（§12.3a 第 6 条）：条目行尾的块注释与紧跟其后的独占行块注释两者**合并**成一个
  * {@code note}（换行连接），不报错 —— 玩家想"再补一句注释"是很自然的事；三项合并（第三块）才报错。
@@ -79,10 +82,12 @@ public final class ScriptParser {
 	/** 坐标的合法范围。世界坐标与相对偏移都远在此内，超出必然是写错了。 */
 	public static final int COORD_LIMIT = 30_000_000;
 	/**
-	 * 程序头记号（PLAN.md §19.2 第 2 条）：{@code @origin x y z} —— 一份程序一个原点（可选）。
+	 * <b>已删除</b>的程序头记号：{@code @origin x y z}（PLAN.md §19.2 第 2 条的老写法）。
 	 *
-	 * <p>定义成常量而不是散落的字面量：解析、反编译、自检语料都要写它，
-	 * 三处各打一遍就会漂移（判据写两份必然漂移，决策 68/85）。
+	 * <p>用户第四十轮把原点搬到了卡上（{@code CardProgramStorage} 的 {@code ArmProgramOrigin} 键），
+	 * 文本里不再有这一行。常量留着有两个用处：① 解析到它时给出**指名道姓**的报错；
+	 * ② 自检断言"反编译出来的文本里不含它"（写头那条代码一旦被加回来立刻红）。
+	 * 定义成常量而不是散落的字面量：解析与自检都要写它，两处各打一遍就会漂移（决策 68/85）。
 	 */
 	public static final String HEADER = "@origin";
 	/** TAKE 的个数范围（§12.3：{@code count 1..64}）。 */
@@ -521,8 +526,6 @@ public final class ScriptParser {
 		@Nullable
 		ArmProgramEntry entry;
 		Owner owner = Owner.PROGRAM;
-		/** 程序头 {@code @origin x y z} 是否已经出现过（只能有一行，§12.3 / §19.2）。 */
-		boolean sawHeader;
 		/** 每个归属对象上已经见到几段备注（第 2 段换成行连接，第 3 段报错 —— §12.3a 第 6 条）。 */
 		int programNoteBlocks;
 		int taskNoteBlocks;
@@ -557,11 +560,14 @@ public final class ScriptParser {
 			error(line, "`#` 不再是注释写法 —— 请用 /* */（只保留一种注释语法）");
 			return;
 		}
-		// §19.2 第 2 条（主代理拍板）：程序头 = 文件首行的 `@origin x y z`。**可选**（§19.7）：
-		// 没有这一行就是"原点未设置"（hasOrigin=false），于是这张卡不能录制 —— 而不是偷偷取 (0,0,0)。
-		// 原点必须进文本：§17 之后盘上只有文本，只写卡上等于"导出 → 改 → 导入"一圈回来就丢了。
+		// 用户第四十轮：原点从程序里搬到了**卡上**，`.sma` 文本不再有 `@origin` 这一行。
+		// 为什么必须**硬报错**而不是静默跳过：静默跳过会让"文本里还写着它"一路通过 ——
+		// 玩家以为参考点跟着文本走了，其实它留在卡上（换张卡导入基准就变了），
+		// 而"录制时减的是哪个坐标"完全看不出来。宁可现在就让他删掉这一行。
 		if (keyword.equalsIgnoreCase(HEADER)) {
-			parseProgramHeader(ctx, tokens);
+			error(head.line(), HEADER + " 不再写在脚本里：原点不属于程序"
+				+ "（条目坐标一律相对执行它的那条臂），它现在只作为参考值存在**卡上**"
+				+ " —— 对着方块按中键就能设，请删掉这一行再导入");
 			return;
 		}
 		if ("task".equals(keyword)) {
@@ -573,46 +579,6 @@ public final class ScriptParser {
 			return;
 		}
 		parseEntry(ctx, tokens, line);
-	}
-
-	// ————————————————————————— 程序头：原点 —————————————————————————
-	/**
-	 * 程序头 {@code @origin x y z}（PLAN.md §19.2 第 2 条）：声明这份程序的<b>可选</b>原点，
-	 * 对应 {@link ArmProgram#origin}。解析到这一行 ⇒ {@link ArmProgram#hasOrigin} = true；
-	 * <b>没有这一行 ⇒ 未设置</b>（§19.7：没设原点时不能录制，因为操作里写的都是相对坐标）。
-	 *
-	 * <p>为什么原点必须是硬字段（写出来就要能读回去）：§17 之后盘上只有文本，只写卡上等于
-	 * "导出 → 改 → 导入"一圈回来坐标就变了。<b>但"没设"也必须能表达</b> —— 用一个哨兵坐标
-	 * （比如 (0,0,0)）表示"没设"是不行的：玩家真有可能把原点设在世界原点，那两者是不同的状态。
-	 *
-	 * <p>顺序硬要求：必须是文件里第一个记号（第一条 {@code task} 之前）。写在别处时，
-	 * 上面那段程序备注会先一步挂到"上一个拥有备注的东西"上（§12.3a）—— 报错而不静默接受。
-	 */
-	private void parseProgramHeader(Ctx ctx, List<Token> tokens) {
-		int line = tokens.get(0)
-			.line();
-		if (ctx.task != null) {
-			error(line, "程序头 " + HEADER + " 只能写在整个文件的第一行（第一条 task 之前）");
-			return;
-		}
-		if (ctx.sawHeader) {
-			error(line, "程序头只能有一行（" + HEADER + " 与之前那行重复了）");
-			return;
-		}
-		if (tokens.size() != 4) {
-			error(line, "程序头要写成 " + HEADER + " x y z（三个整数）");
-			return;
-		}
-		Integer x = intValue(tokens.get(1), -COORD_LIMIT, COORD_LIMIT, "原点 X");
-		Integer y = intValue(tokens.get(2), -COORD_LIMIT, COORD_LIMIT, "原点 Y");
-		Integer z = intValue(tokens.get(3), -COORD_LIMIT, COORD_LIMIT, "原点 Z");
-		if (x == null || y == null || z == null)
-			return;
-		ctx.sawHeader = true;
-		ctx.program.origin = new BlockPos(x, y, z);
-		// ★ 坐标与"设过没有"是两件事，一起写（§19.7）：少了这一行，任何一份设过原点的脚本
-		// 读回来都变成"未设置" ⇒ 玩家导出 → 导入一圈之后就再也录不进操作了。
-		ctx.program.hasOrigin = true;
 	}
 
 	// ————————————————————————— 注释 / 备注的归属 —————————————————————————

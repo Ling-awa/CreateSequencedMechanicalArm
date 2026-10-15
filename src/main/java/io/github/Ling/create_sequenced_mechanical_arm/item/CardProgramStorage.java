@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.nbt.CompoundTag;
@@ -24,6 +25,11 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
  * <p>为什么把格式换掉而**不动方法签名**：全工程有 17 处调用 {@link #read} / {@link #write}，
  * 它们要的都是"给我一份程序 / 把它存下去"，格式是这里的事。签名一改，17 处就得跟着改，
  * 而其中任何一处漏改都会变成"某条路还在按老格式写"——那种 bug 只在读盘时才现形（决策 68/85）。
+ *
+ * <p>★ <b>卡上还有一类"不是程序"的键</b>：录制原点（{@link #KEY_ORIGIN}）、编辑状态（模式 / 任务下标）
+ * 与浏览位置（页面 / 指针 / 滚动）。它们描述的是"这张卡怎么被用"，不是程序本身 —— 用户第四十轮
+ * 把原点从程序里搬出来正是这个理由：条目的 offset 永远相对**执行它的那条臂**，原点只在录制与渲染时
+ * 当参考系，所以它跟着卡走、不进 `.sma` 文本。
  *
  * <p><b>旧键不读</b>（用户选的"不兼容"，§17.3）：0.1.0 之前这里存的是 {@code "ArmProgram"}（编译结果）。
  * 现在遇到它只记一条警告并**当空程序**处理；一旦有任何一次 {@link #writeText}，旧键会被顺手清掉。
@@ -58,6 +64,23 @@ public final class CardProgramStorage {
 	private static final String KEY_PAGE = "ArmProgramPage";
 	private static final String KEY_SCROLL = "ArmProgramScroll";
 	private static final String KEY_TASK_SCROLL = "ArmProgramTaskScroll";
+
+	/**
+	 * 卡上的<b>录制参考点</b>（用户第四十轮：原点从程序里搬出来，只作为"卡片上的参考值"存在）。
+	 *
+	 * <p><b>为什么它必须离开程序、住到卡上</b>：条目的 {@code offset} <b>永远相对"执行它的那条臂"</b>
+	 * （世界目标 = {@code 臂坐标 + offset}，见 {@code ProgramRuntime.offsetOf}），运行时与插卡都<b>不看</b>
+	 * 原点。所以它不属于"程序"这份数据，也不该跟着 `.sma` 文本走 —— 它只剩两个用途：
+	 * ① 录制新条目时把世界坐标换算成偏移（{@code offset = 世界位置 − 原点}）；
+	 * ② 在世界上画那个蓝色完整方块框（渲染）。
+	 * 这两件事都发生在"玩家手上这张卡"的语境里，所以宿主就该是卡。
+	 *
+	 * <p>存的是 {@link BlockPos#asLong()}（一个 long）：方块坐标进 NBT 本来就有
+	 * {@code NbtUtils.writeBlockPos}（int[3]）这一种写法，但这里刻意不用它 —— 卡上这几个键都追求
+	 * "一个键一个标量"（同 {@code ArmProgramMode}/{@code ArmProgramTaskIndex}），long 编码由原版提供、
+	 * 无损，且省掉 int[3] 的数组包装。
+	 */
+	private static final String KEY_ORIGIN = "ArmProgramOrigin";
 
 	/**
 	 * "哪一页"的两个取值 —— **这是界面与存储之间的契约**（与 {@code ArmProgramScreen.Page} 枚举同名）。
@@ -193,6 +216,7 @@ public final class CardProgramStorage {
 		root.remove(KEY_PAGE);
 		root.remove(KEY_SCROLL);
 		root.remove(KEY_TASK_SCROLL);
+		root.remove(KEY_ORIGIN);
 		if (root.isEmpty())
 			stack.remove(DataComponents.CUSTOM_DATA);
 		else
@@ -228,6 +252,42 @@ public final class CardProgramStorage {
 	/** 页面名只认这两个（其余一律当操作页）—— 客户端送来的值不能直接进 NBT。 */
 	private static String pageOrDefault(String page) {
 		return PAGE_TASKS.equals(page) ? PAGE_TASKS : PAGE_ENTRIES;
+	}
+
+	/**
+	 * 读卡上的录制参考点；<b>没设过 ⇒ {@code null}</b>（§19.7：原点可选）。
+	 *
+	 * <p>⚠️ 判据是"<b>有没有这个键</b>"，不是"值是不是全 0"：玩家完全可以真的把原点设在世界原点
+	 * (0,0,0)，那时"设过"与"没设"是两件不同的事 —— 前者能录制（知道"0 0 0 在哪"），后者不能。
+	 * 自检里有一条专门钉这个哨兵值（{@code checkCardAndCoordinates}）。
+	 */
+	@Nullable
+	public static BlockPos readOrigin(ItemStack stack) {
+		CompoundTag root = rootTag(stack);
+		return root.contains(KEY_ORIGIN) ? BlockPos.of(root.getLong(KEY_ORIGIN)) : null;
+	}
+
+	/**
+	 * 写卡上的录制参考点；{@code origin == null} = <b>删掉这个键</b>（回到"没设过"）。
+	 *
+	 * <p>删除路径是**必需**的（不是"顺手"）：写 null 时若改成写一个 0，后面 {@link #readOrigin} 读回来的
+	 * 就是"设在 (0,0,0)"，于是"设过没有"这个状态在落盘一圈之后被静默改写。
+	 *
+	 * <p>只动这一个键：它旁边的文本 / 模式 / 任务下标 / 浏览位置都原样保留（{@code rootForWrite}
+	 * 拿的是卡上现有标签的副本）—— 这与 {@link #write} 同一套写法。
+	 */
+	public static void writeOrigin(ItemStack stack, @Nullable BlockPos origin) {
+		CompoundTag root = rootForWrite(stack);
+		if (origin == null)
+			root.remove(KEY_ORIGIN);
+		else
+			root.putLong(KEY_ORIGIN, origin.asLong());
+		// 删完就空了（这张卡原本只有原点这一个键）⇒ 把整个 CUSTOM_DATA 摘掉，
+		// 与 clear() 的口径一致：留一个空的自定义数据会让物品多带一个没意义的组件。
+		if (root.isEmpty())
+			stack.remove(DataComponents.CUSTOM_DATA);
+		else
+			stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
 	}
 
 	/** NaN / 负无穷 / 天文数字一律压成 0：滚动位置是从网络来的数，必须能安全进 NBT 与渲染。 */
