@@ -392,7 +392,7 @@ public class SequencedArmSelfTest {
 		entry.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
 		entry.frequency = testFrequency(Items.REDSTONE_TORCH, Items.IRON_INGOT);
 		entry.callTarget = "子任务名字";
-		entry.callRepeat = ArmProgramTask.MAX_LOOP_COUNT;
+		entry.callRepeat = ArmProgramEntry.MAX_CALL_REPEAT;
 		entry.errorMessage = "写给护目镜看的错误信息";
 		entry.unloadRepeat = ArmProgramEntry.UnloadRepeat.UNTIL_EMPTY;
 		entry.unloadAmount = ArmProgramEntry.UnloadAmount.MAX;
@@ -3243,6 +3243,10 @@ public class SequencedArmSelfTest {
 	 * 减到 1 之后再跑完一轮才返回调用方。
 	 *
 	 * <p>子任务体用「等待 0 tick」——每轮一两 tick 就完，测试不必等真实时长。
+	 *
+	 * <p>**用户第四十轮补的一条**：{@code callRepeat = 0} = 无限循环。这条必须靠"帧一直在、
+	 * 剩余次数一直是 0"来判 —— 只要有人把 0 夹成 1（{@code Math.max(1, …)}）或者让
+	 * {@code withOneFewerRepeat} 把 0 减成 -1，子任务就会返回，这条自检立刻变红。
 	 */
 	private static void checkCallRepeats(MinecraftServer server) {
 		ServerLevel level = server.overworld();
@@ -3253,6 +3257,7 @@ public class SequencedArmSelfTest {
 		boolean decremented = false;
 		boolean returnedAfterLast = false;
 		boolean singleRoundReturns = false;
+		boolean infiniteKeepsFrame = false;
 		String detail;
 		try {
 			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
@@ -3296,6 +3301,23 @@ public class SequencedArmSelfTest {
 					}
 				}
 				detail = "次数=3 时首帧=" + 3 + "/实测见递减=" + decremented + " 栈空=" + returnedAfterLast;
+
+				// 对照③：次数 = 0 = 无限循环 —— 子任务跑多少轮都**不许**返回，帧要一直在，
+				// 而且剩余次数要一直是 0（被递减、或被夹成 1，都会让这条变红）
+				arm.setProgram(callProgram(ArmProgramEntry.CALL_REPEAT_INFINITE));
+				boolean sawZeroFrame = false;
+				boolean neverSatisfied = true;
+				for (int i = 0; i < 120; i++) {
+					arm.runtime.tick(arm);
+					if (arm.runtime.callStack.size() == 1) {
+						sawZeroFrame = true;
+						if (arm.runtime.callStack.get(0)
+							.repeatsLeft() != ArmProgramEntry.CALL_REPEAT_INFINITE)
+							neverSatisfied = false;
+					} else if (sawZeroFrame)
+						neverSatisfied = false; // 栈空了 = 它返回了 = 不是无限
+				}
+				infiniteKeepsFrame = sawZeroFrame && neverSatisfied;
 			}
 		} catch (Throwable t) {
 			detail = "异常 " + t;
@@ -3303,8 +3325,9 @@ public class SequencedArmSelfTest {
 			level.setBlockAndUpdate(armPos, oldArm);
 		}
 
-		LOGGER.info("[selftest] 调用点轮次: 入栈时剩余=3={} 跑完一轮递减到2={} 用尽后返回调用方={} 次数=1 时一轮即返回={} （{}）",
-			pushedThree, decremented, returnedAfterLast, singleRoundReturns, detail);
+		LOGGER.info("[selftest] 调用点轮次: 入栈时剩余=3={} 跑完一轮递减到2={} 用尽后返回调用方={} 次数=1 时一轮即返回={} "
+			+ "0=无限时一直不返回={} （{}）",
+			pushedThree, decremented, returnedAfterLast, singleRoundReturns, infiniteKeepsFrame, detail);
 		if (!pushedThree)
 			LOGGER.error("[selftest] 调用点没有把次数带进调用帧（{}）—— 「循环次数放在调用上」没生效", detail);
 		if (!decremented)
@@ -3312,6 +3335,9 @@ public class SequencedArmSelfTest {
 		if (!returnedAfterLast || !singleRoundReturns)
 			LOGGER.error("[selftest] 轮次用尽后没有正确返回调用方：returnedAfterLast={} singleRoundReturns={}（{}）",
 				returnedAfterLast, singleRoundReturns, detail);
+		if (!infiniteKeepsFrame)
+			LOGGER.error("[selftest] 次数=0 的「无限循环」没生效（帧被弹掉或剩余次数被递减）—— "
+				+ "0 被当成有限次数了（{}）", detail);
 	}
 
 	/** 主任务 = [调用 sub ×repeats]；子任务 = [等待 0 tick]（每轮一两 tick 就完）。 */	private static ArmProgram callProgram(int repeats) {
@@ -4551,6 +4577,14 @@ public class SequencedArmSelfTest {
 			  break
 			task 子任务 loop=until_fail
 			  throw     "没材料了"
+			""");
+		// 调用次数的两个端点（用户第四十轮：0 = 无限循环、上限 64）—— 这两个值进文本再出来必须一字不变
+		corpus.put("调用次数端点", """
+			task 主任务
+			  call 子任务 repeat=0
+			  call 子任务 repeat=64
+			task 子任务
+			  break
 			""");
 		corpus.put("收发信号三种模式", """
 			task main loop=forever

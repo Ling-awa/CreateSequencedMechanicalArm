@@ -1757,8 +1757,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					() -> entry.unloadAmount, v -> entry.unloadAmount = v));
 			}
 			case CALL -> props.add(intProp(tr("entry.call_repeat"), tr("hint.entry_call_repeat"),
-				ArmEntryText.callRepeatText(entry), 1, 1, ArmProgramTask.MAX_LOOP_COUNT, () -> entry.callRepeat,
-				v -> entry.callRepeat = v));
+				ArmEntryText.callRepeatText(entry), 1, ArmProgramEntry.CALL_REPEAT_INFINITE,
+				ArmProgramEntry.MAX_CALL_REPEAT, () -> entry.callRepeat, v -> entry.callRepeat = v));
 			default -> {
 			}
 		}

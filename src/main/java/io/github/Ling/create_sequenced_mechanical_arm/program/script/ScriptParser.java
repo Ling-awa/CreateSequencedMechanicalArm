@@ -1001,7 +1001,9 @@ public final class ScriptParser {
 						}
 						parsed.repeat = repeat;
 					} else if (parsed.op == OperationType.CALL) {
-						Integer n = intValue(token, 1, ArmProgramTask.MAX_LOOP_COUNT, "repeat");
+						// 0..64，0 = 无限循环（用户第四十轮；原来借的是任务循环的 1..1024）
+						Integer n = intValue(token, ArmProgramEntry.CALL_REPEAT_INFINITE,
+							ArmProgramEntry.MAX_CALL_REPEAT, "repeat");
 						if (n == null)
 							return false;
 						parsed.callRepeat = n;

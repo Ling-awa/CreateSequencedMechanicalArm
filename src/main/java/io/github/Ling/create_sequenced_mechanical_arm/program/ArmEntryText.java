@@ -88,8 +88,11 @@ public final class ArmEntryText {
 			case CALL -> {
 				suffix.append("  → ")
 					.append(entry.callTarget.isBlank() ? tr("call.none").getString() : entry.callTarget);
-				// 调用次数归**调用点**（用户第二十七轮：把循环次数放在调用上），所以写在调用后面
-				if (entry.callRepeat > 1)
+				// 调用次数归**调用点**（用户第二十七轮：把循环次数放在调用上），所以写在调用后面。
+				// 0 = 无限循环（用户第四十轮）⇒ 写 ×∞，别让"×0"看起来像"不跑"
+				if (entry.callRepeat == ArmProgramEntry.CALL_REPEAT_INFINITE)
+					suffix.append("  ×∞");
+				else if (entry.callRepeat > 1)
 					suffix.append("  ×")
 						.append(entry.callRepeat);
 			}
@@ -266,8 +269,10 @@ public final class ArmEntryText {
 		return tr("chip.count", entry.count);
 	}
 
-	/** 调用点的轮次胶囊：{@code 调用 3 次}（用户第二十七轮："把循环次数放在调用上"）。 */
+	/** 调用点的轮次胶囊：{@code 调用 3 次}（用户第二十七轮）；0 = 无限循环 ⇒ {@code 调用 无限}。 */
 	public static Component callRepeatText(ArmProgramEntry entry) {
+		if (entry.callRepeat == ArmProgramEntry.CALL_REPEAT_INFINITE)
+			return tr("chip.call_repeat_inf");
 		return tr("chip.call_repeat", entry.callRepeat);
 	}
 

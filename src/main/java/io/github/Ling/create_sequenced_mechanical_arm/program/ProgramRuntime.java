@@ -134,9 +134,16 @@ public class ProgramRuntime {
 
 	/** 一层调用：回到 {@code returnTask} 的 {@code returnEntry}；带上是调用方当时的循环计数。 */
 	public record Frame(int returnTask, int returnEntry, int callerLoopCounter, int repeatsLeft) {
-		/** 这个调用点还要让子任务再跑几轮。 */
+		/** 这个调用点还要让子任务再跑几轮（第 1 轮算在 {@code repeatsLeft} 里）。 */
+		public boolean hasAnotherRound() {
+			// ★ 0 = 无限循环（用户第四十轮）：不能递减、也不返回 —— 要停就靠「中断」/停机，或者子任务里的「退出」
+			return repeatsLeft == ArmProgramEntry.CALL_REPEAT_INFINITE || repeatsLeft > 1;
+		}
+
+		/** 一轮跑完之后的剩余轮次；「无限」永远是「无限」（不许把 0 减成 -1 再当成"还剩 0 轮"）。 */
 		public Frame withOneFewerRepeat() {
-			return new Frame(returnTask, returnEntry, callerLoopCounter, repeatsLeft - 1);
+			return repeatsLeft == ArmProgramEntry.CALL_REPEAT_INFINITE ? this
+				: new Frame(returnTask, returnEntry, callerLoopCounter, repeatsLeft - 1);
 		}
 	}
 
@@ -305,7 +312,8 @@ public class ProgramRuntime {
 			applySkip(arm, caller, entry, entry.onTimeout, lastFailure);
 			return;
 		}
-		callStack.add(new Frame(taskIndex, entryIndex + 1, loopCounter, Math.max(1, entry.callRepeat)));
+		callStack.add(new Frame(taskIndex, entryIndex + 1, loopCounter,
+			ArmProgramEntry.clampCallRepeat(entry.callRepeat)));
 		taskIndex = calleeIndex;
 		entryIndex = 0;
 		loopCounter = 0;
@@ -1314,7 +1322,7 @@ public class ProgramRuntime {
 		if (!callStack.isEmpty()) {
 			int top = callStack.size() - 1;
 			Frame frame = callStack.get(top);
-			if (frame.repeatsLeft() > 1) {
+			if (frame.hasAnotherRound()) {
 				callStack.set(top, frame.withOneFewerRepeat());
 				arm.markProgramDirty();
 				return;
@@ -1431,7 +1439,9 @@ public class ProgramRuntime {
 		ListTag stack = tag.getList("stack", Tag.TAG_COMPOUND);
 		for (int i = 0; i < stack.size(); i++) {
 			CompoundTag f = stack.getCompound(i);
-			callStack.add(new Frame(f.getInt("t"), f.getInt("e"), f.getInt("l"), Math.max(1, f.getInt("r"))));
+			// 缺 r → 1（照 ArmProgramEntry.load 的理由：0 现在是"无限"这个**合法值**，不能拿它兜底）
+			callStack.add(new Frame(f.getInt("t"), f.getInt("e"), f.getInt("l"),
+				f.contains("r") ? ArmProgramEntry.clampCallRepeat(f.getInt("r")) : 1));
 		}
 		idleSpins = tag.getInt("spins");
 		if (tag.contains("error")) {

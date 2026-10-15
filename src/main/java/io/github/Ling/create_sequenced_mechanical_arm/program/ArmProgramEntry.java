@@ -179,7 +179,24 @@ public class ArmProgramEntry {
 	/** CALL（调用任务）：被调任务的名字。 */
 	public String callTarget = "";
 	/**
-	 * CALL（调用任务）：这个调用点让子任务跑几轮（1..{@link ArmProgramTask#MAX_LOOP_COUNT}）。
+	 * CALL（调用任务）：调用次数（轮次）的上限。
+	 *
+	 * <p>原来是 {@link ArmProgramTask#MAX_LOOP_COUNT}（1..1024）借着用，用户第四十轮改成自己的
+	 * 区间：<b>0..64</b>，缺省 1，{@link #CALL_REPEAT_INFINITE}（= 0）= 无限循环。
+	 * 1024 轮在游戏里既没人等得起、又和"不限次"这个真正想要的东西差一层，所以拆出独立上限。
+	 */
+	public static final int MAX_CALL_REPEAT = 64;
+	/** 「无限循环」的哨兵值（就是 0）。 */
+	public static final int CALL_REPEAT_INFINITE = 0;
+
+	/** 把任意整数夹进调用次数的合法区间（0..{@link #MAX_CALL_REPEAT}）；0 是**合法值**，不是缺省。 */
+	public static int clampCallRepeat(int raw) {
+		return Math.max(CALL_REPEAT_INFINITE, Math.min(MAX_CALL_REPEAT, raw));
+	}
+
+	/**
+	 * CALL（调用任务）：这个调用点让子任务跑几轮（{@code 0..}{@link #MAX_CALL_REPEAT}，
+	 * {@code 0} = 无限循环）。
 	 *
 	 * <p><b>用户第二十七轮定的：循环次数归调用点</b> —— "把循环次数放在调用上"。
 	 * 于是子任务的轮次完全由这里决定（子任务自身的 {@code loop} 只对主任务有意义，
@@ -371,8 +388,9 @@ public class ArmProgramEntry {
 			entry.waitAmount = Math.max(0, Math.min(SIGNAL_MAX_AMOUNT, entry.waitAmount));
 		entry.frequency = readFrequency(tag, registries);
 		entry.callTarget = tag.getString("call");
-		// 缺 calln（老卡）→ 1 轮；夹到合法区间，坏数据不许把循环次数搞成 0 或天文数字
-		entry.callRepeat = Math.max(1, Math.min(ArmProgramTask.MAX_LOOP_COUNT, tag.getInt("calln")));
+		// 缺 calln（老卡）→ 1 轮。⚠️ 这里**不能**再靠 `Math.max(1, …)` 兜底了：0 现在是**合法值**
+		// （无限循环），拿 0 当"缺键"会让所有没写过这个键的数据静默变成无限循环。所以先看键在不在。
+		entry.callRepeat = tag.contains("calln") ? clampCallRepeat(tag.getInt("calln")) : 1;
 		entry.errorMessage = tag.getString("err");
 		entry.unloadRepeat = enumOf(UnloadRepeat.class, tag.getString("urep"), UnloadRepeat.ONCE);
 		entry.unloadAmount = enumOf(UnloadAmount.class, tag.getString("uamt"), UnloadAmount.ONE_STACK);

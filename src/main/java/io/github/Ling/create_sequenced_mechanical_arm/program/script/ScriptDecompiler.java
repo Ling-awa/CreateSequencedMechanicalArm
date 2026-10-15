@@ -203,6 +203,7 @@ public final class ScriptDecompiler {
 					.append(entry.unloadAmount == UnloadAmount.MAX ? "max" : "one_stack");
 			}
 			case CALL -> {
+				// repeat=0 是**无限循环**（用户第四十轮），所以这里判 !=1 而不是 >1 —— 0 必须写出来
 				if (entry.callRepeat != 1)
 					out.append(" repeat=")
 						.append(entry.callRepeat);
