@@ -2585,6 +2585,12 @@ public class SequencedArmSelfTest {
 	 * {@code ArmEntryText}（标题尾巴）。别对着"是不是发"（{@code isSignalSend()}）判 ——
 	 * 那个把中断也算成发，于是界面给控件、脚本要参数，而运行时**一个字都不读**。
 	 *
+	 * <p>③ 那段的夹具（用户口径：中断 = <b>当场清除</b>，无论是否无限或还有剩余时间）必须自己
+	 * 造出前提并观察到副作用，否则就是"测了空气"：<b>先</b>{@code setProgram} + {@code resetToStart}
+	 * （两者都会 {@code clearTransmissions()}）<b>再</b>发那个 {@code 15} 电平的"一直保持"，
+	 * 否则到「中断」执行时表里本来就是空的；"执行过"看 {@code EXECUTING} + 动手前频率仍在保持
+	 * （**不能**看 {@code entryIndex}：单条目任务成功后会立刻 {@code finishTask} 把它重置回 0）。
+	 *
 	 * <p>反证（改哪一行会变红）：
 	 * <ul>
 	 *   <li>把 {@link ArmProgramEntry#hasSignalDuration()} 改成 {@code isSignalSend()}
@@ -2694,10 +2700,6 @@ public class SequencedArmSelfTest {
 				armPlaced = false;
 			} else {
 				armPlaced = true;
-				arm.emitSignal(freq, 15, 0); // 15 = 通电、"长期保持"（没有剩余时间可以到期）
-				stillHeldAfterHold = arm.holdsSignal(freq) && arm.getArmLinkLevel() == 15
-					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(freq)
-					&& arm.runtime.tickArmLinkTimers(arm); // 未到期的脉冲计时器确实在跟着跑（对照组）
 				ArmProgram program = new ArmProgram();
 				ArmProgramTask task = new ArmProgramTask();
 				task.name = "cut";
@@ -2708,14 +2710,50 @@ public class SequencedArmSelfTest {
 				cut.frequency = freq;
 				task.entries.add(cut);
 				program.tasks.add(task);
+				// ⚠️ **装卡必须在"发保持"之前**：`setProgram` 与 `resetToStart` 都会
+				//   `clearTransmissions()`（换卡 / 回到开头都要把发出去的频率收干净，§7.16e）。
+				//   旧夹具把 `emitSignal` 写在它们之前 ⇒ 那条「中断」执行时表里早已是空的，
+				//   "当场清除"看起来通过，其实是在清一个从来没装进去过的信号（测了空气）。
 				arm.setProgram(program);
 				arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
 				arm.runtime.resetToStart(arm);
-				arm.runtime.tick(arm); // 主循环：真正执行 SIGNAL 那一支（→ releaseSignal）
-				// 游标越过 0 号 = 那条「中断」**真的被执行过**（succeed → applySuccessExit 的 entryIndex++）。
-				// 没有这一条，"表是空的"可能只是"根本没人发过信号"—— 那是决策 85 里"测了空气"的那类假绿。
-				cutEntryRan = arm.runtime.entryIndex == 1;
-				arm.runtime.tick(arm);
+				arm.emitSignal(freq, 15, 0); // 15 = 通电、ticks=0 = "一直保持"（没有剩余时间可以到期）
+				// 前提（现场对照，缺一不可）：服务端世界 / 没撞 `maxHeldSignals` / 真的进网且有电 / 确实是"保持"。
+				boolean timerFired = arm.runtime.tickArmLinkTimers(arm);
+				stillHeldAfterHold = !level.isClientSide
+					&& arm.heldSignalCount() == 1 // 没到上限：表里就这一条（被上限拒的话这里是 0）
+					&& arm.rejectedSignalCount() == 0 // 没被 `maxHeldSignals` 静默拒掉
+					&& arm.isTransmittingTo(freq) // `addToNetwork` + `updateNetworkOf` 都走到了：表里有它且电平 > 0
+					&& arm.holdsSignal(freq) && arm.getArmLinkLevel() == 15
+					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(freq) // 网络表那格真有电（isAlive ⇒ 世界里的 BE）
+					&& !timerFired; // 「保持」= pulse 为 -1、**没有**"到点归零"可推
+				//   ↑ 旧夹具在这里写反了（要求它返回 true = "有一路到点归零"）：ticks=0 的保持恰恰没有
+				//     到点可推 ⇒ 这条对照恒假、整条前提恒不成立，"当场清除"于是又变成测空气。现场证据：
+				//     日志里 `保持成立（相位对照）=false`。
+				LOGGER.info("[selftest] 中断没有持续时间 运行时前提: 服务端={} 表里条数={} 被上限拒={} 表里有它={} "
+					+ "电平={} 网络有电={} 计时器到点={}", !level.isClientSide, arm.heldSignalCount(), arm.rejectedSignalCount(),
+					arm.holdsSignal(freq), arm.getArmLinkLevel(),
+					Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(freq), timerFired);
+				// ★ "那条「中断」条目被执行了"只能看**副作用**，不能看游标（`entryIndex`）：
+				//   ① 它是控制类条目 —— 第 1 拍 `beginEntry` 只把它置成 `EXECUTING`（同一拍不动作），
+				//      第 2 拍 `execute` 才 `releaseSignal` + `succeed`；
+				//   ② `succeed` 之后 `finishTask` 会把 `entryIndex` **重置成 0**（单条目任务必然收工）
+				//      ⇒ "游标越过 0 号"在这个夹具里**永远不可能为真**（旧夹具 `entryIndex == 1` 就是这么恒红的）。
+				//   所以判据 = 看见过 `EXECUTING` + 它动手**前**那个频率确实还在保持（前后对照）。
+				//   没有这一条，"表是空的"可能只是"根本没人发过信号"—— 那是决策 85 里"测了空气"的那类假绿。
+				boolean sawExecuting = false;
+				boolean heldWhileExecuting = false;
+				for (int i = 0; i < 8; i++) {
+					arm.runtime.tick(arm);
+					if (arm.runtime.state != ProgramRuntime.EntryState.EXECUTING)
+						continue;
+					sawExecuting = true;
+					heldWhileExecuting = arm.holdsSignal(freq) && arm.getArmLinkLevel() == 15
+						&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(freq);
+					arm.runtime.tick(arm); // 主循环这一拍才是 execute → releaseSignal + succeed
+					break;
+				}
+				cutEntryRan = sawExecuting && heldWhileExecuting;
 				// 三件事一起查（用户口径的核心）：① 表里**没有**这个频率了（不是"留着一个强度 0 的成员"）
 				// ② 网络里电平为 0（leaveNetwork 先归 0 再退网，少一步就留一个"永远通电"的频率）
 				// ③ 臂的发射电平也回 0，且**未到期的脉冲计时器没有东西可推**了（脉冲被取消）。
@@ -2737,7 +2775,8 @@ public class SequencedArmSelfTest {
 		if (!stillHeldAfterHold)
 			LOGGER.error("[selftest] 反转前的对照组不对：发出去的 15 电平 + 长期保持没有成立（后面的\"当场清除\"就说明不了问题）");
 		if (!cutEntryRan)
-			LOGGER.error("[selftest] 那条「中断」条目没有被执行（游标没越过 0 号，后面的\"当场清除\"就是测了空气）");
+			LOGGER.error("[selftest] 那条「中断」条目没有被执行（没看见它进 EXECUTING，或它动手前那个频率就已经不在保持里 —— "
+				+ "后面的\"当场清除\"就是测了空气）");
 		if (!pulseCancelled)
 			LOGGER.error(
 				"[selftest] 「中断」没有立即清除该频率（用户口径：无论是否无限或有剩余时间，当场电平 0 + 退网 + 取消未到期脉冲）");
