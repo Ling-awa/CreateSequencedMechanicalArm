@@ -176,6 +176,7 @@ public class SequencedArmSelfTest {
 		checkLegacyJumpShift();
 		checkCallRepeats(server);
 		checkCallShift(server);
+		checkCallSuccessExit(server);
 		checkFilterOperation(server);
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
@@ -3678,6 +3679,387 @@ public class SequencedArmSelfTest {
 		if (!nbtKeeps)
 			LOGGER.error("[selftest] 调用偏移过不了 Runtime 的 NBT 往返（臂卸载再载入后子任务的目标会跳回去）（{}）",
 				detail);
+	}
+
+	/**
+	 * 「调用条目的成功后出口」端到端自检（用户报的运行时 bug）。
+	 *
+	 * <p><b>现场</b>：脚本 `call 炒锅1 ok=goto 14` 跑完**没有**跳到第 14 条，而是继续执行第 9 条
+	 * （于是给 `{}+pot` 那一路频率通了电 —— 用户明确看到"这个信号被激活了"），接着死在第 10 条
+	 * `take 2 2 -1` 上（那格包裹早被取走交出去了 ⇒ 永远取不到）。同一份脚本里 `call 汤锅1 ok=goto 30`、
+	 * `call 烤肉1 ok=goto 10`、`call 蒸笼1 ok=goto 10`、`call 煮茶1 ok=goto 18` 四处是同一个坑。
+	 *
+	 * <p><b>根因</b>：被调任务**成功**结束时走 {@code ProgramRuntime.endTask(arm, false, null)} 里
+	 * {@code !callStack.isEmpty()} 那一支 —— 它把游标恢复成 {@code frame.returnEntry()} 就 return，
+	 * **从头到尾没读调用条目的 {@code onSuccess}**（只有失败那一支读 {@code onTimeout}）；而"成功后"的
+	 * 普通路径只有条目**自己**跑完才走（{@code succeed}），「调用」条目从来没有"自己跑完"这一刻
+	 * ⇒ CALL 上的 {@code ok=} 一直是被**静默忽略**的（界面上它明明画着"成功跳转 N"，文本也照样反编译出来）。
+	 *
+	 * <p><b>五条断言 + 各自的反证</b>（都跑真解释器）。①②③ 的落点是「抛错」条目 —— 一执行就停机
+	 * 且游标不动，于是"停在第几条 + 停机原因"唯一确定了走的是哪个出口。**④⑤ 走两层栈深，落点必须
+	 * 停在原地（长等待），不能用抛错**：落点自己抛错 = 走**失败**出口 ⇒ 失败冒泡到调用方 ⇒ 停机那一刻
+	 * 游标已经在调用方、栈也弹空了，读到的"栈深=0、游标在 main"是**夹具自己造成的**，不是"没跳"
+	 * （这正是 ④ 第一版报红的原因；当时停机原因里的"：B 的成功落点"恰恰证明 B 真的跳到了第 3 条）。
+	 * <ol>
+	 *   <li>① {@code call B ok=goto 3}（B 立刻成功结束）⇒ 落在第 3 条。反证：删掉 {@code endTask}
+	 *       成功支里那句 {@code applySuccessExit}（恢复成只 {@code markProgramDirty()}）⇒ 落在第 2 条，变红。</li>
+	 *   <li>② {@code call B}（不写 ok）⇒ 落在调用条目的**下一条**（第 2 条），且不该出现"成功 → 跳转"提示。
+	 *       反证：成功返回时把游标退回「调用」条目自己的下标却忘了让它再 {@code ++}（= 又跑一遍同一条调用、
+	 *       永不返回），或把 {@code onSuccess == NONE} 也当跳转 ⇒ 变红。</li>
+	 *   <li>③ 同一张 {@code ok=goto 3} 的调用卡、B 走失败出口（{@code throw}）⇒ 必须落 {@code fail=goto 4}。
+	 *       反证：把成功/失败两支互换、或让失败也走 {@code applySuccessExit} ⇒ 落到第 3 条，变红。</li>
+	 *   <li>④ 两层栈深 main → A → B：A 里 {@code call B ok=goto 3}，B **正常跑完**（一条会抛错的都没有）⇒
+	 *       A 必须停在**第 3 条**（长等待）、栈深回到 A 的 1（main 那一帧还在）、A 的第 2 / 第 4 条
+	 *       一次都没被执行过。反证：删掉 {@code endTask} 成功支里的 {@code applySuccessExit}
+	 *       （= 回到"只恢复游标、不读出口"的旧行为）⇒ A 接着跑第 2 条那条抛错 ⇒ 立红；
+	 *       把出口判据挪进 {@code finishTask} 的主任务那支 ⇒ 读不到 A 的调用卡 ⇒ 红。</li>
+	 *   <li>⑤ **用户现场的直接复现**（{@code run/config/create_sequenced_mechanical_arm/scripts/cookery_test.txt}）：
+	 *       主循环 → 判断炒锅 → 炒锅1，判断炒锅**第 8 条** {@code call 炒锅1 ok=goto 14}，第 9 条是
+	 *       "占用炒锅2"的 {@code signal send_on freq={} + pot}、第 10 条是 {@code take 2 2 -1}；
+	 *       炒锅1 正常结束后必须落在**第 14 条**，且**第 9 / 第 10 条一次都不能被踩到**
+	 *       （第 9 条会把 {@code {}+pot} 那一路频率通电 —— 用户看到的就是这个）。
+	 *       反证：同 ④（删掉 {@code applySuccessExit}）⇒ 第 9 条那条标记抛错被执行 ⇒ 立红。</li>
+	 * </ol>
+	 */
+	private static void checkCallSuccessExit(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 100, 200, spawn.getZ() + 100);
+		BlockState oldArm = level.getBlockState(armPos);
+		boolean callJumped = false;
+		boolean plainCallContinues = false;
+		boolean failedCallUsesTimeout = false;
+		boolean nestedCallJumped = false;
+		boolean userShapeCallExit = false;
+		String detail;
+		try {
+			level.getChunkAt(armPos); // 启动期新放的方块要先加载区块（照 checkAttackAndMine / checkCallShift）
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				detail = "臂的方块实体没建出来";
+			} else {
+				arm.setSpeed(32);
+
+				// ——— ① 成功返回 ⇒ 应用调用卡的「成功后」= 跳转 ———
+				CallExitRun okRun = runCallExit(arm, callExitProbe(succeedingSub(), "3", null));
+				callJumped = okRun.halted() && okRun.entryIndex() == 2 && okRun.error()
+					.contains("成功后跳转的落点") && okRun.sawSuccessHint();
+
+				// ——— ② 不写 ok ⇒ 仍然落在调用条目的下一条（现有行为，不能被改坏）———
+				CallExitRun plainRun = runCallExit(arm, callExitProbe(succeedingSub(), null, null));
+				plainCallContinues = plainRun.halted() && plainRun.entryIndex() == 1 && plainRun.error()
+					.contains("调用条目的下一条") && !plainRun.sawSuccessHint();
+
+				// ——— ③ 子任务失败 ⇒ 还是走「失败后」（成功出口不许抢）———
+				CallExitRun failRun = runCallExit(arm, callExitProbe(failingSub(), "3", "4"));
+				failedCallUsesTimeout = failRun.halted() && failRun.entryIndex() == 3 && failRun.error()
+					.contains("失败后跳转的落点") && !failRun.sawSuccessHint();
+
+				// ——— ④ 两层栈深 main→A→B：B **正常跑完** ⇒ A 必须停在它的 ok=goto 3 落点（第 3 条）———
+				// 落点是"长等待"（**不抛错**）：只有停在原地才读得到现场（栈深 / 游标 / 提示三件）。
+				// ⚠️ 第一版这里用"落点也抛错"来定位 —— 那条路读到的**不是**"跳没跳"：落点抛错 =
+				//   走失败出口 ⇒ 失败冒泡到 main 的调用卡 ⇒ 停机那一刻游标已经在 main、栈也弹空了
+				//   （旧红：停机@第 2 条、栈深=0；而停机原因里的"：B 的成功落点"恰恰证明 B 真的跳到了第 3 条）。
+				CallParkRun nestedRun = runCallPark(arm, twoLevelCallExitProbe(), 200, 1, 1, 2, 3);
+				nestedCallJumped = !nestedRun.halted() && nestedRun.taskIndex() == 1 && nestedRun.entryIndex() == 2
+					&& nestedRun.callDepth() == 1 && nestedRun.state() == ProgramRuntime.EntryState.WAITING
+					&& nestedRun.sawSuccessHint() && nestedRun.depthWhenVisited(2) == 1
+					&& !nestedRun.visited(1) && !nestedRun.visited(3);
+
+				// ——— ⑤ 用户现场（cookery_test.txt）：主循环 → 判断炒锅 → 炒锅1（两层）———
+				// 炒锅1 正常结束后，判断炒锅必须落在第 8 条 `call 炒锅1 ok=goto 14` 的落点**第 14 条**，
+				// 而且第 9 条（用户脚本里是 `signal send_on freq={} + pot`，把 `{}+pot` 一路通电）与
+				// 第 10 条 `take 2 2 -1`（那格包裹早被取走 ⇒ 永远取不到）**一次都没被踩到**。
+				CallParkRun userRun = runCallPark(arm, userScriptShapeProbe(), 300, 1, 8, 9, 13);
+				userShapeCallExit = !userRun.halted() && userRun.taskIndex() == 1 && userRun.entryIndex() == 13
+					&& userRun.callDepth() == 1 && userRun.state() == ProgramRuntime.EntryState.WAITING
+					&& userRun.sawSuccessHint() && userRun.depthWhenVisited(13) == 1 && !userRun.visited(8)
+					&& !userRun.visited(9);
+
+				detail = "①" + okRun.text() + " ②" + plainRun.text() + " ③" + failRun.text() + " ④" + nestedRun.text()
+					+ " ⑤" + userRun.text();
+			}
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 调用成功后跳转: call ok=goto 3⇒落第 3 条={} 不写 ok⇒落调用条目下一条={} "
+			+ "子任务失败⇒走超时落点={} 两层(主→A→B)B正常跑完⇒A 的 ok=goto 3 生效={} "
+			+ "用户现场(主循环→判断炒锅→炒锅1)⇒落第 14 条且第 9/10 条没被执行={} （{}）", callJumped, plainCallContinues,
+			failedCallUsesTimeout, nestedCallJumped, userShapeCallExit, detail);
+		if (!callJumped)
+			LOGGER.error("[selftest] 「调用」上的 ok=goto 没生效（成功返回时没读调用条目的 onSuccess）——"
+				+ "用户脚本里的 call X ok=goto N 会被静默忽略（{}）", detail);
+		if (!plainCallContinues)
+			LOGGER.error("[selftest] 不写 ok 的「调用」没有落在调用条目的下一条（现有行为被改坏了）（{}）", detail);
+		if (!failedCallUsesTimeout)
+			LOGGER.error("[selftest] 子任务失败时没有走「失败后」（被成功出口抢走了）（{}）", detail);
+		if (!nestedCallJumped)
+			LOGGER.error("[selftest] 两层栈深（main→A→B）里 B 成功返回后 A 的 ok=goto 没生效 ——"
+				+ "A 没有停在它的第 3 条落点（要么弹帧那条路没走 applySuccessExit，要么读错了调用卡）（{}）", detail);
+		if (!userShapeCallExit)
+			LOGGER.error("[selftest] 用户脚本的形状（主循环→判断炒锅→炒锅1）没复现：炒锅1 正常结束后，判断炒锅必须落在"
+				+ "第 14 条，且第 9 条（signal send_on {}+pot 占用炒锅2）与第 10 条（take 2 2 -1）一次都不能被执行"
+				+ "（{}）", detail);
+	}
+
+	/** 出口探针的一次运行：停没停、停在第几条、停机原因、调用栈深度、期间见没见过"成功 → 跳转"提示。 */
+	private record CallExitRun(boolean halted, int entryIndex, String error, int callDepth, boolean sawSuccessHint) {
+		String text() {
+			return (halted ? "停机@第" + (entryIndex + 1) + "条「" + error + "」" : "没停机@" + entryIndex)
+				+ " 栈深=" + callDepth + " 见成功提示=" + sawSuccessHint;
+		}
+	}
+
+	/**
+	 * 跑一个出口探针程序直到停机（或 200 tick 用完），把判据读出来。
+	 *
+	 * <p>为什么判据是"停机 + 游标 + 停机原因"三件一起：落点全是「抛错」，它一执行就 {@code halt()}，
+	 * 而 {@code halt()} **不动游标**（与 {@link #runRoute} 同一条手法）—— 三件合起来才唯一确定走的是哪个出口。
+	 * 另外记一个"期间见没见过 {@code 成功 → 跳转}"（{@code applySuccessExit} 写进 lastFailure 的那句），
+	 * 它是"走的是成功出口"的第二个独立证人：不写 ok 的那条**必须没有**它。
+	 */
+	private static CallExitRun runCallExit(SequencedArmBlockEntity arm, ArmProgram program) {
+		arm.setProgram(program); // setProgram 会 resetToStart（清 lastFailure / 调用栈）⇒ 三次运行互不串味
+		boolean sawSuccessHint = false;
+		for (int i = 0; i < 200 && !arm.runtime.isHalted(); i++) {
+			arm.runtime.tick(arm);
+			String failure = arm.runtime.getLastFailure();
+			if (failure != null && failure.startsWith("成功 → 跳转"))
+				sawSuccessHint = true;
+		}
+		String error = arm.runtime.getError();
+		return new CallExitRun(arm.runtime.isHalted(), arm.runtime.entryIndex, error == null ? "" : error,
+			arm.runtime.callStack.size(), sawSuccessHint);
+	}
+
+	/**
+	 * 一次**不停机**探针的现场：游标停在哪、栈深多少、期间有没有踩过被盯的那几条、踩到它们时栈深多少。
+	 *
+	 * <p>为什么需要它（而 {@link CallExitRun} 不够）：那条路要求"落点自己能让程序停下来"，于是落点全是
+	 * 「抛错」—— 而在**被调任务**里抛错 = 走失败出口 ⇒ 失败**冒泡到调用方** ⇒ 停机那一刻游标已经在
+	 * 调用方了，读出来的是"失败冒泡之后的现场"，不是"跳没跳"。两层栈深的探针必须换成
+	 * "落点 = 长等待（停在原地、不回退也不停机）+ 轨迹采样"。
+	 */
+	private record CallParkRun(boolean halted, int taskIndex, int entryIndex, int callDepth,
+		ProgramRuntime.EntryState state, boolean sawSuccessHint, String error, int[] watched, boolean[] seen,
+		int[] depthAt) {
+		/** 这一条**被踩到过**吗（{@code entry} 是 task 内的 0 基下标）。 */
+		boolean visited(int entry) {
+			for (int k = 0; k < watched.length; k++)
+				if (watched[k] == entry)
+					return seen[k];
+			return false;
+		}
+
+		/** 踩到这一条时的栈深（从没踩到返回 -1）——"被调任务返回后回到调用方的深度"的证人。 */
+		int depthWhenVisited(int entry) {
+			for (int k = 0; k < watched.length; k++)
+				if (watched[k] == entry)
+					return seen[k] ? depthAt[k] : -1;
+			return -1;
+		}
+
+		String text() {
+			StringBuilder trace = new StringBuilder();
+			for (int k = 0; k < watched.length; k++)
+				trace.append(" 第")
+					.append(watched[k] + 1)
+					.append("条=")
+					.append(seen[k] ? "踩过(" + depthAt[k] + "层)" : "没踩");
+			return (halted ? "停机@任务" + taskIndex + "第" + (entryIndex + 1) + "条「" + error + "」"
+				: "没停机@" + state + " 任务" + taskIndex + "第" + (entryIndex + 1) + "条") + " 栈深=" + callDepth
+				+ " 见成功提示=" + sawSuccessHint + "轨迹:" + trace;
+		}
+	}
+
+	/**
+	 * 跑一个"靠停在原地定位"的探针：每 tick **前**后各采一次游标，记录被盯的那几条有没有被踩过、踩到时的栈深。
+	 *
+	 * <p>为什么要采两次：一次 tick 只推进一条原语，但有些条目**在同一 tick 内**就走完了（例如「发信号」在
+	 * {@code execute} 里直接 {@code succeed}）—— 只采 tick 之后那次会漏掉它们；而"抛错"这类条目
+	 * 是在 tick 内把游标弹回调用方才停机的，只采之后那次就会读到调用方（= 第一版 ④ 的错法）。
+	 * 前后各采一次，两种都抓得住。
+	 *
+	 * @param watchTask    只在这个任务的游标上采样（0 基任务下标）
+	 * @param watchEntries 被盯的条目下标（0 基），日志里按"第 N+1 条"报
+	 */
+	private static CallParkRun runCallPark(SequencedArmBlockEntity arm, ArmProgram program, int ticks, int watchTask,
+		int... watchEntries) {
+		arm.setProgram(program); // 同 runCallExit：setProgram 会 resetToStart ⇒ 几次运行互不串味
+		boolean[] seen = new boolean[watchEntries.length];
+		int[] depthAt = new int[watchEntries.length];
+		boolean sawSuccessHint = false;
+		for (int i = 0; i < ticks && !arm.runtime.isHalted(); i++) {
+			sampleCursor(arm, watchTask, watchEntries, seen, depthAt);
+			arm.runtime.tick(arm);
+			sampleCursor(arm, watchTask, watchEntries, seen, depthAt);
+			String failure = arm.runtime.getLastFailure();
+			if (failure != null && failure.startsWith("成功 → 跳转"))
+				sawSuccessHint = true;
+		}
+		String error = arm.runtime.getError();
+		return new CallParkRun(arm.runtime.isHalted(), arm.runtime.taskIndex, arm.runtime.entryIndex,
+			arm.runtime.callStack.size(), arm.runtime.state, sawSuccessHint, error == null ? "" : error, watchEntries,
+			seen, depthAt);
+	}
+
+	/** 采一次游标：在盯的任务里且正好停在被盯的某一条上，就记下"踩过"与当时的栈深。 */
+	private static void sampleCursor(SequencedArmBlockEntity arm, int watchTask, int[] watchEntries, boolean[] seen,
+		int[] depthAt) {
+		if (arm.runtime.taskIndex != watchTask)
+			return;
+		for (int k = 0; k < watchEntries.length; k++) {
+			if (arm.runtime.entryIndex == watchEntries[k]) {
+				seen[k] = true;
+				depthAt[k] = arm.runtime.callStack.size();
+			}
+		}
+	}
+
+	/** 一条「抛错」：落点条目 —— 一执行就停机，游标**留在它自己那一格**（判"落在第几条"的手法）。 */
+	private static ArmProgramEntry throwEntry(String message) {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.THROW;
+		entry.errorMessage = message;
+		return entry;
+	}
+
+	/** 一条「等待 0 tick」：子任务体（两三 tick 就跑完 ⇒ 立刻成功返回调用方）。 */
+	private static ArmProgramEntry waitZeroEntry() {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.WAIT;
+		entry.waitAmount = 0;
+		entry.waitUnit = ArmProgramEntry.WaitUnit.TICK;
+		return entry;
+	}
+
+	/** 一条「调用」：目标 + 成功后落点 + 失败后落点（落点传 {@code null} = 不设，即走 NONE）。 */
+	private static ArmProgramEntry callExitEntry(String target, @Nullable String okTarget, @Nullable String failTarget) {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.CALL;
+		entry.callTarget = target;
+		entry.callRepeat = 1;
+		if (okTarget != null) {
+			entry.onSuccess = ArmProgramEntry.SkipAction.SKIP_TO;
+			entry.successTarget = okTarget;
+		}
+		if (failTarget != null) {
+			entry.onTimeout = ArmProgramEntry.SkipAction.SKIP_TO;
+			entry.timeoutTarget = failTarget;
+		}
+		return entry;
+	}
+
+	/** 一个任务：名字 + 若干条目。 */
+	private static ArmProgramTask namedTask(String name, ArmProgramEntry... entries) {
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = name;
+		for (ArmProgramEntry entry : entries)
+			task.entries.add(entry);
+		return task;
+	}
+
+	/** 子任务体：立刻成功结束（一条「等待 0 tick」）。 */
+	private static ArmProgramTask succeedingSub() {
+		return namedTask("sub", waitZeroEntry());
+	}
+
+	/** 子任务体：走失败出口（一条「抛错」）。 */
+	private static ArmProgramTask failingSub() {
+		return namedTask("sub", throwEntry("子任务抛错"));
+	}
+
+	/**
+	 * 夹具（单层）：main = [调用 sub（ok/fail 可设）, 抛错「主任务第 2 条（调用条目的下一条）」,
+	 * 抛错「主任务第 3 条（成功后跳转的落点）」, 抛错「主任务第 4 条（失败后跳转的落点）」]。
+	 *
+	 * <p>序号都从 1 数（用户可见的编号体系）：{@code ok=goto 3} ⇒ 落在下标 2；{@code fail=goto 4} ⇒ 落在下标 3；
+	 * 不写 ok ⇒ 落在下标 1。三条落点各是一句不同的抛错信息，"落在第几条"因此没有歧义。
+	 */
+	private static ArmProgram callExitProbe(ArmProgramTask sub, @Nullable String okTarget, @Nullable String failTarget) {
+		ArmProgram program = new ArmProgram();
+		program.tasks.add(namedTask("main", callExitEntry(sub.name, okTarget, failTarget),
+			throwEntry("主任务第 2 条（调用条目的下一条）"), throwEntry("主任务第 3 条（成功后跳转的落点）"),
+			throwEntry("主任务第 4 条（失败后跳转的落点）")));
+		program.tasks.add(sub);
+		return program;
+	}
+
+	/** 一条「退出」：正常收任务（走 {@code endTask(arm, false, null)} 那一支 —— 在子任务里 = **成功**返回调用方）。 */
+	private static ArmProgramEntry breakEntry() {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.BREAK;
+		return entry;
+	}
+
+	/**
+	 * 一条"停住不动的落点"：120 分钟 = 144000 tick，探针只跑一两百 tick，等于**停在这一条上**。
+	 *
+	 * <p>为什么落点要这样写（而不是像 ①②③ 那样用「抛错」）：抛错 = 走**失败**出口，在被调任务里它会
+	 * 冒泡到调用方，于是停机那一刻游标已经不在落点上了 —— 读不到"到底落没落到这一条"。
+	 * 停住的落点则让 游标 / 栈深 / {@code lastFailure} 三件都能直接读，且程序不结束。
+	 */
+	private static ArmProgramEntry parkedWaitEntry() {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.WAIT;
+		entry.waitAmount = 120;
+		entry.waitUnit = ArmProgramEntry.WaitUnit.MINUTE;
+		return entry;
+	}
+
+	/**
+	 * 夹具（两层栈深 main → A → B，**用户的形状**）：main = [调用 A]；
+	 * A = [调用 B {@code ok=goto 3}, 抛错「A 的下一条（第 2 条）」, 长等待「A 的成功落点（第 3 条）」,
+	 * 抛错「A 的第 4 条（成功落点的下一条）」]；B = [等待 0 tick ×2]——**B 一条会抛错的都没有**（正常跑完）。
+	 *
+	 * <p>A 的第 2 / 第 4 条是"会留下证据的标记"（抛错 ⇒ 一执行就停机），B 返回后 A 只要没跳到第 3 条、
+	 * 或者跳到之后又往下走，标记就会立刻把它抓住 —— 这两条同时也是"第 N+1 条没被执行"的证人。
+	 */
+	private static ArmProgram twoLevelCallExitProbe() {
+		ArmProgram program = new ArmProgram();
+		program.tasks.add(namedTask("main", callExitEntry("A", null, null)));
+		program.tasks.add(namedTask("A", callExitEntry("B", "3", null), throwEntry("A 的下一条（第 2 条，不该被执行）"),
+			parkedWaitEntry(), throwEntry("A 的第 4 条（成功落点的下一条，不该被执行）")));
+		program.tasks.add(namedTask("B", waitZeroEntry(), waitZeroEntry()));
+		return program;
+	}
+
+	/**
+	 * 夹具（**用户现场的直接复现**：{@code cookery_test.txt} 的主循环 → 判断炒锅 → 炒锅1，两层栈深）。
+	 *
+	 * <p>条目**位置与条数照抄用户脚本**：判断炒锅第 1..7 条（用户脚本里是「过滤是不是炒锅」/「收信号看占用」）、
+	 * <b>第 8 条</b> {@code call 炒锅1 ok=goto 14}、<b>第 9 条</b>（用户脚本是
+	 * {@code signal send_on place=0t freq={} + kaleidoscope_cookery:pot}，**"占用炒锅2"**）、
+	 * <b>第 10 条</b> {@code take 2 2 -1}（那格包裹早被交出去 ⇒ 永远取不到）、第 11..13 条、
+	 * <b>第 14 条</b> = 落点（用户脚本是 {@code break}）。唯一偏离的是"要靠世界才能跑"的那几条：
+	 * <ul>
+	 *   <li>第 9 条换成一条**会留下证据的抛错**（用户那条 {@code signal send_on} 要红石链接网络，无头自检里
+	 *       造不出来；"这一条被执行过"的老手法就是抛错 —— 一执行就停机且游标可读）；</li>
+	 *   <li>「过滤 / 收信号」等换成「等待 0 tick」（**正常跑完**，绝不抛错）；
+	 *       第 10 条保留真正的 {@code take 2 2 -1}（臂在天上 ⇒ 前置检查永远不过 ⇒ 卡在它上面）；</li>
+	 *   <li>第 14 条落点从 {@code break} 改成"长等待"：落点必须**停在原地**才读得到现场
+	 *       （{@code break} 会让程序一路走下去 —— 主任务跑完会自动重开）。</li>
+	 * </ul>
+	 */
+	private static ArmProgram userScriptShapeProbe() {
+		ArmProgram program = new ArmProgram();
+		program.tasks.add(namedTask("主循环", callExitEntry("判断炒锅", null, null), callExitEntry("取炒锅1", null, null)));
+		ArmProgramTask judge = namedTask("判断炒锅",
+			waitZeroEntry(), waitZeroEntry(), waitZeroEntry(), waitZeroEntry(), waitZeroEntry(), waitZeroEntry(),
+			waitZeroEntry(), // 第 1..7 条（用户脚本里是 filter / signal recv —— 要世界，这里用无世界替身）
+			callExitEntry("炒锅1", "14", null), // 第 8 条：用户现场 `call 炒锅1 ok=goto 14`
+			throwEntry("判断炒锅第 9 条（用户脚本是 signal send_on freq={}+pot 占用炒锅2）—— 不该被执行"),
+			takeEntryAt(new BlockPos(2, 2, -1)), // 第 10 条：用户脚本 `take 2 2 -1`
+			waitZeroEntry(), waitZeroEntry(), waitZeroEntry(), // 第 11..13 条
+			parkedWaitEntry()); // 第 14 条：ok=goto 14 的落点
+		program.tasks.add(judge);
+		program.tasks.add(namedTask("炒锅1", waitZeroEntry(), breakEntry())); // 正常跑完（用户脚本末条也是 break）
+		program.tasks.add(namedTask("取炒锅1", waitZeroEntry()));
+		return program;
 	}
 
 	/** 调试用：BlockPos → {@code x,y,z}；null（没有目标）→ "无"。 */

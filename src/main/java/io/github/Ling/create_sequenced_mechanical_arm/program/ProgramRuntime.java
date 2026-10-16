@@ -359,7 +359,8 @@ public class ProgramRuntime {
 	/**
 	 * 结束当前任务：{@code failed} 为真表示"抛出错误"结束。
 	 *
-	 * <p>在子任务里 = 返回调用方（失败时调用方走「失败后」）；在主任务里 = 收工（失败则停机报错）。
+	 * <p>在子任务里 = 返回调用方（失败时调用方走「失败后」；成功时调用方走「成功后」——
+	 * 后者以前**没接上**，见 {@link #applySuccessExit}）；在主任务里 = 收工（失败则停机报错）。
 	 */
 	private void endTask(SequencedArmBlockEntity arm, boolean failed, @Nullable String reason) {
 		ArmProgram program = arm.getProgram();
@@ -377,15 +378,42 @@ public class ProgramRuntime {
 			//   这就是"返回调用方时恢复"与"存读一致"都不用额外代码的原因（见 effectiveCallShift）。
 			state = EntryState.IDLE;
 			resetEntryCounters();
+			// 调用方那条「调用」条目 = `returnEntry() - 1`（`callTask` 压栈时写的就是 `entryIndex + 1`）。
+			// 成败两个出口读的**都是这一条**的字段：失败读 `onTimeout`，成功读 `onSuccess`。
+			ArmProgramTask caller = program.task(taskIndex);
+			int callIndex = entryIndex - 1;
+			ArmProgramEntry callEntry = caller != null && callIndex >= 0 && callIndex < caller.entries.size()
+				? caller.entries.get(callIndex)
+				: null;
 			if (failed) {
 				// 把失败**冒泡到那张调用卡**：调用行为没有时限，立刻执行它的「失败后」。
-				ArmProgramTask caller = program.task(taskIndex);
-				if (caller != null && entryIndex - 1 >= 0 && entryIndex - 1 < caller.entries.size()) {
-					ArmProgramEntry callEntry = caller.entries.get(entryIndex - 1);
+				if (callEntry != null) {
+					// ⚠️ 报**任务名**，不要直接拼 `program.task(failedTask)`：ArmProgramTask 没有 toString()，
+					//   拼进去是一个对象哈希 —— 用户看到的提示会是
+					//   "被调任务失败（io.github...ArmProgramTask@186b8313 #3）：…"，**认不出是哪个任务**。
+					//   （这一轮排查"两层栈深那条断言红在哪"时，正是这条提示最先把人卡住：
+					//    只有靠 "#3" 去反推失败的是哪个任务。）
+					ArmProgramTask failedTaskObj = program.task(failedTask);
 					applySkip(arm, caller, callEntry, callEntry.onTimeout,
-						"被调任务失败（" + program.task(failedTask) + " #" + (failedEntry + 1) + "）：" + reason);
+						"被调任务失败（" + (failedTaskObj == null ? "?" : failedTaskObj.name) + " #"
+							+ (failedEntry + 1) + "）：" + reason);
 					return;
 				}
+			} else if (callEntry != null) {
+				// ★★ **成功返回也要走那张调用卡的「成功后」出口**（用户报的 bug）：
+				//  这里以前只写 `entryIndex = frame.returnEntry()` 就 return —— **从头到尾没读过 `onSuccess`**，
+				//  于是「调用」上的 `ok=goto N` 被**静默忽略**（用户现场：脚本 `call 炒锅1 ok=goto 14`
+				//  跑完没有跳走，继续执行下一条 `signal send_on … {} + pot` ⇒ 那个频率被通电，
+				//  接着死在第 10 条 `take 2 2 -1` 上。`call 汤锅1 ok=goto 30` 等四处同一个坑）。
+				//  判据**不在这里复制一份**（决策 68/85：同一判据写两份必然分叉）——
+				//  直接复用 `succeed` 那条路：`applySuccessExit` 的约定是"游标指向刚完成的那一条"，
+				//  所以先把游标退回「调用」条目自己的下标，它内部的 `entryIndex++` 才算得对
+				//  （`onSuccess == NONE` ⇒ 结果仍然 = `frame.returnEntry()`，即"现在的行为"不变）。
+				//  ⚠️ 不重跑 `succeed` 的开头三件（idleSpins / lastFailure / retract）：被调任务的收工
+				//  已经做过等价的事（它最后一条走的就是 `succeed`），这里只补"出口判据"这一件。
+				entryIndex = callIndex;
+				applySuccessExit(arm, caller, callEntry);
+				return;
 			}
 			arm.markProgramDirty();
 			return;
@@ -1197,6 +1225,9 @@ public class ProgramRuntime {
 	/**
 	 * 条目成功。§7.7 v2：成功的出口是 {@code onSuccess} —— 不设就是按顺序下一条，
 	 * 设了 {@code SKIP_TO} 就跳过去（这样"成功后跳回前面"就能组成循环与分支）。
+	 *
+	 * <p>★ 去向的判断在 {@link #applySuccessExit}（**唯一一处**）：被调任务**成功返回**时，
+	 * 调用卡自己也走那条 —— 那里以前没接上，于是「调用」上的 {@code ok=goto N} 从来没生效过。
 	 */
 	private void succeed(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		// 有进展：空转计数清零（它衡量的是"原地绕圈"，不是"跑了多久"）
@@ -1221,6 +1252,26 @@ public class ProgramRuntime {
 		//   16rpm 下 64 tick 的聋窗刚好等于"一件物品走完一整格"的时间 ⇒ **每件物品漏掉一件**。
 		arm.retract();
 
+		applySuccessExit(arm, task, entry);
+	}
+
+	/**
+	 * 条目的「成功后」出口（§7.7 v2）——<b>唯一一处判据</b>，两条路径共用：
+	 * ① 普通条目跑完（{@link #succeed}）；② 被调任务**成功返回**（{@link #endTask} 那一支）。
+	 *
+	 * <p>为什么必须抽出来（决策 68/85：同一判据写两份必然分叉）：调用返回那条路径原来直接
+	 * 把游标放到"调用条目的下一条"，**从没读过调用卡的 {@code onSuccess}** ⇒
+	 * 用户脚本里 {@code call 炒锅1 ok=goto 14} 被静默忽略（详见 {@code endTask} 里的现场记录）。
+	 *
+	 * <p><b>调用约定</b>：{@code entryIndex} 必须**指向刚完成的那一条**条目
+	 * （{@code succeed} 天然如此；调用返回那条路径要先把游标退回「调用」条目自己的下标）——
+	 * 下面 {@code entryIndex++} 的"下一条"语义全靠这个约定。
+	 *
+	 * <p>三种情形：{@code NONE} ⇒ 按顺序下一条（= 调用返回路径的"现在的行为"）；
+	 * {@code SKIP_TO} + 有落点 ⇒ 跳到落点；{@code SKIP_TO} 但落点为空 ⇒ 同 {@code NONE}
+	 * （与 §5.2 的界面守卫同一条规则：设了跳转却没落点不做事，而不是停机）。
+	 */
+	private void applySuccessExit(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		if (entry.onSuccess == SkipAction.SKIP_TO && !entry.successTarget.isBlank()) {
 			lastFailure = "成功 → 跳转 " + entry.successTarget;
 			resetEntryCounters();
