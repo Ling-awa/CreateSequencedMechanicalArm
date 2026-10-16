@@ -385,7 +385,12 @@ public class SequencedArmSelfTest {
 	private static ArmProgramEntry heaviestEntry() {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = OperationType.SIGNAL;
-		entry.offset = new BlockPos(1234567, 255, -1234567);
+		// ⚠️ 这里原来给了一个"天文坐标"（1234567,255,-1234567）。用户第四十一轮起**不需要坐标的操作
+		//    offset 恒为 0**（载入自愈 / 编辑器切换操作时清零 / 脚本也不写它）⇒ 那种状态已经**造不出来**，
+		//    留着它会让"编辑器造得出的最重一条"这句话变成假的。改成 ZERO 对两个测量数字**都没有影响**：
+		//    ① `off` 是无条件写的 IntArray，3 个 int 占的字节数与取值无关；② 反编译器本来就不为
+		//    「收发信号」写坐标（这一轮之前也只是"offset 非零才写"那支的残留值）。
+		entry.offset = new BlockPos(0, 0, 0);
 		entry.delay = 12000;
 		entry.face = Direction.NORTH;
 		entry.failAmount = 120;
@@ -4418,7 +4423,12 @@ public class SequencedArmSelfTest {
 	 *   <li>{@code ArmProgram.save} 里把 {@code if (!note.isEmpty())} 改成 {@code if (false)}
 	 *       ⇒ 程序备注丢 ⇒ "程序备注进 NBT"那行必须报红；</li>
 	 *   <li>把 {@code ArmProgramEntry.needsTarget()} 的过滤那一支删掉 ⇒ 容器模式的坐标与
-	 *       {@code source=} 都不再写出来 ⇒ 「过滤容器」那份语料的不变量①必须红。</li>
+	 *       {@code source=} 都不再写出来 ⇒ 「过滤容器」那份语料的不变量①必须红。
+	 *       ⚠️ **第四十一轮起这条红的来路变了**：{@code scriptDifference} 现在只在"这一条需要坐标"时
+	 *       比 offset（见那里的说明），单靠不变量①判不到它 —— 现在由两处接手：
+	 *       ① ⑫ 的 {@code 过滤容器模式照旧写坐标}（反编译侧：直接看文本里有没有那两个数）；
+	 *       ② 解析侧的模型不变量（{@code filter 12 64 -30 source=container} 会当场报"手持模式没有坐标"）
+	 *       ⇒ 「过滤容器」那份语料**编译不过** ⇒ 不变量①那条也红。</li>
 	 * </ol>
 	 */
 	/**
@@ -4871,7 +4881,12 @@ public class SequencedArmSelfTest {
 	 *   <li>{@code ArmProgram.save} 里把 {@code if (!note.isEmpty())} 改成 {@code if (false)}
 	 *       ⇒ 程序备注丢 ⇒ "程序备注进 NBT"那行必须报红；</li>
 	 *   <li>把 {@code ArmProgramEntry.needsTarget()} 的过滤那一支删掉 ⇒ 容器模式的坐标与
-	 *       {@code source=} 都不再写出来 ⇒ 「过滤容器」那份语料的不变量①必须红。</li>
+	 *       {@code source=} 都不再写出来 ⇒ 「过滤容器」那份语料的不变量①必须红。
+	 *       ⚠️ **第四十一轮起这条红的来路变了**：{@code scriptDifference} 现在只在"这一条需要坐标"时
+	 *       比 offset（见那里的说明），单靠不变量①判不到它 —— 现在由两处接手：
+	 *       ① ⑫ 的 {@code 过滤容器模式照旧写坐标}（反编译侧：直接看文本里有没有那两个数）；
+	 *       ② 解析侧的模型不变量（{@code filter 12 64 -30 source=container} 会当场报"手持模式没有坐标"）
+	 *       ⇒ 「过滤容器」那份语料**编译不过** ⇒ 不变量①那条也红。</li>
 	 * </ol>
 	 */
 	private static void checkScriptRoundTrip(MinecraftServer server) {
@@ -5221,6 +5236,100 @@ public class SequencedArmSelfTest {
 		if (snbtError != null)
 			problems.add("SNBT 写法过不了原版 TagParser：" + snbtError);
 
+		// ⑫ ★ 「不需要坐标的操作」不带坐标（用户第四十一轮：脚本里 `call 任务` 后面跟着一串 `-3 0 -1`，
+		//    而「调用」是控制类操作 —— 既不移动、也没有目标，运行时**根本不读**这个字段）。
+		//    四条一起钉，缺任何一条都会漏掉一半；再加一条 ②b 把"报错但内容还在"（§17.10）钉住
+		//    （**改哪一行会让这条红**写在每条的括号里）：
+		//      ① 反编译**不写**（把 ScriptDecompiler.writeOperands 里那个
+		//         `else if (!entry.offset.equals(BlockPos.ZERO))` 支加回来 ⇒ ① 变 false）；
+		//      ② 手写坐标**必须报错**（把 ScriptParser.parseEntry 里 `looksLikePosition` 那条
+		//         报错删掉、退回 optionalPosition ⇒ ② 变 false：又变成静默接受）；
+		//      ②b 报错之后**内容还在**（§17.10 带伤装载：把 `rest.subList(0,3).clear()` 那行
+		//         换成 `return` ⇒ ②b 变 false：老文本里那串残留坐标会让整条「调用」消失）。
+		//         这一条与②必须分开数：合成一个布尔量，红了也看不出是"没收下"还是"整条丢了"；
+		//      ③ 老数据**自愈**（把 ArmProgramEntry.load 末尾那句 `if (!entry.needsTarget()) …ZERO`
+		//         删掉 ⇒ ③ 变 false）；
+		//      ④ 「过滤」的**容器模式照旧带坐标**（把 ArmProgramEntry.needsTarget() 里
+		//         `op == FILTER && filterSource == CONTAINER` 那一支删掉 ⇒ ④ 变 false：
+		//         两边同时丢坐标 —— 那是"容器模式的坐标是数据参数"这条被误伤的现场）。
+		ArmProgram noCoordProbe = new ArmProgram();
+		ArmProgramTask noCoordTask = new ArmProgramTask();
+		noCoordTask.name = "main";
+		ArmProgramEntry callProbe = new ArmProgramEntry();
+		callProbe.op = OperationType.CALL;
+		callProbe.callTarget = "task2";
+		// 故意塞一个"老卡 / 老文本里的残留值"：写出侧**不该**把它写进文本
+		callProbe.offset = new BlockPos(-3, 0, -1);
+		noCoordTask.entries.add(callProbe);
+		// 同一条判据的另一半：「过滤」的容器模式有坐标（数据参数），必须照旧写出来
+		ArmProgramEntry containerFilterProbe = new ArmProgramEntry();
+		containerFilterProbe.op = OperationType.FILTER;
+		containerFilterProbe.filterSource = ArmProgramEntry.FilterSource.CONTAINER;
+		containerFilterProbe.offset = new BlockPos(2, 0, -3);
+		noCoordTask.entries.add(containerFilterProbe);
+		noCoordProbe.tasks.add(noCoordTask);
+		// 被调用的那个任务也要真存在：不然 ④ 编译这段文本时会因为"unknown task: task2"报错，
+		// 而那是**另一条**守卫（悬空任务名，见 checkTextStorage ④）的事，不该让它污染这一条。
+		ArmProgramTask noCoordSub = new ArmProgramTask();
+		noCoordSub.name = "task2";
+		ArmProgramEntry subBreak = new ArmProgramEntry();
+		subBreak.op = OperationType.BREAK;
+		noCoordSub.entries.add(subBreak);
+		noCoordProbe.tasks.add(noCoordSub);
+
+		String noCoordText = ScriptCompiler.decompile(noCoordProbe, registries);
+		// ① 断言**那一行本身**：坐标没了、任务名还在（只判"不含 -3 0 -1"会漏掉"整行都没写出来"）
+		String callLine = "";
+		for (String printed : noCoordText.split("\n"))
+			if (printed.trim()
+				.startsWith("call"))
+				callLine = printed.trim();
+		boolean callWithoutCoords = callLine.equals("call task2") && !noCoordText.contains("-3 0 -1");
+		boolean containerFilterCoordsKept = noCoordText.contains("2 0 -3");
+		// ② 手写这种文本必须**报错**（静默丢弃会让"坐标已经删掉"与"坐标没生效"看不出区别）
+		boolean handWrittenCoordsRejected = reportsAt(registries, "task main\n  call -3 0 -1 task2\n", 2, "不需要坐标")
+			&& reportsAt(registries, "task main\n  wait 1 2 3 5s\n", 2, "不需要坐标");
+		// ②b 报了错，但**这一行剩下的内容照样解析**（§17.10 带伤装载：老文本里的残留坐标不该
+		//     让整条「调用」消失）—— 所以判据要同时看"有错"与"值里那条调用还在"
+		ScriptResult<ArmProgram> coordsLineBack = ScriptCompiler.compile(
+			"task main\n  call -3 0 -1 子任务\n  take 0 0 0\ntask 子任务\n  break\n", registries);
+		boolean handWrittenCoordsKeptEntry = coordsLineBack.hasErrors()
+			&& coordsLineBack.value().tasks.size() == 2
+			&& coordsLineBack.value().tasks.get(0).entries.size() == 2
+			&& "子任务".equals(coordsLineBack.value().tasks.get(0).entries.get(0).callTarget);
+		// ③ 自愈：把那条"带坐标的调用"按老卡那样存一遍再读回来，offset 必须归零
+		ArmProgramEntry healedEntry = ArmProgramEntry.load(callProbe.save(registries), registries);
+		boolean noCoordOffsetHealed = healedEntry.offset.equals(BlockPos.ZERO);
+		// ④ 过滤容器模式**照旧解析**（坐标吃进去了、并且留在模型里）：只测"写出"会漏掉解析那一半
+		ScriptResult<ArmProgram> containerBack = ScriptCompiler.compile(noCoordText, registries);
+		boolean containerFilterParsed = !containerBack.hasErrors()
+			&& containerBack.value().tasks.size() == 2
+			&& containerBack.value().tasks.get(0).entries.size() == 2
+			&& containerBack.value().tasks.get(0).entries.get(1).offset.equals(new BlockPos(2, 0, -3))
+			&& containerBack.value().tasks.get(0).entries.get(1).needsTarget();
+		// 同一条判据的界外：**手持**过滤写了坐标也要报错（否则手写 `filter 1 2 3` 会落进模型里
+		// 变成一个"定义外"的状态：反编译器不写它、载入时还会被清掉）
+		boolean heldFilterWithCoordsRejected = reportsAt(registries, "task main\n  filter 1 2 3 source=held\n", 2,
+			"手持模式");
+		LOGGER.info("[selftest] 无坐标操作不带坐标: 调用条目反编译不含坐标={} 手写坐标报错={} 报错后内容还在={} "
+			+ "载入后 offset 归零={} 过滤容器模式照旧写坐标={} 容器模式坐标往返={} 手持过滤写坐标报错={} （文本=[{}]）",
+			callWithoutCoords, handWrittenCoordsRejected, handWrittenCoordsKeptEntry, noCoordOffsetHealed,
+			containerFilterCoordsKept, containerFilterParsed, heldFilterWithCoordsRejected, showNote(noCoordText));
+		if (!callWithoutCoords)
+			problems.add("反编译把「调用」的坐标写进了脚本（那串数字运行时根本不看，用户就是被它问住的）");
+		if (!handWrittenCoordsRejected)
+			problems.add("手写的「调用」坐标没有被报错 —— 又变成静默接受（噪声会继续在文本里传下去）");
+		if (!handWrittenCoordsKeptEntry)
+			problems.add("手写坐标报错之后那条「调用」整条没了（§17.10：盘上只有文本，编译期严格不能吃掉内容）");
+		if (!noCoordOffsetHealed)
+			problems.add("老卡里「调用」的残留坐标没有被清零（读进来还留着，下一次保存才会发现它还在）");
+		if (!containerFilterCoordsKept)
+			problems.add("「过滤」容器模式的坐标没有被写出来（它是数据参数，丢了就变成读手上那份）");
+		if (!containerFilterParsed)
+			problems.add("「过滤」容器模式的坐标过不了脚本往返（或读回来 needsTarget() 变成假）");
+		if (!heldFilterWithCoordsRejected)
+			problems.add("手持过滤写了坐标没有被报错 —— 模型里会出现一个「不需要坐标却带着坐标」的状态");
+
 		for (String problem : problems)
 			LOGGER.error("[selftest] 脚本：{}", problem);
 		LOGGER.info("[selftest] 脚本文本往返: {} 处问题（不变量①真实预设 + 不变量①②手写语料 共 {} 份语料）", problems.size(),
@@ -5269,7 +5378,15 @@ public class SequencedArmSelfTest {
 		String where = "任务「" + task + "」第 " + (index + 1) + " 条";
 		if (a.op != b.op)
 			return where + "操作变了：" + a.op + " → " + b.op;
-		if (!a.offset.equals(b.offset))
+		// ★ offset 只在**这一条需要坐标**时比较（用户第四十一轮）：对不需要坐标的操作（等待 / 等红石 /
+		//   信号 / 调用 / 退出 / 抛错 / 手持过滤），"offset 恒为 0"已经是**模型定义**的一部分
+		//   （ArmProgramEntry.load 读完就自愈、编辑器切换操作时清零、ScriptDecompiler 也不写它）
+		//   ⇒ 文本里本来就没有它，拿它当往返不变量等于把这条定义判红。这就是那条**被推翻的旧口径**
+		//   （"非目标操作的非零 offset 也要在文本里往返"）—— 现在它的反证改由
+		//   checkScriptRoundTrip ⑫ 的四条断言承担（写不写、收不收、自愈、容器过滤照旧）。
+		//   只要**任一侧**需要坐标就比：那样"一边是容器过滤、一边是手持"这种真差异不会被这一条漏掉
+		//   （它随后由下面的 filterSource 比较报出来，比"坐标变了"更贴切）。
+		if ((a.needsTarget() || b.needsTarget()) && !a.offset.equals(b.offset))
 			return where + "坐标变了：" + a.offset.toShortString() + " → " + b.offset.toShortString();
 		if (a.delay != b.delay)
 			return where + "delay 变了：" + a.delay + " → " + b.delay;

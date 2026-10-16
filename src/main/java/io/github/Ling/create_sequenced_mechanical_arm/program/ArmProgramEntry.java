@@ -380,7 +380,10 @@ public class ArmProgramEntry {
 	 * <p>⚠️ 凡是"这个条目有没有 / 要不要一个**坐标**"的地方都必须问这一个方法：
 	 * 认领（{@code pinOffset} / {@code entryOffset}）、GUI 的坐标行、卡上"有目标条目"的计数与整套平移、
 	 * 蓝图旋转（{@code SequencedArmBlockEntity.transform}）、插卡时的超范围提示、
-	 * 操作表的描框、撤销按坐标匹配、脚本写出（{@code ScriptDecompiler}）、胶囊文字里的坐标。
+	 * 操作表的描框、撤销按坐标匹配、脚本写出（{@code ScriptDecompiler}）、脚本解析
+	 * （{@code ScriptParser}：写了坐标的这类操作要报错）、胶囊文字里的坐标，
+	 * 以及"不需要坐标的条目 offset 恒为 0"这条定义本身的三处落点
+	 * （{@link #load} 的自愈、编辑器切换操作时清零、自检的逐字段比较）。
 	 * 写在两处必然分叉 —— 症状分别是"容器模式没有坐标框"和"手持模式凭空多出一个目标框"。
 	 *
 	 * <p>⚠️⚠️ 但它**不是**"臂要不要伸过去"的判据 —— 那是 {@link #movesArm()}（操作**类型**级）。
@@ -543,6 +546,20 @@ public class ArmProgramEntry {
 		entry.filterSource = enumOf(FilterSource.class, tag.getString("fsrc"), FilterSource.HELD);
 		if (tag.contains("fitem"))
 			entry.filterItem = ItemStack.parseOptional(registries, tag.getCompound("fitem"));
+
+		// ★ 自愈：**不需要坐标的条目，offset 归零**（用户第四十一轮）。
+		//   这类操作（等待 / 等红石 / 信号 / 调用 / 退出 / 抛错 / 手持过滤）的坐标对运行时没有任何意义
+		//   ——「调用」是控制类操作，既不移动、也没有目标，运行时**根本不读** {@link #offset}。
+		//   老卡 / 老文本里那串数字只是"这条曾经是别的操作"（或老版本"新建条目取你正看的方块"）
+		//   留下的残留：读进来就清掉，**下一次保存它就消失了**，脚本里也不会再冒出来
+		//   （用户这轮就是被 `.sma` 里 `call 任务` 后面那串 `-3 0 -1` 问住的）。
+		//   这也是"模型里这个字段对这类操作没有意义"的**正式表达**：写出侧
+		//   （{@code ScriptDecompiler}）只对 {@code needsTarget()} 的条目写坐标、解析侧
+		//   （{@code ScriptParser}）对写了坐标的这类操作直接报错、编辑器切换操作时同样清零。
+		//   ⚠️ 顺序：必须在 {@link #filterSource} **读完之后** —— {@link #needsTarget()} 对「过滤」
+		//   要看它是手持还是容器，容器模式的坐标是**数据参数**，一个字都不能动。
+		if (!entry.needsTarget())
+			entry.offset = BlockPos.ZERO;
 
 		// ——— v1 → v2 迁移（§7.7 语义改版）———
 		// v1 有 force/forceTimeout（"重试到限时"）与 onFail（"立刻失败时怎么办"）两个分支。

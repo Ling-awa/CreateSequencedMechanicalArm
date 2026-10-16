@@ -750,14 +750,30 @@ public final class ScriptParser {
 		if (op.requiresTarget()) {
 			if (!position(rest, parsed, true))
 				return;
-		} else {
-			// 不碰目标的操作没有位置参数；但**模型里 offset 照样存在**
-			//（NBT 里 `off` 是无条件写的），所以允许可选写法把非默认值写出来。
-			// ★ 「过滤」也走这一支（它的 requiresTarget 是 false）：**容器模式要接受坐标 + face=**，
-			//   而手持模式不写坐标 —— 判据落在"能不能解析成三个整数"上（optionalPosition），
+		} else if (op == OperationType.FILTER) {
+			// ★ 「过滤」是**唯一**允许在"不移动"的情况下带坐标的操作（它的 requiresTarget() 是 false，
+			//   但条目级的 needsTarget() 在容器模式下为真）：容器模式的坐标是**数据参数**
+			//   （读哪个容器），手持模式没有坐标 —— 判据落在"能不能解析成三个整数"上（optionalPosition），
 			//   于是两种模式共用一条解析路径，不需要在语法里再分一次叉。
 			//   这一点是必须的：条目坐标只能有一种读法（写两份判据必然分叉，决策 68/85）。
 			optionalPosition(rest, parsed);
+		} else if (looksLikePosition(rest)) {
+			// ★ 其余"不需要坐标"的操作（等待 / 等红石 / 信号 / 调用 / 退出 / 抛错）**不接受**坐标。
+			//   它们以前被 optionalPosition 静默吃下（那时 NBT 的 `off` 是无条件写的，于是"非零偏移"
+			//   也能往返）—— 用户第四十一轮正是被这个问住的：脚本里 `call 任务` 后面那串 `-3 0 -1`
+			//   在运行时既不移动、也没有目标，纯是老数据留下的噪声。
+			//   现在把手写这种文本当**错误**当场说破：静默丢弃会让"坐标已删掉"与"坐标没生效"
+			//   看不出区别，静默接受则让噪声继续传下去 —— 两种都留了"猜"的空间，这一轮要消灭的正是它。
+			//   ⚠️ 判据必须是"紧跟着的三个**裸的**整数"（见 looksLikePosition）：`delay=5` / `fail=goto`
+			//   这类后缀紧跟在后面是最常见的写法，误判会把一条完全正确的条目判红。
+			error(parsed.line, "「" + opKeyword(op) + "」没有目标位置，不需要坐标（把 `"
+				+ positionText(rest) + "` 删掉）");
+			// ★ 报了错**照样把这一行剩下的部分解析完**（把这三个记号丢掉，不整条作废）。
+			//   理由与 §17.10 的"带伤装载"是同一条：盘上只有文本，老脚本里那串残留坐标**不该**
+			//   让玩家的「调用」整条消失（后面还有 `任务名` / `repeat=2` 这些真内容等着被读）。
+			//   丢掉的只是"本来就没有意义的三个数"；错误已经报出来了，导入侧照样把它当失败处理。
+			rest.subList(0, 3)
+				.clear();
 		}
 		if (!operands(parsed, rest))
 			return;
@@ -799,6 +815,19 @@ public final class ScriptParser {
 		entry.filterItem = parsed.filterItem;
 		entry.filterSource = parsed.filterSource;
 		entry.frequency = parsed.frequency;
+		// ★ 模型的不变量：**不需要坐标的条目，offset 恒为 0**（与 ArmProgramEntry.load 的自愈、
+		//   ScriptDecompiler 的写出是同一条口径）。这里能落到的只有一种手写：
+		//   `filter 1 2 3 source=held`（或干脆没写 source=）—— 坐标写在 `source=` **之前**，
+		//   解析位置参数时还不知道是哪种模式，所以判据只能放到这里（字段都齐了才问 needsTarget()）。
+		//   为什么**报错**而不是静默清零：手持模式没有坐标，那三个整数只可能是"想写容器模式却漏了
+		//   source=container" —— 静默丢掉会让玩家以为过滤在读那个容器（实际读的是手上那份）。
+		//   报错之后**照样保留这条条目**（把坐标清掉继续走）：§17.10 的"带伤装载"要求
+		//   编译期严格不能吃掉内容 —— 老卡里的过滤条目在这一步消失，行为会整个变掉。
+		if (!parsed.offset.equals(BlockPos.ZERO) && !entry.needsTarget()) {
+			error(line, "「filter」的手持模式（source=held）没有坐标 —— 要么把 `" + positionText(parsed.offset)
+				+ "` 删掉，要么写成 source=container（容器模式的坐标是必填的数据参数）");
+			entry.offset = BlockPos.ZERO;
+		}
 		if (entry.frequency != null)
 			warnFrequencyComponents(parsed);
 		if (parsed.quotedNote != null) {
@@ -1313,7 +1342,12 @@ public final class ScriptParser {
 	}
 
 	/**
-	 * 非必需的位置参数：只有前三个记号都是整数时才吃（不碰目标的操作平时不写它）。
+	 * 非必需的位置参数：只有前三个记号都是整数时才吃。
+	 *
+	 * <p>现在**只有「过滤」走这一支**（用户第四十一轮起：其余"不需要坐标的操作"写了坐标一律报错，
+	 * 见 {@code parseEntry} 的 {@code looksLikePosition} 分支）—— 因为过滤是"同一条操作、两种模式"：
+	 * 容器模式的坐标是必填的**数据参数**，手持模式则一个数都没有。判据不能提前绑死，
+	 * 所以这里只试探、后面再按 {@code source=} 对账。
 	 *
 	 * <p>判据只能是"能不能解析成三个整数"，不能用"是不是以 {@code @} 开头"那种记号启发式：
 	 * 曾经位置参数带 {@code @abs/@rel} 前缀，现在同一位置上可能是 {@code fail=goto} / {@code delay=5}
@@ -1325,6 +1359,36 @@ public final class ScriptParser {
 		if (!isInt(rest.get(0)) || !isInt(rest.get(1)) || !isInt(rest.get(2)))
 			return;
 		position(rest, parsed, false);
+	}
+
+	/**
+	 * 接下来这三个记号**看起来像坐标**吗 —— <b>只判、不报错</b>（与 {@link #isInt} 同一套路）。
+	 *
+	 * <p>用途只有一个：给"不需要坐标的操作"写了坐标时**当场说破**（用户第四十一轮：脚本里
+	 * {@code call 任务 -3 0 -1} 那串数字运行时根本不看，纯是噪声）。
+	 *
+	 * <p>判据两条，缺一不可：① 三个记号都是**裸记号**（{@code keyOf} 为空）—— 坐标从来不写成
+	 * {@code delay=5} 那种 key=value；② 它们的值都是整数。只判②的话，一条写法完全正确的
+	 * {@code break timeout=3 …}（后面又碰巧跟着两个整数后缀）会被误判成坐标；只判①的话，
+	 * {@code break a b c} 会被当成"坐标写错了"而报出更离谱的错。
+	 */
+	private static boolean looksLikePosition(List<Token> rest) {
+		if (rest.size() < 3)
+			return false;
+		for (int i = 0; i < 3; i++)
+			if (keyOf(rest.get(i)) != null || !isInt(rest.get(i)))
+				return false;
+		return true;
+	}
+
+	/** 报错里显示坐标：用**玩家自己写的记号原文**（`-3 0 -1`），这样他能直接对着删。 */
+	private static String positionText(List<Token> rest) {
+		return rest.get(0).text() + " " + rest.get(1).text() + " " + rest.get(2).text();
+	}
+
+	/** 报错里显示坐标：从解析好的值拼（用于"坐标已经吃掉、模式后来才知道"的那种判断）。 */
+	private static String positionText(BlockPos offset) {
+		return offset.getX() + " " + offset.getY() + " " + offset.getZ();
 	}
 
 	/**
@@ -1506,10 +1570,23 @@ public final class ScriptParser {
 		for (OperationType type : OperationType.values()) {
 			if (sb.length() > 0)
 				sb.append(" / ");
-			sb.append(type.name()
-				.toLowerCase(Locale.ROOT));
+			sb.append(opKeyword(type));
 		}
 		return sb.toString();
+	}
+
+	/**
+	 * 操作在脚本里的关键字（{@code CALL → call}）—— 报错里用它指认"是哪一条操作"。
+	 *
+	 * <p>⚠️ 这里**有意**用脚本关键字、而不是界面上的中文名：本类所有的编译期错误都是纯文本字符串
+	 * （{@link ScriptError} 只有 {@code String message}），而中文名住在语言文件的
+	 * {@code gui.editor.opt.*} 键里 —— 服务端（专用服务器 / 自检）根本读不到它，
+	 * {@code Component.getString()} 会直接吐出键名。要换成中文名就得让错误消息能带
+	 * {@code Component}（那是另一件事，不在这一轮的范围里）。
+	 */
+	private static String opKeyword(OperationType op) {
+		return op.name()
+			.toLowerCase(Locale.ROOT);
 	}
 
 	/** 不带引号的任务名：空白字符会把它截断，所以只接受"看起来是一个名字"的记号。 */

@@ -2581,6 +2581,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (entry != null) {
 				picker(tr("entry.op"), tr("hint.entry_op"), labels(OperationType.values()), entry.op.ordinal(), i -> {
 					entry.op = OperationType.values()[i];
+					// ★ 坐标对"不需要坐标的操作"没有意义，**切过去就清掉**（用户第四十一轮就是被这个问住的：
+					//   脚本里 `call 任务` 后面跟出来一串 `-3 0 -1` —— 那是"这条条目曾经是别的操作"
+					//   留下的残留，运行时根本不看它，可它会一路写进 `.sma` 变成噪声）。
+					//   这与 ArmProgramEntry.load 的自愈、ScriptDecompiler / ScriptParser 的口径是同一条：
+					//   "这类操作的 offset 恒为 0"是模型定义的一部分。
+					//   ⚠️ 判据用**条目级**的 needsTarget()：过滤的容器模式有坐标（它是数据参数），不能清。
+					if (!entry.needsTarget())
+						entry.offset = BlockPos.ZERO;
 					rebuildPending = true;
 					dirty = true;
 				});
@@ -3656,7 +3664,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			for (OperationType op : OperationType.values()) {
 				ArmProgramEntry entry = new ArmProgramEntry();
 				entry.op = op;
-				entry.offset = new BlockPos(1, 2, 3);
+				// ★ 坐标只给"需要坐标"的操作（用户第四十一轮：不需要坐标的操作 offset 恒为 0）。
+				//   这张卡要**真的过一遍"模型 → 文本 → 卡 → 界面"**，所以夹具也必须是模型定义内的状态：
+				//   给 WAIT/SIGNAL/CALL 这类塞坐标，写出去时会被丢掉、读回来是 0，等于造了一个假状态。
+				//   （布局不受影响：坐标框的有无只看 needsTarget()，与 offset 的值无关。）
+				if (entry.needsTarget())
+					entry.offset = new BlockPos(1, 2, 3);
 				entry.count = 2;
 				entry.waitAmount = 20;
 				entry.waitForPowered = false;

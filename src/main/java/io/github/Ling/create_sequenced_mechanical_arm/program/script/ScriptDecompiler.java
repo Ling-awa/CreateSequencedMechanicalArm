@@ -15,7 +15,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 
-import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.component.DataComponents;
@@ -44,8 +43,11 @@ import net.minecraft.world.item.ItemStack;
  *       手写 {@code @origin …} 会被编译器硬报错（{@link ScriptParser} 的说明）；</li>
  *   <li>物品：{@code stack.getComponents().isEmpty()} ⇒ 只写 id；唯一组件是染色 ⇒ {@code #RRGGBB}；
  *       其余 ⇒ 完整 SNBT（键顺序由原版 codec 决定，是确定的）；空栈 ⇒ {@code {}}；</li>
- *   <li>坐标：需要目标的操作**永远写** {@code x y z}（三个整数，相对**执行这条程序的那条臂**
- *       —— §19.7 起不再有任何空间记号）；不碰目标的操作只在 {@code offset != 0}（模型里的真字段）时才写；</li>
+ *   <li>坐标：<b>只有 {@link ArmProgramEntry#needsTarget()} 的操作才写</b> {@code x y z}（三个整数，相对
+ *       **执行这条程序的那条臂** —— §19.7 起不再有任何空间记号）；不需要坐标的操作（等待 / 等红石 /
+ *       信号 / 调用 / 退出 / 抛错）**一个数都不写** —— 它们的 {@code offset} 对运行时没有任何意义
+ *       （用户第四十一轮就是被脚本里 {@code call 任务} 后面那串 {@code -3 0 -1} 问住的：那是残留噪声）。
+ *       注意「过滤」的**容器模式**需要坐标（它是"读哪个容器"的**数据参数**），所以判据是条目级的；</li>
  *   <li>时间：{@code 5s / 200t / 2m}（不带单位只用于编译器容忍手写输入，规范形式永远带单位）；</li>
  *   <li>备注：条目 / 任务行**尾部**的块注释（{@code &ast;/…&ast;/}）；含注释终止符时退化为 {@code note="…"}
  *       （{@code \n} {@code \"} {@code \\} 转义）—— §12.3a 细则 3；</li>
@@ -130,15 +132,17 @@ public final class ScriptDecompiler {
 
 	private void writeOperands(ArmProgramEntry entry) {
 		OperationType op = entry.op;
-		// ★ 问**条目级**的 needsTarget()：过滤的容器模式坐标是必填项（永远写），
-		//   手持模式则退到下面那一支 —— 只在 offset 偏离默认值时才写（模型里它照样存在，
-		//   不写就会在往返里丢掉，那是不变量①的红）。
+		// ★ 坐标**只有需要目标的操作才写**（判据是**条目级**的 needsTarget()：过滤的容器模式需要坐标
+		//   —— 那是"读哪个容器"的数据参数，必须永远写；手持模式不需要）。
+		//   不需要坐标的操作（等待 / 等红石 / 信号 / 调用 / 退出 / 抛错）**一个数都不写**：
+		//   这里原来还有一支"offset 非零也写出来"的写法，那是老口径（那会儿"新建条目默认取你正看着
+		//   的方块"，于是每条都带着一串坐标）。用户第四十一轮正是被这个问住的 —— 脚本里
+		//   `call 任务` 后面跟着 `-3 0 -1`，而「调用」是控制类操作：既不移动、也没有目标，
+		//   运行时**根本不读**它 ⇒ 那三个数纯是噪声（"这条条目曾经是别的操作"留下的残留）。
+		//   现在"这类操作的 offset 恒为 0"是模型定义的一部分（ArmProgramEntry.load 读完就自愈、
+		//   编辑器切换操作时也清零），所以不写它**不会丢数据** —— 不变量①照样成立。
 		if (entry.needsTarget()) {
 			// 需要目标的操作：坐标是必填项，**永远写**（少写三个整数，读回来就是"这个目标在原点"）
-			out.append(' ')
-				.append(position(entry));
-		} else if (!entry.offset.equals(BlockPos.ZERO)) {
-			// 不碰目标的操作：坐标是"模型里有、语法上可选"的字段 —— 只在**偏离默认值**时才写出来。
 			out.append(' ')
 				.append(position(entry));
 		}
