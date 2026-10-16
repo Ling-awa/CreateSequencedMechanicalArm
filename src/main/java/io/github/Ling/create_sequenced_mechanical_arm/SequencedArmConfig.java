@@ -26,6 +26,26 @@ public final class SequencedArmConfig {
 	public static final int DEFAULT_MAX_HELD_SIGNALS = 64;
 	/** 默认条目总数上限（全程序合计）。1024 = "60 KiB 文本上限先响之前够用"的档位（§17.4）。 */
 	public static final int DEFAULT_MAX_ENTRIES_TOTAL = 1024;
+	/** 默认推进速率：每 tick 2 条（用户定稿的默认值）。 */
+	public static final double DEFAULT_ENTRIES_PER_TICK = 2.0;
+	/**
+	 * 推进速率的**下限**。
+	 *
+	 * <p>为什么不是 {@code 0.01}（那样一条要 100 tick = 5 秒，护目镜上确实"看得清"）：
+	 * 每 tick 推进多少条是给**长控制链**提速用的，不是"逐帧慢放"用的 —— 用户要的慢档示例是
+	 * 0.5（2 tick 一条）。0.05 = **20 tick 一条**（1 秒一条）已经足够慢，再往下只会在
+	 * 无动作条目串上造成"看不出它在跑"的假死观感，而代价（几十秒不推进）没人会想要。
+	 */
+	public static final double MIN_ENTRIES_PER_TICK = 0.05;
+	/**
+	 * 推进速率的**上限** = 64。
+	 *
+	 * <p>理由只有一条：**配置值同时是"一条自跳转脚本能在一个 tick 里跑多少条"的硬上限**
+	 * （见 {@code ProgramRuntime.maxEntriesPerTick()}）。速率再大，单 tick 的工作量也不会
+	 * 无界增长，服务器不会因为一个跳转自环被卡住。64 已经远超"看得清流程"的数倍，
+	 * 而 1.21 的动力臂本身还有动画/相位节流，再快只是把空转条目塞进同一 tick。
+	 */
+	public static final double MAX_ENTRIES_PER_TICK = 64.0;
 
 	private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
 
@@ -73,6 +93,27 @@ public final class SequencedArmConfig {
 			"填得比文本装得下的还大，多出来的部分在保存时会被整份拒绝（不是静默丢）。能放多少条见自检日志。")
 		.defineInRange("maxEntriesTotal", DEFAULT_MAX_ENTRIES_TOTAL, 1, 4096);
 
+	/**
+	 * 每 tick 推进多少条**无动作**条目（小数跨 tick 累积）。
+	 *
+	 * <p><b>0.5 = 每 2 tick 一条；2 = 每 tick 两条</b>（默认 2）。取值范围
+	 * {@value #MIN_ENTRIES_PER_TICK} – {@value #MAX_ENTRIES_PER_TICK}，理由见那两个常量的注释。
+	 *
+	 * <p>它只影响"一瞬间就出结果"的条目（控制类：过滤 / 收信号 / 调用 / 退出 / 抛错 / 发信号）。
+	 * <b>有动作的条目（移动 / 等待 / 等待红石 / 重试）一点都不变快</b>：它们照样按真实 tick 走
+	 * （判定在 {@code ProgramRuntime.isPaced}），所以抬手/等待的观感与旧版逐字节相同。
+	 */
+	public static final ModConfigSpec.DoubleValue ENTRIES_PER_TICK = BUILDER
+		.comment("How many target-less entries the arm advances per tick (fractional values accumulate across ticks).",
+			"每 tick 推进多少条「一瞬间就出结果」的条目（小数会跨 tick 累积）。",
+			"0.5 = one entry every 2 ticks; 2 = two entries per tick (default).",
+			"0.5 = 每 2 tick 一条；2 = 每 tick 两条（默认）。",
+			"Only control-ish entries are paced by this: filter / receive / call / exit / throw / signal send.",
+			"Entries that move the arm or wait (move / wait / wait-for-redstone / retry) are NOT sped up",
+			"by this setting: they still take real ticks, exactly like the old behaviour.",
+			"只对控制类条目生效；有动作的条目（移动 / 等待 / 等待红石 / 重试）不受它影响，仍然按真实 tick 走。")
+		.defineInRange("entriesPerTick", DEFAULT_ENTRIES_PER_TICK, MIN_ENTRIES_PER_TICK, MAX_ENTRIES_PER_TICK);
+
 	public static final ModConfigSpec SPEC = BUILDER.build();
 
 	private SequencedArmConfig() {}
@@ -98,18 +139,31 @@ public final class SequencedArmConfig {
 	}
 
 	/**
+	 * 每 tick 推进多少条无动作条目（配置未加载 ⇒ {@link #DEFAULT_ENTRIES_PER_TICK}）。
+	 *
+	 * <p>与上面几个整型访问器同一套懒读纪律：**运行期每次现读**，绝不在类初始化阶段 {@code get()}。
+	 */
+	public static double entriesPerTick() {
+		return read(ENTRIES_PER_TICK, DEFAULT_ENTRIES_PER_TICK);
+	}
+
+	/**
 	 * 生效值的一行摘要（自检/日志用）。
 	 *
 	 * <p>两端各读自己那份 {@code config/} 文件 ⇒ 这行日志就是"这一侧到底按什么数在跑"的证据。
 	 */
 	public static String effectiveSummary() {
 		return "配置: 任务上限=" + maxTasks() + " 信号上限=" + maxHeldSignals() + " 条目上限=" + maxEntriesTotal()
-			+ " (specLoaded=" + isLoaded() + ")";
+			+ " 推进速率=" + entriesPerTick() + " 条/tick (specLoaded=" + isLoaded() + ")";
 	}
 
 	private static int read(ModConfigSpec.IntValue value, int fallback) {
 		// 不 catch 异常：`get()` 在未加载时抛 IllegalStateException，我们**先问 isLoaded()**，
 		// 于是"未加载"这条路径根本不进 get()，也就不会在早期代码里炸出一个看不懂的异常。
+		return isLoaded() ? value.get() : fallback;
+	}
+
+	private static double read(ModConfigSpec.DoubleValue value, double fallback) {
 		return isLoaded() ? value.get() : fallback;
 	}
 }

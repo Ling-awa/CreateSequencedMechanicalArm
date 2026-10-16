@@ -71,7 +71,8 @@ import net.neoforged.neoforge.items.IItemHandler;
  * 可编程动力臂方块实体。
  *
  * <p>阶段 2 起，行为完全由 {@link ArmProgram 操作表} 驱动，
- * {@link ProgramRuntime 解释器} 每 tick 至多推进一步；本类只负责
+ * {@link ProgramRuntime 解释器} 每 tick 至多推进 N 条（N = 配置项 {@code entriesPerTick}，
+ * 默认 2，只有"一瞬间出结果"的控制类条目会连推）；本类只负责
  * "运动学 + 目标解析 + 库存"这三件事，不做任何决策。
  *
  * <p>运动学数值对齐 Create 6.0.10 的 {@code ArmBlockEntity}：进度式移动

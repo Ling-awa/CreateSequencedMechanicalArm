@@ -14,14 +14,15 @@ import com.simibubi.create.content.kinetics.belt.transport.TransportedItemStack;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.logistics.filter.FilterItemStack;
+import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.ArmEffects;
+import io.github.Ling.create_sequenced_mechanical_arm.interaction.RightClickBridge;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.TargetInteraction;
 
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.SkipAction;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadAmount;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
-import io.github.Ling.create_sequenced_mechanical_arm.interaction.RightClickBridge;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmBlockEntity;
 
 import com.simibubi.create.foundation.recipe.RecipeApplier;
@@ -54,10 +55,12 @@ import net.neoforged.neoforge.items.ItemHandlerHelper;
  *
  * <p>核心约束：
  * <ul>
- *   <li><b>每 tick 至多推进一条原语</b>；需要坐标的操作是显式多 tick 状态机（前摇 → 移动 → 到位 → 执行）。</li>
+ *   <li><b>每 tick 至多推进 N 条</b>（N = 配置项 {@code entriesPerTick}，默认 2，小数跨 tick 累积）——
+ *       但**只有"一瞬间就出结果"的条目**会按这个速率连推；需要坐标的操作仍然是显式多 tick 状态机
+ *       （前摇 → 移动 → 到位 → 执行），慢的那些<b>一点都不变快</b>（判据见 {@link #isPaced}）。</li>
  *   <li><b>常驻执行 + 红石门控</b>（门控在「等待信号」操作里，见 §7.6）。</li>
  *   <li><b>两条守卫</b>（都只拦"真出问题"的情况，<b>不按时间停机</b>）：调用栈深度上限；
- *       「空转」上限 —— 连续 {@link #MAX_IDLE_SPINS} tick 一步都没跟世界打交道（没移动、没等待）才算空转。
+ *       「空转」上限 —— 连续 {@link #MAX_IDLE_SPINS} 条没跟世界打交道（没移动、没等待）才算空转。
  *       ⚠️ 原来还有"单次运行时长 / 总步数"两条预算，它们会误杀"等玩家主动触发"的长时间等待，已删除（见常量注释）。</li>
  *   <li>失败语义统一（§7.7）：一条操作只有两个出口 —— <b>成功</b>与<b>失败/超时</b>；
  *       会无限等的操作才有"时限"，只有硬失败的操作（左键 / 调用）失败即刻执行。</li>
@@ -66,15 +69,31 @@ import net.neoforged.neoforge.items.ItemHandlerHelper;
 public class ProgramRuntime {
 
 	/**
-	 * 「空转」守卫：连续多少个 tick **一步都没跟世界打交道**就绕回来了。
+	 * 「空转」守卫：连续多少**条**没跟世界打交道就绕回来了。
 	 *
 	 * <p>用户第三轮问过"连续无进展超时是怎么触发的" —— 原来那两条（60s 无成功、20 万步预算）都是
 	 * "多久没成功就停机"，而<b>等玩家主动触发</b>（补货、拨红石链接、等机器产出）本来就可能等几分钟到几小时，
 	 * 用户原话："有些事件需要玩家主动触发，动力臂必须一直等待"。所以那两条**删掉了**，换成这条：
 	 * 只要进入了 {@link #isPaced} 认定的"要花时间"的状态就清零，等待**永远**不会被它盯上，
 	 * 能抓到的只剩真正的空转（空的无限循环、没有任何操作的跳转自环）——这类才是真的什么也没发生。
+	 *
+	 * <p>⚠️ <b>单位是"条"不是"tick"</b>（本值改速率时改过一次）：一 tick 能跑多条无动作条目之后，
+	 * 按 tick 计数会把正常的长控制链（几百条收信号/过滤，几 tick 就跑完）误判成空转并停机。
+	 * 每一条"没做任何事、也没推进游标"的条目记一次（{@link #idleSpins}），
+	 * 于是 4096 的含义是"4096 条空转条目"，而**每 tick 能跑多少条另有 {@link #MIN_ENTRY_BUDGET_PER_TICK}
+	 * 与 {@link #maxEntriesPerTick()} 两道天花板** —— 所以这个数不会变成"一个 tick 里跑 4096 条"。
 	 */
 	public static final int MAX_IDLE_SPINS = 4096;
+	/**
+	 * 一个 tick 内**无动作条目**的硬上限里那条"小常量"。
+	 *
+	 * <p>为什么需要第二条上限：空转守卫是按**条**计数的（见 {@link #MAX_IDLE_SPINS}），
+	 * 4096 条意味着"一个跳转自环可以在同一个 tick 里跑 4096 条" —— 单 tick 卡顿几百毫秒。
+	 * 所以每 tick 再压一道 8 条的天花板（对默认速率 2 完全无影响，只是把"配置填得很大"与
+	 * "脚本自跳转"这两种情况都按住）。取 8 而不是 1：常规控制链（收信号 → 过滤 → 调用）
+	 * 常常是几连跳，压到 1 就等于把配置项废掉了。
+	 */
+	public static final int MIN_ENTRY_BUDGET_PER_TICK = 8;
 	/** {@code MAX} 卸货模式下单次操作的搬运上限。 */
 	public static final int MAX_TRANSFER_PER_OP = 64;
 	/**
@@ -123,8 +142,62 @@ public class ProgramRuntime {
 	public int loopCounter;
 	/** 前置检查未通过后不动手臂的那段时间。 */
 	public int idleCooldown;
-	/** 连续"没进入任何要花时间的状态"就绕回来的 tick 数（见 {@link #MAX_IDLE_SPINS}）。 */
+	/**
+	 * 连续多少**条**"没进入任何要花时间的状态、也没推进游标"就绕回来了（见 {@link #MAX_IDLE_SPINS}）。
+	 *
+	 * <p>语义与旧版一致（仍然是"原地绕圈"的计数），只是单位从 tick 换成了条 —— 理由见常量注释。
+	 */
 	public int idleSpins;
+	/**
+	 * 速率预算里**不足一条的那点余量**（跨 tick 累积到这里）。
+	 *
+	 * <p>{@code entriesPerTick = 0.5} 时每 tick 只加 0.5：第一 tick 攒到 0.5 不满 1 条、第二 tick 攒到
+	 * 1.0 才够一条 —— 小数就是这样跨 tick 累积的。<b>不落盘</b>（重启后从 0 重新攒，最多让一条晚半拍，
+	 * 不值得为它加一个 NBT 键去污染存档格式）；换卡 / 回到开头 / 待机让出时清零（"不攒账"，
+	 * 否则等待几百 tick 之后会一次性吐出几百条）。
+	 */
+	public double rateBudget;
+
+	/**
+	 * <b>只给自检用</b>的速率覆盖（{@code null} = 按配置项 {@link SequencedArmConfig#entriesPerTick()}）。
+	 *
+	 * <p><b>优先级：覆盖值优先于配置项</b> —— 配置是运行期现读的（玩家可能在游戏里改），
+	 * 而自检要的是"钉死的节奏"：老夹具全按"一 tick 一步"写（例如"第 2 拍进 EXECUTING、
+	 * 第 3 拍出结果"），速率一变它们读到的中间状态就变了。所以自检统一钉 1.0；
+	 * 只有专门验速率的几条会自己覆盖成 2.0 / 0.5。
+	 *
+	 * <p>为什么要这个开关而不是"让老夹具跑 2.0"：断言本身**一条都不许放松**
+	 * （决策 88：错的期望值和错的实现一样有害），钉住速率才能证明"速率换了，老语义没变"。
+	 */
+	@Nullable
+	private static Double rateOverride;
+
+	/**
+	 * 自检专用：把推进速率钉成 {@code rate}（{@code null} = 恢复"按配置项"）。
+	 *
+	 * <p>静态字段 = 整个进程的运行时一起生效，自检是单线程顺序跑的，所以不需要按实例设置。
+	 * <b>不改 PACE 语义</b>：这里只改"每 tick 给多少条预算"，有动作的条目该几 tick 还是几 tick。
+	 */
+	public static void pinRateForTests(@Nullable Double rate) {
+		rateOverride = rate;
+	}
+
+	/** 生效速率：自检覆盖值优先，否则读配置项（配置未加载时回落默认值）。 */
+	private static double effectiveRate() {
+		Double override = rateOverride;
+		return override != null ? override : SequencedArmConfig.entriesPerTick();
+	}
+
+	/**
+	 * 一个 tick 内允许推进的**条目数硬上限** = {@code max(8, ceil(速率))}。
+	 *
+	 * <p>为什么必须有：速率是玩家可配的，而"一条条目跳回自己"的脚本会让本 tick 的推进永不停止 ——
+	 * 上限把"配置填得很大"与"脚本自环"两种情况一起按住（{@code ceil} 保证任何合法速率都不被这个
+	 * 上限卡住，{@code 8} 是给默认速率 2 与几连跳留的余量，见 {@link #MIN_ENTRY_BUDGET_PER_TICK}）。
+	 */
+	public static int maxEntriesPerTick() {
+		return Math.max(MIN_ENTRY_BUDGET_PER_TICK, (int) Math.ceil(effectiveRate()));
+	}
 
 	/**
 	 * 调用栈：每层记住"从哪个任务的哪一条进来"。子任务跑完/退出时弹一层回到那里继续。
@@ -178,6 +251,8 @@ public class ProgramRuntime {
 
 	// ——— 瞬态 ———
 	private int unloadMoved;
+	/** 本 tick 已经用掉的预算（每次循环迭代 +1，见 {@link #tick}）——只服务"本 tick 还让不让继续推"。 */
+	private int tickBudgetUsed;
 	@Nullable
 	private String lastFailure;
 	@Nullable
@@ -230,6 +305,29 @@ public class ProgramRuntime {
 
 	// ————————————————————————— 主循环 —————————————————————————
 
+	/**
+	 * 推进一个 tick（PLAN.md §7.6 v4 的主循环）。
+	 *
+	 * <h2>推进速率（本值新增）</h2>
+	 * 每 tick 先给本 tick 一笔**条目预算**（{@code budget += entriesPerTick}，小数跨 tick 累积：
+	 * 0.5 就是攒两 tick 才够 1 条），然后在"还能推进"时**连续推进**。所谓"推进一条"的口径是
+	 * <b>"游标真的往前走了一次"</b>（{@code succeed} / 跳转 / 收工 / 返回调用方都算一次），
+	 * 而不是"状态机走了一步" —— 因为同一 tick 内允许**先 {@code beginEntry} 再 {@code execute}**
+	 * （控制类条目本来就是"一瞬间出结果"，硬按状态机一 tick 一步会让速率只剩下一半）。
+	 *
+	 * <h2>什么时候立刻让出（剩下的预算清零，留到下一 tick）</h2>
+	 * <b>清零而不是留着</b>，理由是"小数跨 tick 累积"的口径要干净：移动 / 等待可能持续几百 tick，
+	 * 留着预算就会在等待结束那一刻一次性吐出几百条（速率 0.5 的人看到的会是"卡住半天然后瞬移"）。
+	 * 让出的条件（任一满足就 break）：
+	 * <ol>
+	 *   <li>{@link #isPaced}（移动 / 等待 / 延迟 / 重试）—— <b>有动作的条目一点都不变快</b>，
+	 *       它们仍然按真实 tick 走，所以"抬手 → 加工 → 收回"的观感与旧版逐字节相同；</li>
+	 *   <li>停机 / 无转速 / 红石锁定 / 程序为空 / {@code idleCooldown > 0} —— 主循环的早退门；</li>
+	 *   <li>本 tick 推进的条数达到硬上限 {@link #maxEntriesPerTick()} —— 防止"一条自跳转脚本"
+	 *       把服务器卡在这一个 tick 里；</li>
+	 *   <li>本 tick 已经用掉的预算 ≥ 本 tick 拿到的预算 —— 速率本身用完了。</li>
+	 * </ol>
+	 */
 	public void tick(SequencedArmBlockEntity arm) {
 		if (arm.getLevel() == null || arm.getLevel()
 			.isClientSide())
@@ -245,6 +343,12 @@ public class ProgramRuntime {
 		if (arm.getSpeed() == 0)
 			return; // 无转速冻结
 
+		// 本 tick 的速率预算：小数跨 tick 累积（0.5 = 每 2 tick 一条；2 = 每 tick 两条）。
+		// 只在**真的跑到这里**时累积 —— 上面那些早退（停机 / 锁定 / 无转速 / 空程序）都不攒预算，
+		// 否则"暂停几小时后恢复"会一次性吐出几千条。
+		rateBudget += effectiveRate();
+		tickBudgetUsed = 0;
+
 		// §7.6 v4：没有调度器了 —— 谁在跑就是谁。任务数变了（卡被编辑过）就回到主任务。
 		if (program.task(taskIndex) == null) {
 			// 栈一清，生效的调用偏移自动回到 0（它是栈的纯函数，见 effectiveCallShift）
@@ -255,20 +359,25 @@ public class ProgramRuntime {
 		}
 
 		// 待机（前置检查没通过）：不动手臂，也不算空转 —— 等输入是完全正常的状态。
+		// ⚠️ 节流按 **tick** 计（每 tick 只减 1，与这一 tick 推了多少条无关）；
+		//    余下的预算一起清掉（"待机期间不攒账"，理由见方法头注释）。
 		if (idleCooldown > 0) {
 			idleCooldown--;
+			rateBudget = 0;
 			if (state == EntryState.RETRY)
 				waitElapsed++; // 强制等待按 tick 计时，否则超时会变成"重试次数"
 			return;
 		}
 
-		// ★ 空转守卫（见 MAX_IDLE_SPINS）：只在"原地绕圈、一步都没跟世界打交道"时计数。
+		// ★ 空转守卫（见 MAX_IDLE_SPINS）：只在"原地绕圈、一条都没跟世界打交道"时计数。
 		// 移动/等待/延迟/重试都算"在跟世界打交道"并清零 —— 所以"等玩家发货"这种长时间等待**永远不会**被停机。
+		// ⚠️ 计数单位是**条**（不是 tick）：每 tick 可能跑多条无动作控制条目，按 tick 计数会把
+		//    正常的长控制链误判成空转。这一点也解释了每 tick 那两道天花板为什么必须存在。
 		if (isPaced(state)) {
 			idleSpins = 0;
 		} else if (++idleSpins > MAX_IDLE_SPINS) {
 			halt(arm, "程序在空转（连续 " + MAX_IDLE_SPINS
-				+ " tick 没有移动也没有等待就绕回来了）：检查跳转/调用的目标，或给循环加一条「等待」");
+				+ " 条没有移动也没有等待就绕回来了）：检查跳转/调用的目标，或给循环加一条「等待」");
 			return;
 		}
 
@@ -283,31 +392,85 @@ public class ProgramRuntime {
 			return;
 		}
 
-		ArmProgramEntry entry = task.entries.get(entryIndex);
+		// ——— 本 tick 的连续推进循环 ———
+		// 每轮**重新读一次**任务与条目：游标可能被上一步推进（下一条 / 跳转 / 换任务 / 收工），
+		// 沿用旧的 `entry` 引用就会对着上一条干活（这正是"同一 tick 先 beginEntry 再 execute"
+		// 必须允许的那件事）。
+		while (true) {
+			if (idleCooldown > 0 || isHalted())
+				break; // 上一步可能刚把它设上（前置检查失败 / 停机）
+			if (tickBudgetUsed >= maxEntriesPerTick())
+				break; // 硬上限：本 tick 已经够多了，剩下的留给下一 tick
+			if (tickBudgetUsed >= (int) rateBudget)
+				break; // 本 tick 拿到的预算用完了（0.5 时就是"攒够 1 条才动一次"）
 
-		switch (state) {
-			case IDLE -> {
-				if (entry.delay > 0) {
-					timer = entry.delay;
-					state = EntryState.DELAY;
-				} else
+			task = program.task(taskIndex);
+			if (task == null) {
+				taskIndex = 0;
+				entryIndex = 0;
+				break;
+			}
+			if (entryIndex >= task.entries.size()) {
+				finishTask(arm, task); // 一轮走完（可能重跑 / 返回调用方 / 收工）：也是一次"推进"
+				tickBudgetUsed++;
+				continue;
+			}
+
+			ArmProgramEntry entry = task.entries.get(entryIndex);
+			int entryBefore = entryIndex;
+			int taskBefore = taskIndex;
+			int spinsBefore = idleSpins;
+			EntryState stateBefore = state;
+
+			switch (state) {
+				case IDLE -> {
+					if (entry.delay > 0) {
+						timer = entry.delay;
+						state = EntryState.DELAY;
+					} else
+						beginEntry(arm, task, entry);
+				}
+				case DELAY -> {
+					if (--timer <= 0)
+						beginEntry(arm, task, entry);
+				}
+				case RETRY -> {
+					waitElapsed++; // 按 tick 计时（前置检查的节流不改超时语义）
 					beginEntry(arm, task, entry);
+				}
+				case MOVING -> {
+					if (arm.hasArrived())
+						state = EntryState.EXECUTING;
+				}
+				case WAITING -> tickWait(arm, task, entry);
+				case EXECUTING -> execute(arm, task, entry);
+				case HALTED -> {
+				}
 			}
-			case DELAY -> {
-				if (--timer <= 0)
-					beginEntry(arm, task, entry);
+
+			// ★ 每一步都要花一笔预算（否则"一条自跳转脚本"能在同一 tick 里无限转下去）。
+			tickBudgetUsed++;
+
+			// ★ 让出：移动 / 等待 / 延迟 / 重试 = "在跟世界打交道、要花真实时间" ⇒ 本 tick 到此为止。
+			//   ⚠️ 这一条就是"有动作的条目**不许**变快"的实现：它们永远走这条 break，
+			//      一个 tick 只前进一小步，无论速率配成多少。
+			if (isPaced(state)) {
+				idleSpins = 0;
+				rateBudget = 0; // 待机/等待期间不攒账（见方法头）
+				break;
 			}
-			case RETRY -> {
-				waitElapsed++; // 按 tick 计时（前置检查的节流不改超时语义）
-				beginEntry(arm, task, entry);
-			}
-			case MOVING -> {
-				if (arm.hasArrived())
-					state = EntryState.EXECUTING;
-			}
-			case WAITING -> tickWait(arm, task, entry);
-			case EXECUTING -> execute(arm, task, entry);
-			case HALTED -> {
+
+			// ★ 空转守卫（按条计数）：走了这一步，却在"不花时间的状态"里原地没动 ——
+			//   既没推进游标、也没进任何要花时间的状态。`continue` 的那两种都不是空转：
+			//   没有转速 = 冻结；IDLE + 手臂还在折返 = 正常的等动画（旧实现按 tick 计数时也不计它）。
+			boolean progressed = entryIndex != entryBefore || taskIndex != taskBefore
+				|| idleSpins > spinsBefore;
+			if (!progressed && state == stateBefore && state == EntryState.IDLE) {
+				if (++idleSpins > MAX_IDLE_SPINS) {
+					halt(arm, "程序在空转（连续 " + MAX_IDLE_SPINS
+						+ " 条没有移动也没有等待就绕回来了）：检查跳转/调用的目标，或给循环加一条「等待」");
+					break;
+				}
 			}
 		}
 	}
@@ -1607,6 +1770,8 @@ public class ProgramRuntime {
 		loopCounter = 0;
 		idleSpins = 0;
 		idleCooldown = 0;
+		// 速率预算的小数余量也要归零：换卡 / 回到开头是"另一份程序"，不该继承上一份攒下的零头。
+		rateBudget = 0;
 		cachedPowerVersion = -1;
 		callStack.clear();
 		resetEntryCounters();

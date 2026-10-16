@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 import com.mojang.logging.LogUtils;
@@ -140,6 +141,17 @@ public class SequencedArmSelfTest {
 		// 反证方式：把 run/config/create_sequenced_mechanical_arm-common.toml 里的 maxTasks 改成 3，
 		// 重启后这行应当报 任务上限=3，并且下面 `任务数上限` 那条自检探到第 4 个就被挡。
 		LOGGER.info("[selftest] {}", SequencedArmConfig.effectiveSummary());
+		// ★ **老夹具统一钉住"一 tick 一步"**（速率 = 1.0），见 ProgramRuntime.pinRateForTests：
+		//   下面 40 多条夹具是照"每条条目 2 tick"写的（第几拍进 EXECUTING、第几拍出结果、
+		//   窗口内还在重试…），速率一变它们读到的中间状态就变了。**断言一条都不放松** ——
+		//   钉住速率才能证明"换了速率、老语义没变"；专门验速率的 checkEntryRate 会自己覆盖成
+		//   2.0 / 0.5 并**恢复**成 1.0。覆盖值优先于配置项（配置是运行期现读的，自检要的是钉死的节奏）。
+		//   ⚠️ 明确**依赖这条钉速**的夹具（去掉它必红，各自红在哪写在注释里）：
+		//   checkPrecheckRetryIsPerTick（只跑一个 tick 看黄字是否已清）、
+		//   checkSignalCutHasNoDuration（要在外面看见 EXECUTING）、
+		//   checkFilterOperation（重试窗口按 tick 数、runFilterEntry 要看见 EXECUTING→IDLE）、
+		//   checkCallRepeats / checkCallShift / checkCallSuccessExit（靠逐 tick 采样游标与栈深定位）。
+		ProgramRuntime.pinRateForTests(1.0);
 
 		checkDeployRecipes(server);
 		checkCardAndCoordinates(server);
@@ -179,6 +191,7 @@ public class SequencedArmSelfTest {
 		checkCallShift(server);
 		checkCallSuccessExit(server);
 		checkFilterOperation(server);
+		checkEntryRate(server);
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
@@ -1961,13 +1974,203 @@ public class SequencedArmSelfTest {
 			&& ProgramRuntime.isPaced(ProgramRuntime.EntryState.WAITING)
 			&& ProgramRuntime.isPaced(ProgramRuntime.EntryState.RETRY);
 
-		LOGGER.info("[selftest] 空转守卫: 等待/重试算在做事={} 空闲/执行不算={} 覆盖所有等待类={} 上限={}tick", paced,
+		LOGGER.info("[selftest] 空转守卫: 等待/重试算在做事={} 空闲/执行不算={} 覆盖所有等待类={} 上限={}条", paced,
 			notPaced, waitsCovered, ProgramRuntime.MAX_IDLE_SPINS);
 		if (!paced || !notPaced)
 			LOGGER.error("[selftest] 空转守卫的判据错了（paced={} notPaced={}）—— 会误杀等待或永远抓不到空转", paced,
 				notPaced);
 		if (!waitsCovered)
 			LOGGER.error("[selftest] 有等待类操作没有被 paced 覆盖 —— 它会被空转守卫当成空转停机");
+	}
+
+	/**
+	 * 「每 tick 推进多少条」的自检（用户本轮需求）：配置项 {@code entriesPerTick} 的运行时效果。
+	 *
+	 * <p><b>"一条"的口径 = 游标真的往前走了一次</b>（{@code succeed} / 跳转 / 收工 / 返回调用方），
+	 * 所以速率 = 2 时"两条相邻的无动作条目"必须在**同一个 tick** 内跑完 —— 它们各自要有一次
+	 * 状态机上前进一步（{@code beginEntry} → {@code execute}）+ 一次"游标前进"，一共 2 条预算。
+	 * 拿"状态机的一步"当一条的话它会要 4 条预算（每步 2 条），速率就只剩一半，所以这条断言
+	 * 专钉这一点。
+	 *
+	 * <p>夹具：主任务 = [发信号（把频率 f 置位）、取出 2,0,0（空置物台 ⇒ 前置检查永远不过 ⇒ 卡在它上面）]。
+	 * 两条都是**无动作**条目（不移动、不等待），第二条会在原地重试 —— 于是"游标停在下标 1"
+	 * 就是"两条都跑完了"的证据，而 `entryIndex == 0` 就是"一条都没跑"的证据。
+	 *
+	 * <p><b>反证（改哪一行会变红）</b>：
+	 * <ol>
+	 *   <li>{@code ProgramRuntime.tick} 的循环里删掉 {@code rateBudget += effectiveRate()}
+	 *       （或改成"每 tick 预算恒 1"）⇒ 速率 = 2 时 {@code 两条同一 tick 跑完} 变 false；</li>
+	 *   <li>把"一条"的口径改成按状态机步数记账（例如 {@code tickBudgetUsed += 2}）⇒ 同上变红；</li>
+	 *   <li>去掉循环里那句 `isPaced` 就让出 ⇒ {@code 移动/等待类不受影响} 变 false（取出会在同一 tick 里被连推）；</li>
+	 *   <li>谁把 0.5 实现成"每 tick 至少推进 1 条"（例如 {@code Math.max(1, …)}）⇒
+	 *       {@code 速率=0.5 时行为与旧版一致} 变 false（第 1 tick 就推进了）。</li>
+	 * </ol>
+	 */
+	private static void checkEntryRate(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 104, 200, spawn.getZ() + 104);
+		BlockPos depotPos = armPos.offset(2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldDepot = level.getBlockState(depotPos);
+		Couple<Frequency> freq = testFrequency(Items.CLAY_BALL, Items.BRICK);
+		boolean ran = false;
+		boolean twoPerTick = false;
+		boolean halfIsOldPace = false;
+		boolean pacedUnaffected = false;
+		boolean capHolds = false;
+		String detail = "没跑起来";
+		try {
+			BlockState depotState = stateOf("create:depot");
+			if (depotState == null) {
+				LOGGER.error("[selftest] 推进速率自检**没跑起来**：找不到 create:depot");
+				return;
+			}
+			level.getChunkAt(armPos);
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			level.setBlockAndUpdate(depotPos, depotState);
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 推进速率自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
+			ran = true;
+
+			// ——— ① 速率 = 2：两条相邻的无动作条目在**同一个 tick** 里跑完 ———
+			// 先按 1.0 换程序：`setProgram` 会走 `resetToStart`（速率预算余量归零），
+			// 于是下面第一 tick 拿到的预算就是**确定**的 2.0，不依赖上一段测试留下了什么零头。
+			ProgramRuntime.pinRateForTests(1.0);
+			arm.setProgram(rateProbeProgram(freq, depotPos.subtract(armPos)));
+			ProgramRuntime.pinRateForTests(2.0);
+			arm.runtime.tick(arm);
+			String afterFirst = "游标=" + arm.runtime.entryIndex + " 状态=" + arm.runtime.state + " 原因="
+				+ arm.runtime.getLastFailure();
+			// 判据只用"游标"和"状态"（不钉失败文案）：第一条发信号跑完 ⇒ 游标到 1；
+			// 第二条取出被"目标为空"挡住 ⇒ 停在 RETRY。两条都在同一个 tick 里发生。
+			twoPerTick = arm.runtime.entryIndex == 1 && arm.runtime.state == ProgramRuntime.EntryState.RETRY;
+			detail = "①" + afterFirst;
+
+			// ——— ② 速率 = 0.5：行为与旧版一致（一条 2 tick）———
+			ProgramRuntime.pinRateForTests(1.0);
+			arm.setProgram(rateProbeProgram(freq, depotPos.subtract(armPos)));
+			ProgramRuntime.pinRateForTests(0.5);
+			arm.runtime.tick(arm); // 第 1 tick：只攒到 0.5 条，一条都不该推进
+			boolean nothingYet = arm.runtime.entryIndex == 0;
+			arm.runtime.tick(arm); // 第 2 tick：攒够 1.0 条 ⇒ 第 1 条跑完、游标到 1
+			boolean oneAfterTwo = arm.runtime.entryIndex == 1;
+			halfIsOldPace = nothingYet && oneAfterTwo;
+			detail += " ②第1tick游标=" + (nothingYet ? 0 : arm.runtime.entryIndex) + " 第2tick游标=" + arm.runtime.entryIndex;
+
+			// ——— ③ 有动作的条目**一点都不变快**：速率拉到 32，一条「等待 20 tick」照样要 20 个真实 tick ———
+			// 判据不看"臂动没动"（那需要运动学），只看"游标停在第 2 条、状态是 WAITING、
+			// 后面那条发信号一次都没执行" —— 三条合起来证明速率管不到有动作的条目。
+			ProgramRuntime.pinRateForTests(1.0);
+			arm.setProgram(rateProbeWaitProgram(freq, 20));
+			ProgramRuntime.pinRateForTests(32.0);
+			for (int i = 0; i < 3; i++)
+				arm.runtime.tick(arm);
+			pacedUnaffected = arm.runtime.entryIndex == 1
+				&& arm.runtime.state == ProgramRuntime.EntryState.WAITING;
+			detail += " ③高倍率下等待:游标=" + arm.runtime.entryIndex + " 状态=" + arm.runtime.state;
+
+			// ——— ④ 每 tick 条数硬上限（防"一条自跳转脚本"卡在一个 tick 里）———
+			int capAtDefault = withRate(2.0, ProgramRuntime::maxEntriesPerTick);
+			int capAtMax = withRate(SequencedArmConfig.MAX_ENTRIES_PER_TICK, ProgramRuntime::maxEntriesPerTick);
+			capHolds = capAtDefault >= 2 && capAtDefault <= 8 && capAtMax == (int) SequencedArmConfig.MAX_ENTRIES_PER_TICK;
+			detail += " ④上限(速率2)=" + capAtDefault + " 上限(速率" + SequencedArmConfig.MAX_ENTRIES_PER_TICK + ")=" + capAtMax;
+
+			// 交回"一 tick 一步"给后面的夹具（它们全按老节奏写）
+			ProgramRuntime.pinRateForTests(1.0);
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			ProgramRuntime.pinRateForTests(1.0); // 异常路径也不能把速率留给后面的夹具
+			level.setBlockAndUpdate(depotPos, oldDepot);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 推进速率: 跑起来={} 速率2⇒两条同一tick跑完={} 速率0.5⇒与旧版一致(一条2tick)={} "
+			+ "有动作的条目不受影响={} 每tick硬上限={} （{}）", ran, twoPerTick, halfIsOldPace, pacedUnaffected, capHolds,
+			detail);
+		if (!ran)
+			LOGGER.error("[selftest] 推进速率自检**没跑起来**（{}）—— 等于没测", detail);
+		if (!twoPerTick)
+			LOGGER.error("[selftest] 速率=2 时两条相邻的无动作条目**没有在同一个 tick 里跑完**（{}）—— "
+				+ "两种可能：① 预算没按 entriesPerTick 给（还是每 tick 一条）；② 记账口径写成了"
+				+ "「状态机的一步 = 一条」（那样一次 beginEntry+execute 要 2 条预算，速率只剩一半）。"
+				+ "改的是 ProgramRuntime.tick 的预算那两行", detail);
+		if (!halfIsOldPace)
+			LOGGER.error("[selftest] 速率=0.5 时行为**与旧版不一致**（旧版是一条 2 tick：第 1 tick 不动、第 2 tick 出一条）"
+				+ "（{}）—— 小数没有跨 tick 累积，或者被 `Math.max(1, …)` 夹成了每 tick 至少一条", detail);
+		if (!pacedUnaffected)
+			LOGGER.error("[selftest] 有动作的条目被速率带快了（高倍率下「等待 20 tick」本该停在 WAITING、游标不动，"
+				+ "实际游标走了）（{}）—— 循环里那句 `isPaced` 的让出被删掉了？这一条就是"
+				+ "「慢的那些仍然按真实 tick 走」", detail);
+		if (!capHolds)
+			LOGGER.error("[selftest] 每 tick 的条目数硬上限不对（{}）—— `maxEntriesPerTick()` 必须 ≥ max(8, ceil(速率))，"
+				+ "否则「一条跳回自己的脚本」能在同一个 tick 里无限转（或者合法速率被上限卡住）", detail);
+	}
+
+	/** 在给定速率下问一个静态问题（自检专用：问完就恢复成 1.0，免得影响其它夹具）。 */
+	private static int withRate(double rate, IntSupplier question) {
+		ProgramRuntime.pinRateForTests(rate);
+		try {
+			return question.getAsInt();
+		} finally {
+			ProgramRuntime.pinRateForTests(1.0);
+		}
+	}
+
+	/**
+	 * 速率夹具：主任务 = [发信号（把 {@code freq} 置位）、取出 {@code offset}（置物台空着 ⇒ 前置检查必不过）]。
+	 *
+	 * <p>为什么用「发信号」当"无动作条目"：它不移动手臂、不等待，而且**效果能从外面看见**
+	 * （`hasAnyLoadedPower`）—— 判据因此不依赖任何内部字段。第二条用「取出」是为了用
+	 * "它在原地重试"当**终止标志**：游标停在下标 1 就是"两条都跑完了"。
+	 */
+	private static ArmProgram rateProbeProgram(Couple<Frequency> freq, BlockPos offset) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检速率";
+		ArmProgramEntry send = new ArmProgramEntry();
+		send.op = OperationType.SIGNAL;
+		send.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		send.waitForPowered = true;
+		send.frequency = freq;
+		task.entries.add(send);
+		ArmProgramEntry take = new ArmProgramEntry();
+		take.op = OperationType.TAKE;
+		take.offset = offset;
+		task.entries.add(take);
+		program.tasks.add(task);
+		return program;
+	}
+
+	/**
+	 * 速率夹具（有动作的那一支）：主任务 = [等待 {@code waitTicks} tick、发信号]。
+	 *
+	 * <p>「等待」必然进 {@code WAITING}（{@link ProgramRuntime#isPaced} 为真），而且它的时长
+	 * 只由 tick 累加决定；后面那条「发信号」是"速率有没有把它带快"的证人 —— 只要它还一次都没执行，
+	 * 就说明高倍率没能把有动作的条目推快。
+	 */
+	private static ArmProgram rateProbeWaitProgram(Couple<Frequency> freq, int waitTicks) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检速率等待";
+		ArmProgramEntry wait = new ArmProgramEntry();
+		wait.op = OperationType.WAIT;
+		wait.waitAmount = waitTicks;
+		wait.waitUnit = ArmProgramEntry.WaitUnit.TICK;
+		task.entries.add(wait);
+		ArmProgramEntry send = new ArmProgramEntry();
+		send.op = OperationType.SIGNAL;
+		send.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		send.waitForPowered = true;
+		send.frequency = freq;
+		task.entries.add(send);
+		program.tasks.add(task);
+		return program;
 	}
 
 	/**
