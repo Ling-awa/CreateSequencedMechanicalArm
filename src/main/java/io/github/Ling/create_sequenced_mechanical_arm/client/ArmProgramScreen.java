@@ -2969,8 +2969,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 						rebuildPending = true;
 					});
 				// ② 持续 = **数值 + 单位**（用户反馈第二轮：和等待/时限一样带 t/s/m 单位框）：
-				//    只有"发"才建 —— 接收信号没有"持续"这个概念，给它留空槽只是浪费（§7.16b 二 A 的补丁）。
-				if (entry.isSignalSend()) {
+				//    **只有「发送通电」才建** —— 判据是条目级的 hasSignalDuration()，不是 isSignalSend()：
+				//    接收只是阻塞等通电；而**中断是立即清除该频率**（用户本轮口径：无论是否无限保持、
+				//    有没有剩余时间），运行时 releaseSignal 当场就把那一频段清掉了。
+				//    给它们建这两个控件 = 给玩家两个**运行时一个字都不读**的空参数
+				//    （§7.16b 二 A 的补丁在这条口径下要收窄到 SEND_ON）。
+				if (entry.hasSignalDuration()) {
 					inlineInt(SIGNAL_TICKS_X, SIGNAL_TICKS_W, tr("entry.wait_amount"),
 						tr("hint.entry_signal_ticks"), 0, ArmProgramEntry.SIGNAL_MAX_AMOUNT,
 						// ⚠️ 框里回显的是**数值**（0–120），不是换算后的 ticks：
@@ -4564,7 +4568,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				sawFace = true;
 			// 第二行的 DATA_AREA 盒子数（§19 坐标统一之后："坐标空间"选择框已删，坐标只剩一个框）：
 			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；等待 = 时长 + 单位 = 2；
-			// 收发信号 = 模式 +（只有发才有）数值 + 单位 ⇒ **接收 1 / 发送 3**（两个频率格是**菜单幽灵槽**，不算盒子）；
+			// 收发信号 = 模式 +（**只有发送通电**才有）数值 + 单位 ⇒ 接收 / 中断 = 1、发送 = 3
+			//（两个频率格是**菜单幽灵槽**，不算盒子）；
 			// 调用 = 目标 = 1；抛错 = 信息 = 1；退出 = 0（终结操作，第二行不需要任何东西）
 			editingProp = null;
 			editing = new EditTarget(false, 0, e, null);
@@ -4573,8 +4578,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			editing = null;
 			int expected = switch (entry.op) {
 				case WAIT -> 2;
-				// 收发信号：模式 +（只有发才有）数值 + 单位 ⇒ 接收 1 / 发送 3（用户反馈第二轮加了单位框）
-				case SIGNAL -> entry.isSignalSend() ? 3 : 1;
+				// 收发信号：模式 +（只有**发送通电**才有）数值 + 单位 ⇒ 接收 / 中断 1、发送 3
+				//（用户本轮口径：「中断」= 立即清除，**不接收持续时间** ⇒ 它不再有数值/单位两个盒子）
+				case SIGNAL -> entry.hasSignalDuration() ? 3 : 1;
 				case WAIT_REDSTONE, CALL, THROW -> 1;
 				case BREAK -> 0;
 				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 = 2
@@ -4745,8 +4751,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					if (w > SIGNAL_MODE_W - 10)
 						return "模式选项放不下（" + option.getString() + " " + w + " > " + (SIGNAL_MODE_W - 10) + "）";
 				}
-				// ⑤ 接收 = 1 个盒子（只有模式）；发送 = 3 个（模式 + 数值 + 单位）
-				int want = mode == ArmProgramEntry.SignalMode.RECEIVE ? 1 : 3;
+				// ⑤ 接收 / 中断 = 1 个盒子（只有模式）；**发送通电** = 3 个（模式 + 数值 + 单位）
+				//    ——「中断」本轮起也在 1 个那一侧：它立即清除该频率，**不接收持续时间**
+				int want = mode == ArmProgramEntry.SignalMode.SEND_ON ? 3 : 1;
 				if (editorBoxes.size() != want)
 					return "模式 " + mode + " 的第二行应当是 " + want + " 个盒子，实际 " + editorBoxes.size();
 			}

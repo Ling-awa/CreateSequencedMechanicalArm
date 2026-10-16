@@ -188,10 +188,18 @@ public final class ArmEntryText {
 	 *   <li>接收信号：只有老卡（{@code redpow = false}，界面上已经没有这个开关了）才写
 	 *       {@code 等断电} —— 兼容清单 3："静默改行为不行，静默隐瞒更不行"。</li>
 	 * </ul>
+	 *
+	 * <p>★ 用户本轮口径：<b>中断没有持续时间</b>（它立即清除该频率，不管有没有剩余时间）⇒
+	 * 判据用 {@link ArmProgramEntry#hasSignalDuration()}，只有「发送通电」才可能写时间。
+	 * 旧写法问的是 {@code signalTicks() > 0}（= 任何"发"），于是老卡 / 预设里那条
+	 * {@code 中断} 带着残留的 {@code waitAmount} 时，卡片上会写一个**运行时根本不读**的时间
+	 * （"中断信号。1s"）—— 而 {@code ScriptDecompiler} 现在一个字都不写它，两处必须同口径。
 	 */
 	public static Component signalTailText(ArmProgramEntry entry) {
 		if (entry.isSignalReceive())
 			return entry.waitForPowered ? Component.empty() : tr("entry.signal_wait_off");
+		if (!entry.hasSignalDuration())
+			return Component.empty();
 		int ticks = entry.signalTicks();
 		if (ticks <= 0)
 			return Component.empty();

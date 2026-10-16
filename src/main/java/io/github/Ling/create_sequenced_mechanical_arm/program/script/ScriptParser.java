@@ -57,8 +57,9 @@ import net.minecraft.world.item.component.DyedItemColor;
  *     attack   0 0 0 face=up ok=goto 清理 fail=skip timeout=5s
  *     wait     5s
  *     wait_redstone on
- *     signal   recv on place=0t freq=iron_ingot + copper_ingot
+ *     signal   recv on freq=iron_ingot + copper_ingot
  *     signal   send_on place=0t freq=iron_ingot + copper_ingot
+ *     signal   send_off freq=iron_ingot + copper_ingot   &ast;/ 中断：立刻清除，**没有** place= &ast;/
  *     call     "搬一趟" repeat=3 shift=1,0,0
  *     break
  *     throw    "没材料"
@@ -1079,6 +1080,20 @@ public final class ScriptParser {
 					if (parsed.op != OperationType.SIGNAL) {
 						error(token.line(), "place 只对 signal 有意义");
 						return false;
+					}
+					// ★ 用户口径（本轮）：**中断没有持续时间** —— 它无论是否无限保持、有没有剩余时间，
+					//   都立即把该频率清除（电平 0 + 退网 + 取消未到期的脉冲）；**接收**只是等通电。
+					//   只有「发送通电」才有持续。所以这两种模式带 place= 是**明确报错**，
+					//   而不是静默忽略 —— 静默收下会让玩家以为"5 秒后才断"，行为与脚本写的刚好相反
+					//   （反编译侧同口径：ScriptDecompiler 对它们一个字都不写）。
+					//   ⚠️ 报了错**照样把这一行剩下的部分解析完**（只丢掉这个 place=），
+					//   不整条作废 —— 与上面"不需要坐标的操作"报错后继续是同一条纪律：
+					//   编译期严格不能把一整条信号操作吃掉（盘上只有文本，丢掉就是行为整个变掉）。
+					if (parsed.mode == SignalMode.SEND_OFF || parsed.mode == SignalMode.RECEIVE) {
+						error(token.line(), (parsed.mode == SignalMode.SEND_OFF ? "「中断」没有持续时间：它立刻清除该频率"
+							: "「接收」没有持续时间：它只是等该频率通电") + "（要持续时间请用 send_on）");
+						index++;
+						continue;
 					}
 					Time time = parseTime(value);
 					if (time == null) {

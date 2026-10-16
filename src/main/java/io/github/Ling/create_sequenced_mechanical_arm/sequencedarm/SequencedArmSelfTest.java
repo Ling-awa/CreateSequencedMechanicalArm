@@ -153,6 +153,7 @@ public class SequencedArmSelfTest {
 		checkWaitSemantics();
 		checkUsePlacesOnAir(server);
 		checkSignalSendReceive(server);
+		checkSignalCutHasNoDuration(server);
 		checkEntryPredicates();
 		checkSignalSendPreset();
 		checkArmPointClassification(server);
@@ -2195,7 +2196,10 @@ public class SequencedArmSelfTest {
 		boolean receiveClean = !recvTag.contains("sigmode");
 		ArmProgramEntry sendEntry = new ArmProgramEntry();
 		sendEntry.op = OperationType.SIGNAL;
-		sendEntry.signalMode = ArmProgramEntry.SignalMode.SEND_OFF;
+		// ⚠️ 旧口径这里是 SEND_OFF（那时"发"= 收发合一的发）。本轮用户口径把「中断」定成
+		//   **不接收持续时间**（立即清除该频率）⇒ 有持续时间的只剩「发送通电」，所以这条
+		//   "时长往返"的载体换成 SEND_ON —— 断言本身（signalTicks() == 3）一个字没动。
+		sendEntry.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
 		sendEntry.waitAmount = 3;
 		boolean sendTicksRoundTrip = ArmProgramEntry.load(sendEntry.save(registries), registries)
 			.signalTicks() == 3;
@@ -2212,7 +2216,7 @@ public class SequencedArmSelfTest {
 		if (!receiveClean)
 			LOGGER.error("[selftest] 收信号条目被写进了 sigmode（老卡不再逐字节不变）");
 		if (!sendTicksRoundTrip)
-			LOGGER.error("[selftest] 发信号的持续时长没有往返稳定（waitAmount=3）");
+			LOGGER.error("[selftest] 发信号的持续时长没有往返稳定（send_on + waitAmount=3）");
 		if (!legacyReceive)
 			LOGGER.error("[selftest] 缺 sigmode 的条目没有落在 RECEIVE");
 
@@ -2569,6 +2573,174 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 预设 signal_send 的第一条不是「发通电 + 一直保持」");
 		if (!releaseOff)
 			LOGGER.error("[selftest] 预设 signal_send 的最后一条不是「发断电」（电平 0 是合法的发送值）");
+	}
+
+	/**
+	 * 断言：「<b>中断</b>」（{@code SEND_OFF}）<b>没有持续时间</b> —— 用户本轮口径：
+	 * "关于收发信号，『中断』应该是立即把信号清除，无论是否无限或有剩余时间，所以应该不接收持续时间的参数。"
+	 *
+	 * <p>这条是**文本面 + 运行时**两侧一起钉。判据只有一个：{@link ArmProgramEntry#hasSignalDuration()}
+	 * （只有 {@code SEND_ON} 有持续时间），消费方是编辑器（数值/单位两个控件）、
+	 * {@code ScriptDecompiler}（{@code place=}）、{@code ScriptParser}（写 {@code place=} 报错）、
+	 * {@code ArmEntryText}（标题尾巴）。别对着"是不是发"（{@code isSignalSend()}）判 ——
+	 * 那个把中断也算成发，于是界面给控件、脚本要参数，而运行时**一个字都不读**。
+	 *
+	 * <p>反证（改哪一行会变红）：
+	 * <ul>
+	 *   <li>把 {@link ArmProgramEntry#hasSignalDuration()} 改成 {@code isSignalSend()}
+	 *       ⇒ ① 立刻红（反编译又写出 {@code send_off place=…}），② 也红（解析器收下 {@code place=} 不报错），
+	 *       ④ 第一条红（接收模式也变成"有持续时间"）；</li>
+	 *   <li>把 {@code ScriptDecompiler} 那支的 {@code else if (entry.hasSignalDuration())} 改回
+	 *       {@code else} ⇒ 只有 ① 红；把 {@code ScriptParser} 的两条模式判断删掉 ⇒ 只有 ② 红；</li>
+	 *   <li>把 {@code ArmProgramScreen} 的第二行判断改回 {@code entries.isSignalSend()} ⇒
+	 *       {@code signalRowProblem()} 的模式盒子数那条红（中断 1 ≠ 3）；</li>
+	 *   <li>把 {@code ProgramRuntime} 的 SIGNAL 分支中"中断"那支改成
+	 *       {@code emitSignal(entry.frequency, 0, entry.signalTicks())}（= 变成"发个 0 电平的脉冲"）
+	 *       ⇒ ③ 红：那一刻频率仍在表里 / 脉冲没被取消；</li>
+	 *   <li>把 {@code releaseSignal} 里的 {@code heldSignals.remove(freq)} 删掉 ⇒ ③ 红
+	 *       （{@code holdsSignal} 仍真）；把 {@code link.leaveNetwork(false)} 删掉 ⇒ ③ 红（电平还在 15）。</li>
+	 * </ul>
+	 */
+	private static void checkSignalCutHasNoDuration(MinecraftServer server) {
+		HolderLookup.Provider registries = server.registryAccess();
+
+		// ——— ① 反编译：中断条目**不含** place=；发送通电照旧写（对照） ———
+		ArmProgram probeProgram = new ArmProgram();
+		ArmProgramTask probeTask = new ArmProgramTask();
+		probeTask.name = "main";
+		ArmProgramEntry probeCut = new ArmProgramEntry();
+		probeCut.op = OperationType.SIGNAL;
+		probeCut.signalMode = ArmProgramEntry.SignalMode.SEND_OFF;
+		probeCut.waitForPowered = false;
+		probeCut.frequency = testFrequency(Items.REDSTONE_TORCH, Items.IRON_INGOT);
+		// 故意留一个"旧口径的残留值"：老卡 / 预设里那条中断就会带着它，
+		// 反编译器必须**照样一个字都不写**（写了它，玩家会以为"5 秒后才断"）
+		probeCut.waitAmount = 5;
+		probeCut.waitUnit = ArmProgramEntry.WaitUnit.SECOND;
+		ArmProgramEntry probeSend = new ArmProgramEntry();
+		probeSend.op = OperationType.SIGNAL;
+		probeSend.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		probeSend.frequency = testFrequency(Items.REDSTONE_TORCH, Items.IRON_INGOT);
+		probeSend.waitAmount = 0; // 0 = 一直保持：规范形式仍然要写出来（0t 与"没写"是两件事）
+		probeTask.entries.add(probeCut);
+		probeTask.entries.add(probeSend);
+		probeProgram.tasks.add(probeTask);
+		String text = ScriptCompiler.decompile(probeProgram, registries);
+		// ⚠️ 程序里只有一个任务、两条条目 ⇒ 反编译结果正好三行：「task main」+ 两条条目（一行一条）。
+		//   跳过头行、按顺序取前两条，而不是拿整份文本 contains：`place=` 也出现在**发送**那一行上，
+		//   笼统地 contains 会把"中断写了 place="与"发送写了 place="混成一件事。
+		String firstEntryLine = "";
+		String secondEntryLine = "";
+		for (String line : text.split("\n")) {
+			String trimmed = line.strip();
+			if (trimmed.startsWith("task"))
+				continue; // 只要条目行，跳过任务头
+			if (trimmed.isEmpty())
+				continue;
+			if (firstEntryLine.isEmpty())
+				firstEntryLine = trimmed;
+			else if (secondEntryLine.isEmpty())
+				secondEntryLine = trimmed;
+		}
+		boolean cutNoPlace = firstEntryLine.contains("send_off") && !firstEntryLine.contains("place=");
+		boolean sendOnKeepsPlace = secondEntryLine.contains("send_on") && secondEntryLine.contains("place=");
+		LOGGER.info("[selftest] 中断没有持续时间 反编译: 第1条=[{}] 第2条=[{}]", firstEntryLine, secondEntryLine);
+		if (!cutNoPlace)
+			LOGGER.error("[selftest] 中断条目反编译出了 place=（旧口径：中断被当成发，写了一个运行时根本不读的时长）");
+		if (!sendOnKeepsPlace)
+			LOGGER.error("[selftest] 发送通电条目没有写出 place=（0t = 一直保持必须写得出来，否则与「没写」分不清）");
+
+		// ——— ② 手写 place= 必须**明确报错**（中断 / 接收各一条），而 send_on 照旧收 ———
+		boolean cutPlaceRejected = reportsAt(registries,
+			"task main\n  signal send_off place=5s freq=redstone_torch + iron_ingot\n", 2, "中断");
+		boolean recvPlaceRejected = reportsAt(registries,
+			"task main\n  signal recv on place=5s freq=redstone_torch + iron_ingot\n", 2, "接收");
+		ScriptResult<ArmProgram> sendOk = ScriptCompiler.compile(
+			"task main\n  signal send_on place=5s freq=redstone_torch + iron_ingot\n", registries);
+		LOGGER.info("[selftest] 中断没有持续时间 脚本: 中断+place 报错={} 接收+place 报错={} send_on+place 编译过={}", cutPlaceRejected,
+			recvPlaceRejected, !sendOk.hasErrors());
+		if (!cutPlaceRejected)
+			LOGGER.error("[selftest] 手写的「中断 + place=5s」没有报错（静默收下会让玩家以为 5 秒后才断）");
+		if (!recvPlaceRejected)
+			LOGGER.error("[selftest] 手写的「接收 + place=5s」没有报错（接收只是等通电，没有持续时间）");
+		if (sendOk.hasErrors())
+			LOGGER.error("[selftest] send_on + place=5s 反而编译不过了：{}", ScriptCompiler.errorLines(sendOk.errors()));
+
+		// ——— ④ 判据本身：只有「发送通电」有持续时间（声明进来是为了让编译器盯着这个变量：
+		//     它一旦无人读，说明下面的断言被谁删掉了） ———
+		boolean predicateCorrect = !probeCut.hasSignalDuration()
+			&& !new ArmProgramEntry().hasSignalDuration() // 缺省 = RECEIVE
+			&& probeSend.hasSignalDuration();
+		LOGGER.info("[selftest] 中断没有持续时间 判据: 中断={} 接收={} 发送={}", probeCut.hasSignalDuration(),
+			new ArmProgramEntry().hasSignalDuration(), probeSend.hasSignalDuration());
+		if (!predicateCorrect)
+			LOGGER.error("[selftest] hasSignalDuration() 判据不对（中断 / 接收不该有持续时间，只有发送有）");
+
+		// ——— ③ 运行时：先给该频率一个"长期保持"的脉冲，再跑一条「中断」⇒ 当场清除 ———
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		// 位置与 checkSignalSendReceive 用的是同一块空地（不重叠：那一块用 +52..+2，这条用 +64）
+		BlockPos armPos = new BlockPos(spawn.getX() + 64, 201, spawn.getZ() + 58);
+		BlockState oldArm = level.getBlockState(armPos);
+		Couple<Frequency> freq = testFrequency(Items.CLAY_BALL, Items.BRICK);
+		boolean cutEntryRan = false;
+		boolean pulseCancelled = false;
+		boolean armPlaced = false;
+		boolean stillHeldAfterHold = false;
+		try {
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				armPlaced = false;
+			} else {
+				armPlaced = true;
+				arm.emitSignal(freq, 15, 0); // 15 = 通电、"长期保持"（没有剩余时间可以到期）
+				stillHeldAfterHold = arm.holdsSignal(freq) && arm.getArmLinkLevel() == 15
+					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(freq)
+					&& arm.runtime.tickArmLinkTimers(arm); // 未到期的脉冲计时器确实在跟着跑（对照组）
+				ArmProgram program = new ArmProgram();
+				ArmProgramTask task = new ArmProgramTask();
+				task.name = "cut";
+				ArmProgramEntry cut = new ArmProgramEntry();
+				cut.op = OperationType.SIGNAL;
+				cut.signalMode = ArmProgramEntry.SignalMode.SEND_OFF;
+				cut.waitForPowered = false;
+				cut.frequency = freq;
+				task.entries.add(cut);
+				program.tasks.add(task);
+				arm.setProgram(program);
+				arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
+				arm.runtime.resetToStart(arm);
+				arm.runtime.tick(arm); // 主循环：真正执行 SIGNAL 那一支（→ releaseSignal）
+				// 游标越过 0 号 = 那条「中断」**真的被执行过**（succeed → applySuccessExit 的 entryIndex++）。
+				// 没有这一条，"表是空的"可能只是"根本没人发过信号"—— 那是决策 85 里"测了空气"的那类假绿。
+				cutEntryRan = arm.runtime.entryIndex == 1;
+				arm.runtime.tick(arm);
+				// 三件事一起查（用户口径的核心）：① 表里**没有**这个频率了（不是"留着一个强度 0 的成员"）
+				// ② 网络里电平为 0（leaveNetwork 先归 0 再退网，少一步就留一个"永远通电"的频率）
+				// ③ 臂的发射电平也回 0，且**未到期的脉冲计时器没有东西可推**了（脉冲被取消）。
+				// ⚠️ 不用 `!isTransmittingTo(freq)`：它在"表里没有这条"时**也是 false**，
+				//   拿它当断言等于把"已经清掉"与"根本没有过"混成一件事（测了空气）。
+				pulseCancelled = !arm.holdsSignal(freq) && arm.heldSignalCount() == 0
+					&& !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(freq)
+					&& arm.getArmLinkLevel() == 0 && !arm.runtime.tickArmLinkTimers(arm);
+			}
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 中断立即清除 行为自检异常：{}", t.toString());
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+		LOGGER.info("[selftest] 中断没有持续时间 运行时: 臂放好={} 保持成立（相位对照）={} 中断条目被执行={} 中断当场清除={}", armPlaced,
+			stillHeldAfterHold, cutEntryRan, pulseCancelled);
+		if (!armPlaced)
+			LOGGER.error("[selftest] 中断立即清除 这条断言的前提不成立：臂的方块实体没建出来");
+		if (!stillHeldAfterHold)
+			LOGGER.error("[selftest] 反转前的对照组不对：发出去的 15 电平 + 长期保持没有成立（后面的\"当场清除\"就说明不了问题）");
+		if (!cutEntryRan)
+			LOGGER.error("[selftest] 那条「中断」条目没有被执行（游标没越过 0 号，后面的\"当场清除\"就是测了空气）");
+		if (!pulseCancelled)
+			LOGGER.error(
+				"[selftest] 「中断」没有立即清除该频率（用户口径：无论是否无限或有剩余时间，当场电平 0 + 退网 + 取消未到期脉冲）");
 	}
 
 	/**
@@ -5790,13 +5962,22 @@ public class SequencedArmSelfTest {
 			return where + "备注不同：[ " + showNote(a.note) + " ] → [ " + showNote(b.note) + " ]";
 		if (a.count != b.count)
 			return where + "个数变了：" + a.count + " → " + b.count;
-		if (a.waitAmount != b.waitAmount)
+		// ★ 「时长」只在**这一条真有持续时间**时才进文本，所以只有那种情况才比：
+		//   SIGNAL 里只有「发送通电」写 `place=`（用户本轮口径：中断 = 立即清除该频率、接收 = 等通电，
+		//   两者都**不接收**持续时间参数），WAIT 写自己的时长。拿空参数去比等于把模型里
+		//   那个"运行时一个字都不读"的残留值判成往返不变量 —— 那是**被这次推翻的旧口径**
+		//   （旧语料里 `signal send_off place=1s`、旧断言"中断也带持续"都按新口径改掉了：
+		//   语料里那行现在不含 place=，解析器对它报错；NBT 那条的载体换成 SEND_ON）。
+		//   判据只有一处：{@link ArmProgramEntry#hasSignalDuration()}。
+		boolean signalNoDuration = a.op == OperationType.SIGNAL && !a.hasSignalDuration()
+			|| (b.op == OperationType.SIGNAL && !b.hasSignalDuration());
+		if (!signalNoDuration && a.waitAmount != b.waitAmount)
 			return where + "时长变了：" + a.waitAmount + " → " + b.waitAmount;
-		if (a.waitUnit != b.waitUnit)
+		if (!signalNoDuration && a.waitUnit != b.waitUnit)
 			return where + "时长单位变了：" + a.waitUnit + " → " + b.waitUnit;
 		// 极性（等通电 / 等断电）**只对"收/等"有意义**：发信号（send_on / send_off）的强度由模式本身决定，
 		// 运行时不读这个字段（ProgramRuntime 的 SIGNAL 分支：收 = 阻塞等待走极性真值表；发 = 直接发/释放）。
-		// 所以文本面**有意**不为 send 携带它（§12.3：send_on/send_off 只带 place=），比较也必须放过 ——
+		// 所以文本面**有意**不为 send 携带它（§12.3：只有 send_on 带 place=，两种发都不带极性），比较也必须放过 ——
 		// 否则预设里那个"从 recv 改过来时留下的"残留值会把一条正确实现判红。
 		boolean sendMode = a.op == OperationType.SIGNAL && a.signalMode != ArmProgramEntry.SignalMode.RECEIVE;
 		if (!sendMode && a.waitForPowered != b.waitForPowered)
@@ -5923,11 +6104,15 @@ public class SequencedArmSelfTest {
 			task 子任务
 			  take 0 0 2
 			""");
+		// ⚠️ 这一份的 `send_off` 行**本轮改过**：原来是 `signal send_off place=1s freq=…`，
+		//    那是**被用户本轮口径推翻的旧写法** ——「中断」立即清除该频率，**不接收持续时间**，
+		//    所以它的规范形式里没有 `place=`，而手写 `place=` 现在会被解析器**明确报错**
+		//    （留在语料里会让这一份"编译不过"，整条不变量②跟着红）。
 		corpus.put("收发信号三种模式", """
 			task main loop=forever
 			  signal recv on freq=iron_ingot + copper_ingot
 			  signal send_on place=0t freq=iron_ingot + copper_ingot
-			  signal send_off place=1s freq=redstone_torch + {}
+			  signal send_off freq=redstone_torch + {}
 			""");
 		corpus.put("单位与时间", """
 			task main

@@ -198,9 +198,13 @@ public class ArmProgramEntry {
 	 */
 	public boolean waitForPowered = true;
 	/**
-	 * SIGNAL（收发信号）：模式 —— 收 / 发通电 / 发断电（§7.16b 一.2）。
+	 * SIGNAL（收发信号）：模式 —— 收 / 发通电 / 中断（§7.16b 一.2）。
 	 *
-	 * <p>{@code ordinal} 就是三选一选择框的下标（{@link #isSignalSend()} = {@code mode != RECEIVE}）。
+	 * <p>「中断」是**立即清除该频率**（用户本轮口径：无论是否无限保持、有没有剩余时间），
+	 * 只有「发送通电」有持续时间 —— 判据见 {@link #hasSignalDuration()}。
+	 *
+	 * <p>{@code ordinal} 就是三选一选择框的下标（{@link #isSignalSend()} = {@code mode != RECEIVE}；
+	 * "要不要持续时间"问 {@link #hasSignalDuration()}，只有 {@code SEND_ON} 有）。
 	 * 老卡没有 {@code sigmode} 键 ⇒ 缺省 {@code RECEIVE} ⇒ 行为与改造前完全一致。
 	 */
 	public SignalMode signalMode = SignalMode.RECEIVE;
@@ -293,11 +297,14 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * 发送持续的**数值**上限；{@code 0} = 一直保持（"占用 / 解除占用"就是这个），{@code >0} = 到点自动恢复。
+	 * 发送持续的**数值**上限；{@code 0} = 一直保持（"占用"就是这个），{@code >0} = 到点自动恢复。
 	 *
 	 * <p>⚠️ 这是**数值**、不是 ticks：真正的 ticks = 数值 × {@link #waitUnit}（用户反馈第二轮：
 	 * 持续控件和等待一样带 t/s/m 单位框，所以 {@link #signalTicks()} **必须按单位换算**）。
 	 * 数值范围与 WAIT 一致（0–120），于是最长的脉冲 = 120 m = 144000 ticks。
+	 *
+	 * <p>⚠️ 上限只管**有持续时间的那种模式**（{@link #hasSignalDuration()} 的「发送通电」）：
+	 * 「中断」立即清除该频率（用户本轮口径），它那条 {@code place=} / 数值框根本不存在。
 	 */
 	public static final int SIGNAL_MAX_AMOUNT = 120;
 
@@ -320,13 +327,33 @@ public class ArmProgramEntry {
 	}
 
 	/**
+	 * <b>这一条有没有"持续时间"参数</b> —— 只有「发送通电」（{@code SEND_ON}）有。
+	 *
+	 * <p>用户口径（本轮）：<b>「中断」是立即把信号清除</b>，无论这个频率是否无限保持、有没有剩余时间，
+	 * 它的运行时行为就是 {@code releaseSignal}（电平 0 + 退网 + 从表里移除 + 取消未到期的脉冲）；
+	 * 「接收」只是阻塞等通电。两者都**不接收持续时间** —— 于是"数值 + 单位"这两个控件
+	 * （以及脚本里的 {@code place=}）在它们身上是**空参数**，运行时一个字都不读。
+	 *
+	 * <p>为什么不能继续用 {@link #isSignalSend()} 当判据：那个是"不是收"（{@code SEND_ON} 与
+	 * {@code SEND_OFF} 都算），它的语义在别处（失败出口、频率绑定）仍然成立，所以**一个字都不改**；
+	 * 而"要不要持续时间"只认 {@code SEND_ON}。判据写在一起、只写一处，才不会出现
+	 * "界面给了空参数、脚本要求写 place=、运行时又不读"的三方分叉。
+	 */
+	public boolean hasSignalDuration() {
+		return signalMode == SignalMode.SEND_ON;
+	}
+
+	/**
 	 * 发送的**持续**时长（ticks）：{@code 0} = 一直保持，否则 {@code clamp(waitAmount,0,120) × 单位}。
 	 *
 	 * <p>⚠️ 单位换算**必须**走这条：用户反馈第二轮给持续控件加了 t/s/m 单位框，
 	 * "选 1 s 却只发 1 tick"就是显示与实际相反。换算表与 {@link #waitTicks()} 完全一致
 	 * （{@code t=1 / s=20 / m=1200}），只是**数值**字段仍复用 {@code waitAmount}。
 	 *
-	 * <p>收信号（{@code RECEIVE}）没有"持续"这个概念，返回 0。
+	 * <p>⚠️ 这里**有意**仍然只问 {@link #isSignalReceive()}（= 不区分 {@code SEND_ON} / {@code SEND_OFF}）：
+	 * 只改该改的地方、也不顺手改既有断言。"中断要不要持续时间"是**文本 / 界面 / 脚本**
+	 * 三个消费方的事，判据是 {@link #hasSignalDuration()}；这个方法的语义（"如果真按发送算，
+	 * 持续是多少"）保持不变，{@code DevPresets} 与既有自检都还按它读。
 	 */
 	public int signalTicks() {
 		if (isSignalReceive())
@@ -525,8 +552,11 @@ public class ArmProgramEntry {
 		// sigmode 缺键（老卡）= RECEIVE ⇒ 行为不变（兼容清单 2）；写的是**字符串**而不是 ordinal，
 		// 以后枚举增删项不会把老卡的"发"变成"收"（与 op/onok/timeout/urep 同一惯例）
 		entry.signalMode = enumOf(SignalMode.class, tag.getString("sigmode"), SignalMode.RECEIVE);
-		// 发信号的持续**数值**夹进与 WAIT 相同的 0..120（真正的 ticks = 数值 × 单位，见 signalTicks()）
-		if (entry.isSignalSend())
+		// **有持续时间**的信号（只有「发送通电」）的持续**数值**夹进与 WAIT 相同的 0..120
+		//（真正的 ticks = 数值 × 单位，见 signalTicks()）。判据是 hasSignalDuration() 而不是
+		// isSignalSend()：中断 / 接收那两种模式的 waitt 是**空参数**（文本面不写、运行时也不读），
+		// 读盘时再去动它就是"替玩家改一个他没有意义的值"—— 老卡里那个残留数字原样留着。
+		if (entry.hasSignalDuration())
 			entry.waitAmount = Math.max(0, Math.min(SIGNAL_MAX_AMOUNT, entry.waitAmount));
 		entry.frequency = readFrequency(tag, registries);
 		entry.callTarget = tag.getString("call");

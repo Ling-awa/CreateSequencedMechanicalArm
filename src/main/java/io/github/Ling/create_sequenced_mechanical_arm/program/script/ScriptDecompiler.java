@@ -162,7 +162,11 @@ public final class ScriptDecompiler {
 				if (entry.signalMode == SignalMode.RECEIVE)
 					out.append(' ')
 						.append(entry.waitForPowered ? "on" : "off");
-				else
+				// ★ 只有「发送通电」才写 `place=`（用户口径：**中断没有持续时间** —— 它立即清除
+				//   该频率，无论是否无限保持、有没有剩余时间；接收只是等通电）。
+				//   规范形式里给中断写上 `place=5s` 会让玩家以为"5 秒后才断"，而运行时
+				//   （ProgramRuntime 的 SIGNAL 分支 → `releaseSignal`）当场就把那一频段清掉了。
+				else if (entry.hasSignalDuration())
 					// 发信号：`place=` 永远是**数值 + 单位**（0t = 一直保持）；单位要写出来，
 					// 否则"0s 持续"与"0t 持续"分不清（signalTicks 按单位换算）。
 					out.append(" place=")
