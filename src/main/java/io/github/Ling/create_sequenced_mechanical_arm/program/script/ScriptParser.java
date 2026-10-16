@@ -59,7 +59,7 @@ import net.minecraft.world.item.component.DyedItemColor;
  *     wait_redstone on
  *     signal   recv on place=0t freq=iron_ingot + copper_ingot
  *     signal   send_on place=0t freq=iron_ingot + copper_ingot
- *     call     "搬一趟" repeat=3
+ *     call     "搬一趟" repeat=3 shift=1,0,0
  *     break
  *     throw    "没材料"
  * </pre>
@@ -790,6 +790,7 @@ public final class ScriptParser {
 		entry.signalMode = parsed.mode;
 		entry.callTarget = parsed.callTarget;
 		entry.callRepeat = parsed.callRepeat;
+		entry.callShift = parsed.callShift;
 		entry.errorMessage = parsed.error;
 		entry.unloadRepeat = parsed.repeat;
 		entry.unloadAmount = parsed.amount;
@@ -985,6 +986,47 @@ public final class ScriptParser {
 						return false;
 					}
 					index++;
+				}
+				// 「调用」的**调用偏移**：这个调用点让子任务里**需要坐标**的条目错开多少（相对量）。
+				// 反编译器只写**逗号那种**（`shift=1,0,0`，一个记号），但解析**逗号与空格都吃**
+				//（`shift=1 0 0`：后面两个裸记号跟着一起吃）—— 与"坐标 = 三个整数"同一口径。
+				case "shift" -> {
+					if (parsed.op != OperationType.CALL) {
+						error(token.line(), "shift 只对 call 有意义（它是「这个调用点让子任务错开多少」）");
+						return false;
+					}
+					if (parsed.sawCallShift) {
+						error(token.line(), "调用偏移只能写一次（shift=）");
+						return false;
+					}
+					parsed.sawCallShift = true;
+					index++;
+					List<String> parts = new ArrayList<>();
+					for (String piece : value.split("[,\\s]+"))
+						if (!piece.isEmpty())
+							parts.add(piece);
+					// 空格写法：后面两个是**裸记号**（没有 `=`）才吃；遇到下一个 key=value 就停 ——
+					// 那时分量不够，下面报错，绝不静默补 0（补 0 会让"写错了"变成"偏移不生效"）。
+					while (parts.size() < 3 && index < rest.size() && keyOf(rest.get(index)) == null) {
+						parts.add(valueOf(rest.get(index))
+							.trim());
+						index++;
+					}
+					if (parts.size() != 3) {
+						error(token.line(), "调用偏移要写三个整数（例如 shift=1,0,0）");
+						return false;
+					}
+					// 复用报错版的 intValue（范围与坐标共用 ScriptParser.COORD_LIMIT）：三个分量一起验，
+					// 任一不合法就整体作废 —— 半个偏移比没有偏移更难查。
+					Token x = new Token(parts.get(0), token.line(), token.col(), false);
+					Token y = new Token(parts.get(1), token.line(), token.col(), false);
+					Token z = new Token(parts.get(2), token.line(), token.col(), false);
+					Integer px = intValue(x, -COORD_LIMIT, COORD_LIMIT, "调用偏移 X");
+					Integer py = intValue(y, -COORD_LIMIT, COORD_LIMIT, "调用偏移 Y");
+					Integer pz = intValue(z, -COORD_LIMIT, COORD_LIMIT, "调用偏移 Z");
+					if (px == null || py == null || pz == null)
+						return false;
+					parsed.callShift = new BlockPos(px, py, pz);
 				}
 				case "amount" -> {
 					if (parsed.op != OperationType.UNLOAD) {
@@ -1621,6 +1663,9 @@ public final class ScriptParser {
 		SignalMode mode = SignalMode.RECEIVE;
 		String callTarget = "";
 		int callRepeat = 1;
+		/** CALL 的调用偏移（Δ）与"这个键见过没有"（重复写要报错，见 suffixes）。 */
+		BlockPos callShift = BlockPos.ZERO;
+		boolean sawCallShift;
 		String error = "";
 		UnloadRepeat repeat = UnloadRepeat.ONCE;
 		UnloadAmount amount = UnloadAmount.ONE_STACK;

@@ -206,6 +206,16 @@ public final class ScriptDecompiler {
 				if (entry.callRepeat != 1)
 					out.append(" repeat=")
 						.append(entry.callRepeat);
+				// 调用偏移（Δ）：**零偏移不写**（与 repeat=1 / count=1 同一惯例：默认值不进文本）。
+				// 规范写法是逗号那种（`shift=1,0,0`）—— 它在词法上是一个记号，往返最稳；
+				// 空格写法（`shift=1 0 0`）解析侧也吃，但反编译器永远只输出逗号那种。
+				if (entry.hasCallShift())
+					out.append(" shift=")
+						.append(entry.callShift.getX())
+						.append(',')
+						.append(entry.callShift.getY())
+						.append(',')
+						.append(entry.callShift.getZ());
 			}
 			case SIGNAL -> {
 				out.append(" freq=")

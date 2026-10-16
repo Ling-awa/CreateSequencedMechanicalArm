@@ -175,6 +175,7 @@ public class SequencedArmSelfTest {
 		checkStructureTransform();
 		checkLegacyJumpShift();
 		checkCallRepeats(server);
+		checkCallShift(server);
 		checkFilterOperation(server);
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
@@ -3515,7 +3516,241 @@ public class SequencedArmSelfTest {
 				+ "0 被当成有限次数了（{}）", detail);
 	}
 
-	/** 主任务 = [调用 sub ×repeats]；子任务 = [等待 0 tick]（每轮一两 tick 就完）。 */	private static ArmProgram callProgram(int repeats) {
+	/**
+	 * 「调用偏移」的端到端自检（用户口径：给「调用」加一个"偏移"，让同一个任务能被多个调用点复用）。
+	 *
+	 * <p>语义（照做，别"优化"）：它是**调用点上的一个 Δ** —— 该调用点生效期间，子任务里每个
+	 * {@code needsTarget()} 条目的世界目标 = 臂坐标 + 条目自己的 offset + Δ；嵌套叠加
+	 *（A→B→C 时 C 里的条目 = Δ1+Δ2）、返回调用方时恢复；<b>子任务自己的 offset 一个字节都不许改</b>
+	 *（那正是"可复用"的命门）；零偏移 = 什么都没加。
+	 *
+	 * <p>为什么必须跑真解释器：这三件事全是运行时行为，写在 GUI 或注释里都没有守卫
+	 *（§0.5："断言必须驱动真实入口"）。这里读 {@code runtime.pinOffset(arm)} —— 它走的就是**唯一那个
+	 * 咽喉** {@code ProgramRuntime.offsetOf}（世界目标 = 臂坐标 + 它的返回值），再直接读调用栈里的生效偏移。
+	 *
+	 * <p><b>六条各自怎么变红</b>：
+	 * <ol>
+	 *   <li>生效偏移 / 世界目标：把 {@code offsetOf} 里那句 {@code .offset(effectiveCallShift())} 删掉，
+	 *       或 {@code callTask} 压栈时把偏移写成 {@code BlockPos.ZERO} ⇒ 立红；
+	 *   <li>子任务自己的 offset 没被改：让实现"顺手改写子任务"（例如在 {@code callTask} 里遍历 callee
+	 *       把 Δ 加进每条的 offset）⇒ 立红 —— 这一条就是"可复用"的命门；
+	 *   <li>返回后调用方不受影响：把生效偏移改成"维护一个字段"（压栈时加、弹栈时忘了减）
+	 *       ⇒ 回到调用方后它还被 Δ 推着 ⇒ 立红；
+	 *   <li>嵌套叠加：压栈那句把 {@code effectiveCallShift()} 换成 ZERO（只留本层的 Δ）⇒ C 里少一层 ⇒ 红；
+	 *   <li>零偏移等于没加：让 {@code hasCallShift()} 恒真（save 无条件写 {@code coff} / 反编译无条件写
+	 *       {@code shift=}）⇒ 前两条立红；
+	 *   <li>存读不丢：把 {@code save()} 里 {@code f.put("s", …)} 删掉（或 load 恒取 ZERO）⇒ 立红。
+	 * </ol>
+	 */
+	private static void checkCallShift(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 84, 200, spawn.getZ() + 84);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockPos delta = new BlockPos(3, -1, 2); // 非零、一眼看得出：(2,0,0) + Δ = (5,-1,2)
+		BlockPos subOffset = new BlockPos(2, 0, 0);
+		BlockPos callerOffset = new BlockPos(1, 0, 0);
+		BlockPos delta1 = new BlockPos(2, 0, 0);
+		BlockPos delta2 = new BlockPos(-1, 3, 1);
+		boolean shiftApplied = false;
+		boolean targetMoved = false;
+		boolean subOffsetUntouched = false;
+		boolean callerRestored = false;
+		boolean nested = false;
+		boolean zeroEqualsUnset = false;
+		boolean nbtKeeps = false;
+		BlockPos shiftAtB = null;
+		BlockPos nestedPin = null;
+		String detail;
+		try {
+			level.getChunkAt(armPos); // 启动期新放的方块要先加载区块（照 checkAttackAndMine 的前三次踩坑）
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				detail = "臂的方块实体没建出来";
+			} else {
+				arm.setSpeed(32);
+
+				// ——— ① 生效偏移 = 调用点的 Δ；② 子任务自己的 offset 没被改 ———
+				// 子任务里那条 take **连不上交互点**（臂在天上）⇒ 它一直待在重试窗口里，当前条目稳定停在
+				// 它上面（pinOffset 才读得到）—— 这也正好是"跑完之后"那一刻。
+				arm.setProgram(callShiftProbe(delta));
+				// 压栈不在第一条 tick：CALL 先 beginEntry（不碰世界 ⇒ 直接 EXECUTING），下一 tick 才
+				// callTask 压帧（与 checkCallRepeats 同一条时序，不能假设一 tick 就到）。
+				for (int i = 0; i < 40 && arm.runtime.callStack.isEmpty(); i++)
+					arm.runtime.tick(arm);
+				BlockPos wantTarget = subOffset.offset(delta);
+				shiftApplied = arm.runtime.effectiveCallShift()
+					.equals(delta);
+				targetMoved = wantTarget.equals(arm.runtime.pinOffset(arm));
+				// 逐条比**子任务自己的**字段（不是"目标算没算对"）：可复用全靠它一个字节都没被动过
+				ArmProgramTask subTask = arm.getProgram().tasks.size() > 1 ? arm.getProgram().tasks.get(1) : null;
+				subOffsetUntouched = subTask != null && subTask.entries.size() == 1
+					&& subTask.entries.get(0).offset.equals(subOffset);
+				// 日志要报的是**①那一刻**的现场（后面几段会把程序换掉，跑到最后再读就成了另一个场景的值）
+				String firstShift = posText(arm.runtime.effectiveCallShift());
+				String firstPin = posText(arm.runtime.pinOffset(arm));
+
+				// ——— ⑥ 存读不丢：把带偏移的调用栈存下、读回，生效偏移不变 ———
+				CompoundTag stackTag = arm.runtime.save();
+				ProgramRuntime restored = new ProgramRuntime();
+				restored.load(stackTag);
+				nbtKeeps = restored.effectiveCallShift()
+					.equals(delta) && restored.save()
+						.equals(stackTag);
+
+				// ——— ③ 返回后调用方不受影响 ———
+				// 子任务换成「等待 0 tick」（一两 tick 就跑完 ⇒ 回到调用方的第 2 条 take）。
+				arm.setProgram(callShiftReturnProbe(delta, callerOffset));
+				boolean backToCaller = false;
+				for (int i = 0; i < 120 && !backToCaller; i++) {
+					arm.runtime.tick(arm);
+					backToCaller = arm.runtime.callStack.isEmpty() && arm.runtime.entryIndex == 1;
+				}
+				callerRestored = backToCaller && arm.runtime.effectiveCallShift()
+					.equals(BlockPos.ZERO) && callerOffset.equals(arm.runtime.pinOffset(arm));
+
+				// ——— ④ 嵌套叠加：main → B(Δ1) → C(Δ2)，C 里条目的生效偏移应当是 Δ1+Δ2 ———
+				arm.setProgram(callShiftNestedProbe(delta1, delta2, subOffset));
+				for (int i = 0; i < 120 && nestedPin == null; i++) {
+					arm.runtime.tick(arm);
+					if (arm.runtime.callStack.size() == 1 && shiftAtB == null)
+						shiftAtB = arm.runtime.effectiveCallShift();
+					else if (arm.runtime.callStack.size() == 2 && nestedPin == null)
+						nestedPin = arm.runtime.pinOffset(arm);
+				}
+				nested = delta1.equals(shiftAtB) && subOffset.offset(delta1)
+					.offset(delta2)
+					.equals(nestedPin);
+
+				// ——— ⑤ 零偏移 = 什么都没加（存储 / 文本 / 运行时三处等价）———
+				ArmProgram zeroProgram = callShiftProbe(BlockPos.ZERO);
+				ArmProgramEntry zeroCall = zeroProgram.tasks.get(0).entries.get(0);
+				ArmProgramEntry plainCall = new ArmProgramEntry();
+				plainCall.op = OperationType.CALL;
+				plainCall.callTarget = "sub";
+				// ① 存储：零偏移不写 coff 键 ⇒ 与"从没设过这个字段"的条目逐字节相同
+				boolean zeroNoKey = zeroCall.save(server.registryAccess())
+					.equals(plainCall.save(server.registryAccess()));
+				// ② 文本：零偏移不进 .sma（与 repeat=1 / count=1 同一惯例）
+				boolean zeroNoText = !ScriptCompiler.decompile(zeroProgram, server.registryAccess())
+					.contains("shift=");
+				// ③ 运行时：子任务里条目的目标就是条目自己的 offset（不多不少）
+				arm.setProgram(zeroProgram);
+				for (int i = 0; i < 40 && arm.runtime.callStack.isEmpty(); i++)
+					arm.runtime.tick(arm);
+				boolean zeroRuntime = arm.runtime.effectiveCallShift()
+					.equals(BlockPos.ZERO) && subOffset.equals(arm.runtime.pinOffset(arm));
+				zeroEqualsUnset = zeroNoKey && zeroNoText && zeroRuntime;
+
+				detail = "Δ=" + posText(delta) + " 生效=" + firstShift + " 目标=" + firstPin + " B层="
+					+ posText(shiftAtB) + " C层=" + posText(nestedPin);
+			}
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 调用偏移: 生效偏移=调用点Δ={} 子任务条目目标挪了Δ={} 子任务offset没被改={} "
+			+ "返回后调用方不受影响={} 嵌套叠加(Δ1+Δ2)={} 零偏移=没加={} 存读不丢={} （{}）", shiftApplied, targetMoved,
+			subOffsetUntouched, callerRestored, nested, zeroEqualsUnset, nbtKeeps, detail);
+		if (!shiftApplied)
+			LOGGER.error("[selftest] 调用偏移没有生效（栈顶那一帧里的 Δ 不对）—— 子任务的目标不会挪（{}）", detail);
+		if (!targetMoved)
+			LOGGER.error("[selftest] 子任务里 needsTarget() 条目的世界目标不是「臂坐标 + offset + Δ」——"
+				+ "叠加点不在 offsetOf 里、或根本没叠（{}）", detail);
+		if (!subOffsetUntouched)
+			LOGGER.error("[selftest] 子任务自己的 offset 被改动了 —— 那就不是「调用点上的 Δ」，"
+				+ "同一个任务没法被复用（{}）", detail);
+		if (!callerRestored)
+			LOGGER.error("[selftest] 返回调用方之后偏移没有恢复（调用方条目的目标还带着 Δ）（{}）", detail);
+		if (!nested)
+			LOGGER.error("[selftest] 嵌套调用没有叠加（C 里条目的生效偏移应当是 Δ1+Δ2）（{}）", detail);
+		if (!zeroEqualsUnset)
+			LOGGER.error("[selftest] 零偏移与「没设过这个字段」不等价（不该写 NBT 键 / 不该进文本 / 不该改目标）（{}）",
+				detail);
+		if (!nbtKeeps)
+			LOGGER.error("[selftest] 调用偏移过不了 Runtime 的 NBT 往返（臂卸载再载入后子任务的目标会跳回去）（{}）",
+				detail);
+	}
+
+	/** 调试用：BlockPos → {@code x,y,z}；null（没有目标）→ "无"。 */
+	private static String posText(@Nullable BlockPos pos) {
+		return pos == null ? "无" : pos.getX() + "," + pos.getY() + "," + pos.getZ();
+	}
+
+	/** 夹具 A：main = [调用 sub shift=Δ]，sub = [取出 2 0 0]（连不上交互点 ⇒ 一直重试在它上面）。 */
+	private static ArmProgram callShiftProbe(BlockPos delta) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask main = new ArmProgramTask();
+		main.name = "main";
+		main.entries.add(callShiftEntry("sub", delta, 1));
+		program.tasks.add(main);
+		ArmProgramTask sub = new ArmProgramTask();
+		sub.name = "sub";
+		sub.entries.add(takeEntryAt(new BlockPos(2, 0, 0)));
+		program.tasks.add(sub);
+		return program;
+	}
+
+	/** 夹具 B（返回后恢复）：同上，但子任务换成「等待 0 tick」，main 第 2 条是取物 {@code callerOffset}。 */
+	private static ArmProgram callShiftReturnProbe(BlockPos delta, BlockPos callerOffset) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask main = new ArmProgramTask();
+		main.name = "main";
+		main.entries.add(callShiftEntry("sub", delta, 1));
+		main.entries.add(takeEntryAt(callerOffset));
+		program.tasks.add(main);
+		ArmProgramTask sub = new ArmProgramTask();
+		sub.name = "sub";
+		ArmProgramEntry wait = new ArmProgramEntry();
+		wait.op = OperationType.WAIT;
+		wait.waitAmount = 0;
+		wait.waitUnit = ArmProgramEntry.WaitUnit.TICK;
+		sub.entries.add(wait);
+		program.tasks.add(sub);
+		return program;
+	}
+
+	/** 夹具 C（嵌套）：main → 调用 B(Δ1)；B = [调用 C(Δ2)]；C = [取出 2 0 0]。 */
+	private static ArmProgram callShiftNestedProbe(BlockPos delta1, BlockPos delta2, BlockPos subOffset) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask main = new ArmProgramTask();
+		main.name = "main";
+		main.entries.add(callShiftEntry("B", delta1, 1));
+		program.tasks.add(main);
+		ArmProgramTask b = new ArmProgramTask();
+		b.name = "B";
+		b.entries.add(callShiftEntry("C", delta2, 1));
+		program.tasks.add(b);
+		ArmProgramTask c = new ArmProgramTask();
+		c.name = "C";
+		c.entries.add(takeEntryAt(subOffset));
+		program.tasks.add(c);
+		return program;
+	}
+
+	/** 一条「调用」：目标名 + 调用偏移 Δ + 轮次（夹具用，别处不要拿它当"新建条目"）。 */
+	private static ArmProgramEntry callShiftEntry(String target, BlockPos shift, int repeats) {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.CALL;
+		entry.callTarget = target;
+		entry.callShift = shift;
+		entry.callRepeat = repeats;
+		return entry;
+	}
+
+	/** 一条「取出」：坐标就是它的 offset。 */
+	private static ArmProgramEntry takeEntryAt(BlockPos offset) {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.TAKE;
+		entry.offset = offset;
+		return entry;
+	}
+
+	/** 主任务 = [调用 sub ×repeats]；子任务 = [等待 0 tick]（每轮一两 tick 就完）。 */
+	private static ArmProgram callProgram(int repeats) {
 		ArmProgram program = new ArmProgram();
 		ArmProgramTask main = new ArmProgramTask();
 		main.name = "main";
@@ -5073,6 +5308,10 @@ public class SequencedArmSelfTest {
 			return where + "调用目标变了：" + a.callTarget + " → " + b.callTarget;
 		if (a.callRepeat != b.callRepeat)
 			return where + "调用次数变了：" + a.callRepeat + " → " + b.callRepeat;
+		// ★ 调用偏移也要逐字段往返：加了字段却忘了写进文本的症状是**静默的**（子任务目标不挪，
+		//   看起来"这条调用本来就没偏移"）—— 这段比较本身就是不变量①的守卫。
+		if (!a.callShift.equals(b.callShift))
+			return where + "调用偏移变了：" + a.callShift.toShortString() + " → " + b.callShift.toShortString();
 		if (!a.errorMessage.equals(b.errorMessage))
 			return where + "错误信息变了";
 		if (a.unloadRepeat != b.unloadRepeat)
@@ -5173,6 +5412,17 @@ public class SequencedArmSelfTest {
 			  call 子任务 repeat=64
 			task 子任务
 			  break
+			""");
+		// 「调用偏移」（用户口径：调用点上的 Δ，让同一个任务被多个调用点复用）。
+		// 两条各钉一种写法：逗号那种是**反编译器的规范形式**（往返必须一字不变），
+		// 空格那种是"与坐标同一种三个整数"的手写容忍（反编译器会把规范形式再写回逗号那种）。
+		// 零偏移**不写**这条惯例由 checkCallShift 的"零偏移 = 没加"顶着。
+		corpus.put("调用偏移", """
+			task 主任务
+			  call 子任务 repeat=2 shift=1,0,0
+			  call 子任务 shift=-3 2 -1
+			task 子任务
+			  take 0 0 2
 			""");
 		corpus.put("收发信号三种模式", """
 			task main loop=forever

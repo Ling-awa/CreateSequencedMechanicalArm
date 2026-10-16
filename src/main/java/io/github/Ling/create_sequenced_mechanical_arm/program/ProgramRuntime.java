@@ -29,6 +29,7 @@ import com.simibubi.create.foundation.recipe.RecipeApplier;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.crafting.Recipe;
@@ -133,8 +134,14 @@ public class ProgramRuntime {
 	 */
 	public final List<Frame> callStack = new ArrayList<>();
 
-	/** 一层调用：回到 {@code returnTask} 的 {@code returnEntry}；带上是调用方当时的循环计数。 */
-	public record Frame(int returnTask, int returnEntry, int callerLoopCounter, int repeatsLeft) {
+	/**
+	 * 一层调用：回到 {@code returnTask} 的 {@code returnEntry}；带上是调用方当时的循环计数。
+	 *
+	 * <p>★ {@code entryShift} = <b>进入这个被调任务时生效的**调用偏移**</b>（见
+	 * {@link ArmProgramEntry#callShift}）= 调用方那一刻的生效偏移 + 那条调用卡自己的 Δ。
+	 * 它随帧一起压栈、随帧一起弹掉，所以"返回调用方就恢复"是**结构上**成立的（不需要额外的恢复代码）。
+	 */
+	public record Frame(int returnTask, int returnEntry, int callerLoopCounter, int repeatsLeft, BlockPos entryShift) {
 		/** 这个调用点还要让子任务再跑几轮（第 1 轮算在 {@code repeatsLeft} 里）。 */
 		public boolean hasAnotherRound() {
 			// ★ 0 = 无限循环（用户第四十轮）：不能递减、也不返回 —— 要停就靠「中断」/停机，或者子任务里的「退出」
@@ -144,8 +151,29 @@ public class ProgramRuntime {
 		/** 一轮跑完之后的剩余轮次；「无限」永远是「无限」（不许把 0 减成 -1 再当成"还剩 0 轮"）。 */
 		public Frame withOneFewerRepeat() {
 			return repeatsLeft == ArmProgramEntry.CALL_REPEAT_INFINITE ? this
-				: new Frame(returnTask, returnEntry, callerLoopCounter, repeatsLeft - 1);
+				: new Frame(returnTask, returnEntry, callerLoopCounter, repeatsLeft - 1, entryShift);
 		}
+	}
+
+	/**
+	 * <b>当前生效的调用偏移</b>（相对量，见 {@link ArmProgramEntry#callShift}）——
+	 * 世界目标 = {@code 臂坐标 + 条目 offset + 这个值}，叠加点在 {@link #offsetOf} 一处。
+	 *
+	 * <p><b>为什么"按栈顶读"而不是像 {@code loopCounter} 那样维护一个字段</b>（三选一里选这个）：
+	 * <ul>
+	 *   <li><b>没有第二份真相</b>：它是 {@code callStack} 的**纯函数**（栈空 = 主任务 = 0），
+	 *       所以 {@code callStack.clear()}（程序被换 / 任务数变了）、{@code endTask} 弹帧、
+	 *       {@code resetCallScopeIfOutside} 跳回调用方 —— 这些路径**一处都不用改**就不可能忘；
+	 *       维护字段的话每一处都要手动恢复，漏一处就是"返回后调用方还在偏移"（决策 68/85 那类分叉）；</li>
+	 *   <li><b>存读一致</b>：{@code save/load} 只要把每帧的偏移存成键，读回来栈顶就是答案，
+	 *       不需要再存一个"当前值"、也就不会出现"栈与当前值对不上"；</li>
+	 *   <li><b>性能可忽略</b>：栈深上限 {@link #MAX_CALL_DEPTH} = 8，而这里只是读栈顶一个字段
+	 *       （{@code pinOffset} 每 tick 被问几次，与它同量级）。</li>
+	 * </ul>
+	 */
+	public BlockPos effectiveCallShift() {
+		return callStack.isEmpty() ? BlockPos.ZERO : callStack.get(callStack.size() - 1)
+			.entryShift();
 	}
 
 	// ——— 瞬态 ———
@@ -219,6 +247,7 @@ public class ProgramRuntime {
 
 		// §7.6 v4：没有调度器了 —— 谁在跑就是谁。任务数变了（卡被编辑过）就回到主任务。
 		if (program.task(taskIndex) == null) {
+			// 栈一清，生效的调用偏移自动回到 0（它是栈的纯函数，见 effectiveCallShift）
 			callStack.clear();
 			taskIndex = 0;
 			entryIndex = 0;
@@ -314,7 +343,10 @@ public class ProgramRuntime {
 			return;
 		}
 		callStack.add(new Frame(taskIndex, entryIndex + 1, loopCounter,
-			ArmProgramEntry.clampCallRepeat(entry.callRepeat)));
+			ArmProgramEntry.clampCallRepeat(entry.callRepeat),
+			// ★ 进入子任务时生效的调用偏移 = 调用方此刻的生效偏移 + 这条调用卡的 Δ（嵌套因此自然叠加：
+			//   A→B(Δ1)→C(Δ2) 时 C 的帧里存的就是 Δ1+Δ2）。弹帧即恢复，不需要单独的恢复代码。
+			effectiveCallShift().offset(entry.callShift)));
 		taskIndex = calleeIndex;
 		entryIndex = 0;
 		loopCounter = 0;
@@ -340,6 +372,9 @@ public class ProgramRuntime {
 			taskIndex = frame.returnTask();
 			entryIndex = frame.returnEntry();
 			loopCounter = frame.callerLoopCounter();
+			// ★ **调用偏移在这里"恢复"**：它没有单独的字段要写回去 —— 弹掉这一帧之后
+			//   `effectiveCallShift()` 读到的就是栈顶那一帧（父任务）的偏移，主任务则是 0。
+			//   这就是"返回调用方时恢复"与"存读一致"都不用额外代码的原因（见 effectiveCallShift）。
 			state = EntryState.IDLE;
 			resetEntryCounters();
 			if (failed) {
@@ -480,6 +515,8 @@ public class ProgramRuntime {
 		Level level = arm.getLevel();
 		if (level == null)
 			return "世界未加载";
+		// ⚠️ `offset` 是**调用方（beginEntry）已经过 offsetOf 的那一份** —— 里面已经含了当前生效的
+		//    调用偏移。这里再 offset(callShift) 一次就是叠两遍（这是"叠加只在 offsetOf 一处"的另一半）。
 		BlockPos target = arm.getBlockPos()
 			.offset(offset);
 
@@ -595,7 +632,7 @@ public class ProgramRuntime {
 	 * 才询问机器（`BeltInventory:268-297`），而 {@code handleProcessingOnAllItems} 的范围是整格（±.51）——
 	 * 不额外加这一条，手臂就会在半路动手（用户第二十七轮续四十一实测："物品还没有运动到正中间，动力臂就已经组装了"）。
 	 */
-	private static boolean anyProcessable(Level level, SequencedArmBlockEntity arm, ArmProgramEntry entry,
+	private boolean anyProcessable(Level level, SequencedArmBlockEntity arm, ArmProgramEntry entry,
 		IItemHandler handler, ItemStack applicator) {
 		TransportedItemStackHandlerBehaviour transport = beltBehaviourAt(level, arm, entry);
 		if (transport != null) {
@@ -627,14 +664,30 @@ public class ProgramRuntime {
 		idleCooldown = Math.max(idleCooldown, ticks);
 	}
 
-	private static BlockPos offsetOf(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
-		// ★ 条目 offset **永远相对执行它的那条臂**（PLAN.md §19.7 的用户口径）：
-		// 世界目标 = `arm.getBlockPos().offset(offset)`（见 preCheckFailure）⇒ 这里直接返回 offset。
-		// 卡上的**录制原点**（用户第四十轮起它住在卡上，不在程序里）不参与运行时 ——
-		// "插卡平移"那个函数（ProgramCoordinates.rebaseTo）已删。
-		// ⚠️ 谁要是想在这里加上原点 / 臂位置之类的平移，请先看自检里那条
-		//    "同一张卡插进两条位置不同的臂，两次 offset 必须完全相同" —— 那条断言就是拦这个的。
-		return entry.offset;
+	/**
+	 * <b>条目 → 世界目标</b>的**唯一咽喉**：返回"相对本臂"的最终偏移
+	 * （世界目标 = {@code arm.getBlockPos().offset(offsetOf(...))}）。
+	 *
+	 * <p>★ 条目 off**永远相对执行它的那条臂**（PLAN.md §19.7 的用户口径）：这里直接返回
+	 * {@code entry.offset} **加上当前生效的调用偏移**（{@link #effectiveCallShift()}）。
+	 * 卡上的**录制原点**（用户第四十轮起它住在卡上，不在程序里）不参与运行时 ——
+	 * "插卡平移"那个函数（ProgramCoordinates.rebaseTo）已删。
+	 *
+	 * <p>★ <b>调用偏移只在这里叠加一处，别在别处再叠一遍</b>（决策 68/85："判据/换算写两份必然分叉"）。
+	 * 运行时所有要世界目标的地方都从这里取：{@code beginEntry}（→ {@code preCheckFailure} 与
+	 * {@code arm.beginMove}）、{@code DEPOSIT}/{@code UNLOAD}/{@code ATTACK}/{@code MINE}/
+	 * {@code USE} 的坐标、{@code beltBehaviourAt}、{@code restartMove}、{@code peekHandler}
+	 * （认领/前置检查读的那一格）、「过滤」容器模式的 {@code peekContainerHandler}（读哪个方块）、
+	 * 以及对外暴露的 {@code pinOffset} / {@code entryOffset}。唯一另一处涉及
+	 * {@code 臂坐标 + 偏移} 的算式在 {@code preCheckFailure} 里，它吃的是**本方法已经算好的结果**
+	 * （由 {@code beginEntry} 传下去），所以那里<b>不得</b>再加一次。
+	 *
+	 * <p>⚠️ 谁要是想在这里加上卡上的原点 / 臂位置之类的平移，请先看自检里那条
+	 * "同一张卡插进两条位置不同的臂，两次 offset 必须完全相同" —— 那条断言就是拦这个的。
+	 * （调用偏移不违反它：它是**程序里写着的**相对量，与臂在哪无关。）
+	 */
+	private BlockPos offsetOf(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
+		return entry.offset.offset(effectiveCallShift());
 	}
 
 	private void execute(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
@@ -962,7 +1015,7 @@ public class ProgramRuntime {
 	}
 
 	/** 目标方块是传送带就返回它承载物品的 behaviour（否则 null ⇒ 走普通容器那条路）。 */
-	private static TransportedItemStackHandlerBehaviour beltBehaviourAt(Level level, SequencedArmBlockEntity arm,
+	private TransportedItemStackHandlerBehaviour beltBehaviourAt(Level level, SequencedArmBlockEntity arm,
 		ArmProgramEntry entry) {
 		if (!(level.getBlockEntity(arm.getBlockPos()
 			.offset(offsetOf(arm, entry))) instanceof BeltBlockEntity belt))
@@ -1416,6 +1469,9 @@ public class ProgramRuntime {
 	/**
 	 * 跳转到别的任务时收拾一下调用栈：与调用不同，跳转是**单向**的，没有返回地址可言。
 	 * 如果目标任务正好在栈上（说明是"跳回调用者"），就把那层弹掉，避免栈里留下永远回不去的记录。
+	 *
+	 * <p>⚠️ 调用偏移**不需要在这里手动还原**：它按栈顶算（{@link #effectiveCallShift()}），
+	 * 弹掉几层就自然回到父层 / 主任务（0）—— 这正是"不维护第二个字段"的收益。
 	 */
 	private void resetCallScopeIfOutside(ArmProgram program, int newTask) {
 		while (!callStack.isEmpty()) {
@@ -1537,6 +1593,9 @@ public class ProgramRuntime {
 			f.putInt("e", frame.returnEntry());
 			f.putInt("l", frame.callerLoopCounter());
 			f.putInt("r", frame.repeatsLeft()); // 调用点还剩几轮（不存的话重登后会多跑/少跑）
+			// ★ 进入这个被调任务时生效的**调用偏移**（键 `s` = shift）：不存的话，重登之后
+			//   子任务的目标会**跳回**没加偏移的位置（用户口径里的"臂卸载再载入时偏移不能丢"）。
+			f.put("s", NbtUtils.writeBlockPos(frame.entryShift()));
 			stack.add(f);
 		}
 		tag.put("stack", stack);
@@ -1561,8 +1620,11 @@ public class ProgramRuntime {
 		for (int i = 0; i < stack.size(); i++) {
 			CompoundTag f = stack.getCompound(i);
 			// 缺 r → 1（照 ArmProgramEntry.load 的理由：0 现在是"无限"这个**合法值**，不能拿它兜底）
+			// 缺 s = 不是三长整数数组（老存档 / 没设偏移的调用）⇒ 回落 (0,0,0)：行为与改造前一致
 			callStack.add(new Frame(f.getInt("t"), f.getInt("e"), f.getInt("l"),
-				f.contains("r") ? ArmProgramEntry.clampCallRepeat(f.getInt("r")) : 1));
+				f.contains("r") ? ArmProgramEntry.clampCallRepeat(f.getInt("r")) : 1,
+				NbtUtils.readBlockPos(f, "s")
+					.orElse(BlockPos.ZERO)));
 		}
 		idleSpins = tag.getInt("spins");
 		if (tag.contains("error")) {

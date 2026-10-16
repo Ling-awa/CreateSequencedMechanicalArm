@@ -1907,9 +1907,58 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					ArmEntryText.unloadAmountText(entry), UnloadAmount.values(), UnloadAmount.ONE_STACK,
 					() -> entry.unloadAmount, v -> entry.unloadAmount = v));
 			}
-			case CALL -> props.add(intProp(tr("entry.call_repeat"), tr("hint.entry_call_repeat"),
-				ArmEntryText.callRepeatText(entry), 1, ArmProgramEntry.CALL_REPEAT_INFINITE,
-				ArmProgramEntry.MAX_CALL_REPEAT, () -> entry.callRepeat, v -> entry.callRepeat = v));
+			case CALL -> {
+				props.add(intProp(tr("entry.call_repeat"), tr("hint.entry_call_repeat"),
+					ArmEntryText.callRepeatText(entry), 1, ArmProgramEntry.CALL_REPEAT_INFINITE,
+					ArmProgramEntry.MAX_CALL_REPEAT, () -> entry.callRepeat, v -> entry.callRepeat = v));
+				// 「调用偏移」（用户口径：调用点上的 Δ）：这个调用点生效期间，子任务里每个**需要坐标**的
+				// 条目都按「臂坐标 + 条目偏移 + 这个 Δ」算目标（嵌套叠加、返回恢复）。默认 (0,0,0) = 不改。
+				// 控件照本文件既有的"三整数文本"（坐标框那一路：textField + parseTriple），**不新造控件**；
+				// 一个框装 x,y,z（逗号或空格都吃），留空 = 清回零（垃圾桶也能清）。
+				props.add(new Prop(tr("entry.call_shift"), tr("hint.entry_call_shift"),
+					ArmEntryText.callShiftText(entry), true) {
+					@Override
+					boolean isSet() {
+						return entry.hasCallShift();
+					}
+
+					@Override
+					void reset() {
+						entry.callShift = BlockPos.ZERO;
+					}
+
+					@Override
+					void reveal() {
+						// 加进来就得**一眼看得出它非零**（否则玩家会以为"加了却没生效"）：给 (1,0,0)。
+						entry.callShift = new BlockPos(1, 0, 0);
+					}
+
+					@Override
+					void buildEditor() {
+						textField(FIELD_X, ROW2_Y, FIELD_W, tr("entry.call_shift"), tr("hint.entry_call_shift"),
+							entry.callShift.getX() + "," + entry.callShift.getY() + "," + entry.callShift.getZ(), 24,
+							v -> {
+								// 留空 = 清回"不加偏移"（这是除了垃圾桶之外的清空入口）；
+								// 半截 / 非法输入保持原值 —— 与坐标框同一口径（边打字边改坏值是另一类 bug）。
+								if (v.trim()
+									.isEmpty()) {
+									if (entry.hasCallShift()) {
+										pushUndo();
+										entry.callShift = BlockPos.ZERO;
+										dirty = true;
+									}
+									return;
+								}
+								BlockPos parsed = parseTriple(v);
+								if (parsed != null && !parsed.equals(entry.callShift)) {
+									pushUndo();
+									entry.callShift = parsed;
+									dirty = true;
+								}
+							});
+					}
+				});
+			}
 			default -> {
 			}
 		}
@@ -4870,7 +4919,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		"opt.signal", "opt.signal_receive", "opt.signal_send_on", "opt.signal_send_off",
 		"chip.signal_recv", "chip.signal_send", "chip.signal_cut",
 		"hint.entry_signal_mode", "hint.entry_signal_ticks",
-		"entry.signal_mode", "entry.signal_wait_off", "entry.wait_unit"
+		"entry.signal_mode", "entry.signal_wait_off", "entry.wait_unit",
+		// 「调用偏移」（本轮新增）：属性名 / 悬停提示 / 胶囊片段 —— 三个键都要在两边语言文件里，
+		// 少一个的表现是"界面上显示裸键名"，编译与运行都不报错（所以放在这张表里一起守）。
+		"entry.call_shift", "hint.entry_call_shift", "chip.call_shift"
 	};
 
 	/**

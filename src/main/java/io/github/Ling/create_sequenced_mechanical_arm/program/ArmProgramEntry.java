@@ -240,6 +240,35 @@ public class ArmProgramEntry {
 	 * 谁都算不清的组合。
 	 */
 	public int callRepeat = 1;
+
+	/**
+	 * CALL（调用任务）：<b>调用偏移</b>（用户口径："给调用添加一个新属性，偏移 —— 输入一个坐标，
+	 * 调用子任务的时候把全部坐标增加对应的偏移量"，为的是同一个任务被多个调用点复用）。
+	 *
+	 * <p><b>它是"调用点上的一个 Δ"，不是对子任务的永久改写</b>：该调用点生效期间，子任务里每个
+	 * {@link #needsTarget()} 的条目，世界目标 = {@code 臂坐标 + 条目自己的 offset + 这个 Δ}；
+	 * 子任务自己的 {@link #offset} <b>一个字节都不改</b>（所以同一个任务被调用多次、每次错开一点才成立）。
+	 * 叠加只发生在**唯一那个咽喉**：{@code ProgramRuntime.offsetOf}（见那里的说明）。
+	 *
+	 * <p><b>嵌套叠加、返回恢复</b>：A 调 B（Δ1）、B 调 C（Δ2）⇒ C 里条目的生效偏移 = Δ1 + Δ2、
+	 * B 里条目的 = Δ1；回到调用方时恢复（调用方的条目不受子任务那边影响）。
+	 * 没人调的任务（主任务 / 被「跳转」过去而不是被调用的任务）生效偏移 = 0。
+	 *
+	 * <p>只影响**需要坐标**的条目：等待 / 等红石 / 信号 / 退出 / 抛错没有目标，原样不动。
+	 *
+	 * <p>★ <b>卡级「坐标偏移」（{@link ArmProgram#shiftAllOffsets}）有意不搬这个字段</b>：
+	 * 它是**相对量**，整套平移时子任务自己的 {@code offset} 已经跟着搬过一次了，这里再搬一次
+	 * 就是加两遍（子任务的目标会跑偏 Δ）。别"顺手"把它也搬了。
+	 *
+	 * <p>默认 {@link BlockPos#ZERO} = 什么都不改；缺 {@code coff} 键（老卡）也回落它 ⇒ 行为与改造前一致。
+	 */
+	public BlockPos callShift = BlockPos.ZERO;
+
+	/** 调用偏移是不是**非默认**（非零）—— 判定只此一处：存读、脚本写出、胶囊、编辑器属性表都问它。 */
+	public boolean hasCallShift() {
+		return !callShift.equals(BlockPos.ZERO);
+	}
+
 	/** THROW（抛出错误）：写给护目镜看的错误信息。 */
 	public String errorMessage = "";
 	/** UNLOAD：卸一次还是卸到空。 */
@@ -450,6 +479,10 @@ public class ArmProgramEntry {
 				.saveOptional(registries)));
 		tag.putString("call", callTarget);
 		tag.putInt("calln", callRepeat);
+		// 调用偏移：**缺省（0,0,0）不写这个键** —— 与 sigmode / fsrc 同一手法：没设过偏移的老卡
+		// 存取前后 NBT 逐字节不变（相容性清单：不许静默扰动老数据）。
+		if (hasCallShift())
+			tag.put("coff", NbtUtils.writeBlockPos(callShift));
 		tag.putString("err", errorMessage);
 		tag.putString("urep", unloadRepeat.name());
 		tag.putString("uamt", unloadAmount.name());
@@ -497,6 +530,10 @@ public class ArmProgramEntry {
 		// 缺 calln（老卡）→ 1 轮。⚠️ 这里**不能**再靠 `Math.max(1, …)` 兜底了：0 现在是**合法值**
 		// （无限循环），拿 0 当"缺键"会让所有没写过这个键的数据静默变成无限循环。所以先看键在不在。
 		entry.callRepeat = tag.contains("calln") ? clampCallRepeat(tag.getInt("calln")) : 1;
+		// 调用偏移：**缺键（老卡 / 没设过）= (0,0,0)** ⇒ 行为与改造前完全一致。
+		// ⚠️ 判据必须写成"键在不在"，不能像 calln 那样只靠取值 —— 这里 (0,0,0) 恰好就是缺省值，
+		// 但显式写出来才不依赖 NBTHelper 对缺键的处理（缺键回落是契约的一部分）。
+		entry.callShift = tag.contains("coff") ? NBTHelper.readBlockPos(tag, "coff") : BlockPos.ZERO;
 		entry.errorMessage = tag.getString("err");
 		entry.unloadRepeat = enumOf(UnloadRepeat.class, tag.getString("urep"), UnloadRepeat.ONCE);
 		entry.unloadAmount = enumOf(UnloadAmount.class, tag.getString("uamt"), UnloadAmount.ONE_STACK);
@@ -594,9 +631,15 @@ public class ArmProgramEntry {
 							.getStack()
 							.getHoverName()
 							.getString());
-		if (op == OperationType.CALL)
+		if (op == OperationType.CALL) {
 			sb.append(" call=")
 				.append(callTarget);
+			// 调用偏移（与 source=/item= 同一类"非默认才报"的写法）：零偏移不写，
+			// 否则每条调用都拖着一段 noise，真正错开的那条反而看不出来。
+			if (hasCallShift())
+				sb.append(" shift=")
+					.append(callShift.toShortString());
+		}
 		if (op == OperationType.THROW)
 			sb.append(" error=")
 				.append(errorMessage);

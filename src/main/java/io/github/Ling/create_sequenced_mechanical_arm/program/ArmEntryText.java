@@ -95,6 +95,12 @@ public final class ArmEntryText {
 				else if (entry.callRepeat > 1)
 					suffix.append("  ×")
 						.append(entry.callRepeat);
+				// 调用偏移（Δ）：**非零才补一段**（默认值不显示，与"默认值不占胶囊位"一致）。
+				// ★ 它是**这个调用点**的相对量，不是子任务的坐标 —— 文案里别写成"子任务被移动到 x,y,z"。
+				if (entry.hasCallShift())
+					suffix.append("  ")
+						.append(callShiftText(entry)
+							.getString());
 			}
 			case FILTER -> {
 				// 过滤的必需信息 = 过滤位置（用户口径：必要输入为"幽灵物品 + 过滤位置"）。
@@ -300,11 +306,24 @@ public final class ArmEntryText {
 		return tr("chip.count", entry.count);
 	}
 
-	/** 调用点的轮次胶囊：{@code 调用 3 次}（用户第二十七轮）；0 = 无限循环 ⇒ {@code 调用 无限}。 */
+	/**
+	 * 调用点的轮次胶囊：{@code 调用 3 次}（用户第二十七轮）；0 = 无限循环 ⇒ {@code 调用 无限}。
+	 */
 	public static Component callRepeatText(ArmProgramEntry entry) {
 		if (entry.callRepeat == ArmProgramEntry.CALL_REPEAT_INFINITE)
 			return tr("chip.call_repeat_inf");
 		return tr("chip.call_repeat", entry.callRepeat);
+	}
+
+	/**
+	 * 「调用偏移」胶囊：{@code +偏移 1,0,0}（零偏移时不该出现在卡片上，判据是
+	 * {@link ArmProgramEntry#hasCallShift()}）。
+	 *
+	 * <p><b>两个地方共用这一句</b>：标题芯片上那条尾巴（{@link #base}）与属性行上的胶囊
+	 * —— 文案只有一处实现，两边说法不会分叉（本类开头的理由）。
+	 */
+	public static Component callShiftText(ArmProgramEntry entry) {
+		return tr("chip.call_shift", entry.callShift.getX() + "," + entry.callShift.getY() + "," + entry.callShift.getZ());
 	}
 
 	public static Component unloadRepeatText(ArmProgramEntry entry) {
