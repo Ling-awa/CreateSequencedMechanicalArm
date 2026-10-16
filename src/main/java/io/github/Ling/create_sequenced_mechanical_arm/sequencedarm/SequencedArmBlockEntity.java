@@ -319,6 +319,29 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		return handlerAt(target);
 	}
 
+	/**
+	 * 只读地解析<b>任何方块</b>那一格的物品能力（不过 Create 交互点那道门）——
+	 * 「过滤」的外部容器模式要用它。
+	 *
+	 * <p><b>为什么不能用 {@link #peekHandler} / {@link #getMovingHandler}</b>：
+	 * <ul>
+	 *   <li>{@link #peekHandler} 要求目标必须是 Create 注册过的交互点，而**箱子 / 保险箱这类普通容器
+	 *       不在那张表里**（{@code AllArmInteractionPointTypes} 只有置物台 / 带子 / 漏斗 …），
+	 *       结果会把"能读的箱子"报成"目标不是容器"；</li>
+	 *   <li>{@link #getMovingHandler} 认的是 {@code movingOffset}（"上一次真的动过身"的那一格）——
+	 *       而**过滤是控制类操作、臂根本不动**，那个偏移永远停在别的条目上
+	 *       （拿它读容器就是"读错方块"，而且是静默的）。</li>
+	 * </ul>
+	 * 所以这里按调用方给的**偏移**现场解析，读的能力入口与 {@link #handlerAt} 完全同一个
+	 * （{@code Capabilities.ItemHandler.BLOCK}，面 {@code UP}）——不新增第二条读法。
+	 */
+	@Nullable
+	public IItemHandler peekContainerHandler(BlockPos offset) {
+		if (level == null || level.isClientSide)
+			return null;
+		return handlerAt(worldPosition.offset(offset));
+	}
+
 	public void cancelMove() {
 		// 松手时也要把**客户端那一半**（带子物品的 `locked`）放开 —— 它不会被自动消费，
 		// 忘了清就会在客户端留下一件永远不动的"幽灵物品"（服务端那边 `lockedExternally` 本来就是每 tick 重设的）。

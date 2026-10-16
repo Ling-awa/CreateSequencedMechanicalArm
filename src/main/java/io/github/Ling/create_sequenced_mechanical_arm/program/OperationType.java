@@ -7,8 +7,14 @@ package io.github.Ling.create_sequenced_mechanical_arm.program;
  * 左右键（ATTACK/MINE）与 USE 的成败无法客观判定 —— 它们"发起即算完成"，
  * 因此也不需要为它们设超时（§7.7 v2 里超时只是"重试到点"的出口）。
  *
- * <p><b>控制类操作</b>（不碰世界，只改程序的走向）：{@link #SIGNAL}（收发红石链接频率信号）、
- * {@link #CALL}（调用子任务）、{@link #BREAK}（退出当前任务）、{@link #THROW}（抛错并失败结束）。
+ * <p>★ 这个标志只有<b>一个</b>含义：<b>臂要不要伸过去</b>（运行时由 {@code ArmProgramEntry.movesArm()}
+ * 转发）。它<b>不是</b>"这一条有没有世界坐标参数"—— 那个问题按条目问
+ * {@code ArmProgramEntry.needsTarget()}（过滤的容器模式有坐标、却不移动，
+ * 因为那个坐标是"读哪个方块"的数据参数）。两者混用就会让臂为了一次纯判断先飞过去。
+ *
+ * <p><b>控制类操作</b>（不做动作，只改程序的走向或做一次判断）：{@link #SIGNAL}（收发红石链接频率信号）、
+ * {@link #CALL}（调用子任务）、{@link #BREAK}（退出当前任务）、{@link #THROW}（抛错并失败结束）、
+ * {@link #FILTER}（过滤）。
  * 它们的文档见 §7.6「单线程 + 调用栈」。
  */
 public enum OperationType {
@@ -41,16 +47,21 @@ public enum OperationType {
 	/**
 	 * 过滤：拿一份物品去比"幽灵过滤器物品"，按 Create 本体那套过滤规则判符合 / 不符合。
 	 *
-	 * <p><b>为什么 {@code requiresTarget} 是 false</b>：过滤位置<b>二选一</b> ——
-	 * {@code HELD}（手上那份存货，{@code SequencedArmBlockEntity.getHeldItem()}）或
-	 * {@code CONTAINER}（一个要坐标的外部容器）。**类型本身不天生要求坐标**，
-	 * 所以这条判据只能按<b>条目</b>问（见 {@link ArmProgramEntry#needsTarget()}）——
-	 * 运行时预检查、GUI 的坐标/朝向行、录制门禁、坐标平移、范围提示全部走那一个方法。
+	 * <p><b>为什么 {@code requiresTarget} 是 false</b>（用户口径：过滤是<b>控制类</b>操作，
+	 * "判断过滤是一瞬间的事情，不需要动力臂伸过去判断"，跟「等红石 / 收信号」一样<b>没有动作</b>）：
+	 * 它<b>不移动手臂</b>、不做任何动作，只是一次纯判断 —— 所以这里的 false 就是
+	 * "臂不要伸过去"那个判据（{@code ArmProgramEntry.movesArm()} 直接转发它）。
 	 *
-	 * <p>⚠️ 也正是因为这个 false，它**不会**出现在 {@link #recordable()}（世界里录进卡的操作）里 ——
+	 * <p>⚠️ 但过滤位置是<b>二选一</b>的条目级属性：{@code HELD}（手上那份存货，
+	 * {@code SequencedArmBlockEntity.getHeldItem()}）没有坐标，{@code CONTAINER}（一个要坐标的外部容器）
+	 * 有坐标 —— 那个坐标是"<b>读哪个方块</b>"的<b>数据参数</b>，不是"伸过去的目标"。
+	 * 所以"这一条有没有坐标参数"要按<b>条目</b>问（{@link ArmProgramEntry#needsTarget()}）：
+	 * GUI 的坐标行、整套平移 / 蓝图变换 / 世界描框 / 撤销比对 / 脚本写出全部走那一个方法。
+	 * <b>两件事、两处判据</b>（一个问"要不要伸过去"、一个问"有没有坐标"），混用就会让臂先飞过去。
+	 *
+	 * <p>⚠️ 也正是因为这个 false，它<b>不会</b>出现在 {@link #recordable()}（世界里录进卡的操作）里 ——
 	 * 过滤是纯判断、不对世界做动作，跟"等红石"一样属于"在编辑器里加"的操作；
-	 * 外部容器的坐标在编辑器第二行填（容器模式下 {@code needsTarget()} 为真，
-	 * 所以那三格坐标框照常出现）。
+	 * 外部容器的坐标在编辑器第二行填。
 	 */
 	FILTER(false),
 	WAIT(false),
@@ -131,9 +142,16 @@ public enum OperationType {
 		return this == TAKE || this == DEPOSIT || this == UNLOAD || this == DEPLOY;
 	}
 
-	/** 控制类操作：不碰世界、没有"做完"的语义（除了 CALL/SIGNAL 有成败）。 */
+	/**
+	 * 控制类操作：**不做动作** —— 只改程序的走向或做一次纯判断
+	 * （调用 / 退出 / 抛错 / 收发信号 / 过滤）。
+	 *
+	 * <p>★ 「过滤」在这一族（用户口径："过滤是控制类操作，它不是交互"）：臂不移动、不对世界做任何动作
+	 * （只**读**一格），因此它和等待类一样**没有"伸过去"那一段** ——
+	 * 运行时那条判据在 {@code ArmProgramEntry.movesArm()}。
+	 */
 	public boolean isControl() {
-		return this == CALL || this == BREAK || this == THROW || this == SIGNAL;
+		return this == CALL || this == BREAK || this == THROW || this == SIGNAL || this == FILTER;
 	}
 
 	// ⚠️ 「有没有重试窗口 / 有没有失败出口」**不再按类型判**：同一条 SIGNAL，收有、发没有。

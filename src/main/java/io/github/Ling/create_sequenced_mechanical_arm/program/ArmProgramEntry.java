@@ -52,6 +52,15 @@ public class ArmProgramEntry {
 	/**
 	 * 失败出口（{@code -1} = 失败就**一直重试**，默认）。与"时限"合成一个属性后，
 	 * 界面上的「失败后」= {@code failAmount}×{@code failUnit} 的等待窗口 + {@link #onTimeout} 的去向。
+	 *
+	 * <p><b>默认值 {@code -1} 的语义就是"默认重试"</b>：新建条目（GUI 的"插入新操作"、脚本里
+	 * 没写 {@code timeout=}）拿到的都是它 ⇒ 不成功就原地一直重试，去向不生效。
+	 *
+	 * <p>★ 对「过滤」这是**有意**的（用户口径：过滤是控制类操作、失败默认 retry）：过滤是**控制类操作** ——
+	 * 一瞬间的判断，臂不移动、不做任何动作，因此没有"做错了"这回事；不匹配只意味着"时机还没到"
+	 * （容器里还是上一批货 / 手上那份还没被取货条目换掉），与「等红石 / 收信号」是**同一类**。
+	 * 所以过滤默认重试，要让它"不匹配就改道"必须自己把时限与「失败后」的去向设出来 ——
+	 * 而不是像上一版那样一不匹配就直接走失败出口。判据见 {@link #hasRetryWindow()}。
 	 */
 	public int failAmount = -1;
 	public WaitUnit failUnit = WaitUnit.TICK;
@@ -301,7 +310,7 @@ public class ArmProgramEntry {
 	 * 这条操作失败时是"<b>重试到时限</b>"吗 —— 即它有没有一个**重试窗口**
 	 * （从 {@code OperationType} 的类型级谓词搬来，按**条目**判定：§7.16b 一.2、决策 73）。
 	 *
-	 * <p>取 / 放 / 卸 / 组装 / 等红石：不成功就是"还没成功"，会原地重试到「失败后」的时限，
+	 * <p>取 / 放 / 卸 / 组装 / 等红石 / **过滤**：不成功就是"还没成功"，会原地重试到「失败后」的时限，
 	 * 时限到了才走去向。没有重试窗口、但有失败出口的（攻击 / 调用）失败是**立刻有结论**的 ——
 	 * 挖不动、被领地保护、子任务抛错，等下去不会有任何变化。
 	 *
@@ -314,10 +323,14 @@ public class ArmProgramEntry {
 	 * <p>⚠️ {@code SIGNAL} 是**同一条操作，收有窗口、发没有**（发送不会失败）：
 	 * 收信号 {@code signalMode == RECEIVE} → 有；发信号 → 没有。
 	 * 这里**永不看 {@code waitForPowered}** —— 那是极性（等通电/等断电），与有没有失败出口无关。
+	 *
+	 * <p>★ {@code FILTER} 在这一列（用户口径：过滤是控制类操作、**失败默认 retry**）：
+	 * 它不匹配（含"没有物品可比"）时走的必须是 {@code handleFailure} 那条既有路 ——
+	 * 在重试窗口内反复判断，窗口到了才走「失败后」，与「等红石 / 收信号」一字不差。
 	 */
 	public boolean hasRetryWindow() {
 		return switch (op) {
-			case TAKE, DEPOSIT, UNLOAD, DEPLOY, WAIT_REDSTONE -> true;
+			case TAKE, DEPOSIT, UNLOAD, DEPLOY, WAIT_REDSTONE, FILTER -> true;
 			case SIGNAL -> signalMode == SignalMode.RECEIVE;
 			default -> false;
 		};
@@ -329,25 +342,44 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * <b>这一条</b>要不要一个目标位置 —— <b>"要不要目标"唯一的那处判据</b>。
+	 * <b>这一条</b>有没有一个<b>世界坐标参数</b> —— <b>"有没有 / 要不要坐标"唯一的那处判据</b>。
 	 *
 	 * <p>为什么不能继续只问 {@link OperationType#requiresTarget()}：过滤的位置是**二选一**的条目级属性 ——
-	 * 手持模式根本不碰世界（连着一条坐标都没有意义），容器模式却要像「使用」那样先伸到那一格去读。
-	 * 于是"这个条目有没有目标"变成了**条目级**的事（同一个 FILTER，两种模式答案不同）。
+	 * 手持模式根本没有坐标（连一条坐标都没有意义），容器模式却有一个真实的方块坐标。
+	 * 于是"这个条目有没有坐标"变成了**条目级**的事（同一个 FILTER，两种模式答案不同）。
 	 *
-	 * <p>⚠️ 凡是"这个条目有没有 / 要不要一个目标位置"的地方都必须问这一个方法：
-	 * 运行时预检查（{@code ProgramRuntime.beginEntry}）、认领（{@code pinOffset} /
-	 * {@code entryOffset}）、GUI 的坐标与朝向行、卡上"有目标条目"的计数与整套平移、
+	 * <p>⚠️ 凡是"这个条目有没有 / 要不要一个**坐标**"的地方都必须问这一个方法：
+	 * 认领（{@code pinOffset} / {@code entryOffset}）、GUI 的坐标行、卡上"有目标条目"的计数与整套平移、
 	 * 蓝图旋转（{@code SequencedArmBlockEntity.transform}）、插卡时的超范围提示、
-	 * 操作表的描框、撤销按坐标匹配、胶囊文字里的坐标。
-	 * 写在两处必然分叉 —— 症状分别是"容器模式不伸过去"和"手持模式凭空多出一个目标框"。
+	 * 操作表的描框、撤销按坐标匹配、脚本写出（{@code ScriptDecompiler}）、胶囊文字里的坐标。
+	 * 写在两处必然分叉 —— 症状分别是"容器模式没有坐标框"和"手持模式凭空多出一个目标框"。
 	 *
-	 * <p>反过来，{@link OperationType#requiresTarget()} 保留原义：那是**操作类型天生**要不要坐标，
-	 * 仍在两处使用（{@link OperationType#recordable()} 与 {@link OperationType#isControl()} 那一族），
-	 * 别顺手换成这一条。
+	 * <p>⚠️⚠️ 但它**不是**"臂要不要伸过去"的判据 —— 那是 {@link #movesArm()}（操作**类型**级）。
+	 * 两者混用就会出现这次的 bug：过滤的容器模式"有坐标"（GUI 要显示坐标框、平移要带上它）
+	 * 却被当成"要伸过去"（臂先飞过去读箱子）。判据必须分开问，见 {@link #movesArm()}。
+	 *
+	 * <p>反过来，{@link OperationType#requiresTarget()} 保留原义：那是**操作类型天生**要不要移动，
+	 * 由 {@link #movesArm()} 转发；另有 {@link OperationType#recordable()}（世界里能录哪些操作）
+	 * 与脚本解析器（{@code ScriptParser.parseEntry} 判坐标必填/可选）直接问它。
 	 */
 	public boolean needsTarget() {
 		return op.requiresTarget() || (op == OperationType.FILTER && filterSource == FilterSource.CONTAINER);
+	}
+
+	/**
+	 * <b>这一条要不要让手臂移动过去</b>（= 运行时"伸过去 / 进入移动状态"唯一的判据）。
+	 *
+	 * <p><b>为什么必须是类型级、不能问 {@link #needsTarget()}</b>（用户口径）：过滤是**控制类操作** ——
+	 * "判断过滤是一瞬间的事情，不需要动力臂伸过去判断"，它跟「等红石 / 收信号」一样**没有动作**。
+	 * 容器模式的坐标只是"**读哪个**方块"的数据参数，不是"伸过去的目标"。
+	 * 拿 {@code needsTarget()} 当这条判据就会让臂先飞过去 —— 那是上一版的错。
+	 *
+	 * <p>反过来说，{@code needsTarget()} 回答的那个问题（"有没有坐标参数"）在过滤容器模式下仍然是真：
+	 * GUI 要显示坐标框、平移/蓝图/描框/撤销比对都要带上它 ——
+	 * 所以**两处判据都不能删**，只能各问各的。自检里"容器过滤的坐标跟着平移、但臂不移动"两条各钉一半。
+	 */
+	public boolean movesArm() {
+		return op.requiresTarget();
 	}
 
 	/**

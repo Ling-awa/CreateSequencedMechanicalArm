@@ -392,12 +392,19 @@ public class ProgramRuntime {
 
 	/** 目标解析 + 移动（或直接执行无坐标操作）。前摇已在外层处理。 */
 	private void beginEntry(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
-		// ★ 问**条目级**的 needsTarget()：过滤的容器模式必须像「使用」那样先伸到那一格去
-		//   （否则是隔空读别人的箱子）。手持过滤则原地执行 —— 它不碰世界。
-		if (!entry.needsTarget()) {
+		// ★ 判据是**操作类型**（`movesArm()` = `op.requiresTarget()`），**不是**条目级 `needsTarget()`：
+		//   「过滤」是**控制类操作** —— 一瞬间的判断，臂**不移动、不做任何动作**（用户口径：
+		//   "不需要动力臂伸过去判断"，跟「等红石 / 收信号」一样）。容器模式的坐标只是
+		//   "读哪个方块"的**数据参数**，不是"伸过去的目标"。
+		//   ⚠️ 上一版这里问的是 `needsTarget()` ⇒ 容器过滤会让臂先飞过去读箱子（这次修的 bug）。
+		//   ⚠️⚠️ 不要把 `needsTarget()` 从"有没有坐标参数"那些站点删掉（GUI 坐标行 / 脚本写出 /
+		//   蓝图变换 / 整体平移 / 撤销比对 / 描框）—— 那些问的正是"有没有坐标"，答案没变。
+		if (!entry.movesArm()) {
 			// 等待类：**先收回待机位**再等（用户实测："执行等待的时候不会收回去"）。
 			// 收回只是让手臂折回去（服务端只改相位，动画由客户端插值），所以**不占用等待时间** ——
 			// 计时从进入这一条就开始，收回与计时并行；等下一条要伸出去时，手臂已经在回家的路上或到家了。
+			// ⚠️ 「过滤」也走这一支，但它**不是等待**（`isWait()` 为假）：它不耗时间、只判断一次，
+			//   所以不额外收回 —— 上一条收工（`succeed`）时臂本来就折回待机位了（用户口径：没有动作）。
 			if (entry.op.isWait())
 				arm.cancelMove();
 			state = EntryState.EXECUTING;
@@ -1027,12 +1034,21 @@ public class ProgramRuntime {
 	 *
 	 * <p><b>用户口径（照做，不要"优化"）</b>：
 	 * <ol>
+	 *   <li><b>控制类操作、臂不移动</b>：判断是一瞬间的事 —— 臂<b>不伸过去、不做任何动作</b>
+	 *       （与「等红石 / 收信号」同类）。容器模式的坐标只是"读哪个方块"的数据参数；
+	 *       判据见 {@code ArmProgramEntry.movesArm()}（{@code beginEntry} 的那个分支）。
+	 *       ⚠️ 所以这里<b>不能</b>走 {@code arm.getMovingHandler()}：那是"臂当前移动目标"那一格
+	 *       （{@code movingOffset} 记的是"上一次真的动过身"的位置），而过滤不动身
+	 *       ⇒ 它永远指着<b>别的</b>条目那一格；</li>
 	 *   <li>候选 = {@code HELD}（臂此刻握着的那份存货）或 {@code CONTAINER}（目标容器的
 	 *       <b>第一个非空槽</b> —— 只看第一格，不看整箱）；</li>
-	 *   <li>候选为空 ⇒ <b>总是走失败后</b>，无论过滤器是什么；</li>
+	 *   <li>候选为空 ⇒ <b>不满足</b>，无论过滤器是什么；</li>
 	 *   <li>过滤器为空（没放幽灵物品）⇒ <b>匹配一切</b>（Create 本体口径：
 	 *       {@code FilterItemStack.isEmpty()} 为真时 {@code test} 恒真）；</li>
-	 *   <li>符合 ⇒ {@code succeed} 走成功后；不符合 ⇒ {@code applySkip(onTimeout)} 走失败后。</li>
+	 *   <li>符合 ⇒ {@code succeed} 走成功后；不符合 ⇒ {@code handleFailure} —— 与「等红石 / 收信号」
+	 *       走<b>同一条路</b>：在重试窗口（{@code failAmount}×单位，{@code -1} = 一直重试）内反复判断，
+	 *       窗口到了才走 {@code onTimeout}。★ 上一版这里直接 {@code applySkip} ⇒ 一不匹配就停机，
+	 *       与用户口径"失败默认 retry"相反（这次修的第二件事）。</li>
 	 * </ol>
 	 *
 	 * <p><b>为什么不自己写比对逻辑</b>：用户要求"完全遵从机械动力本体的过滤逻辑：物品过滤、包裹过滤、
@@ -1046,8 +1062,7 @@ public class ProgramRuntime {
 	 * 所以"列表过滤要不要比 NBT"仍然归滤波器物品自己管 —— 那正是"遵从本体"。
 	 *
 	 * <p><b>只读</b>：这一条不取走、不放入、不改动任何物品，也不对目标方块发起交互（不调 {@code use}）。
-	 * 容器模式仍然会**先伸到那一格**（{@code needsTarget()} 为真 ⇒ {@code beginEntry} 走移动那一支），
-	 * 否则"读外部容器"就成了隔空取物。
+	 * 容器模式只是<b>读</b>一格，臂待在原地 —— 读哪个方块由坐标决定，与有没有伸过去无关。
 	 */
 	private void filter(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		Level level = arm.getLevel();
@@ -1057,29 +1072,41 @@ public class ProgramRuntime {
 		}
 		ItemStack candidate;
 		if (entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER) {
-			// 外部容器：与「取出」完全同一套取库存的路径（`getMovingHandler` 是"臂当前目标那一格"的
-			// 物品能力，并在缓存失效时按 `movingOffset` 重解析）。方块不是容器 / 没有物品能力 ⇒
-			// 返回 null ⇒ 走失败后并给出中文理由，**不抛异常**（用户点名要求）。
-			OffsetCarrier carrier = peekTargetHandler(arm, entry);
-			if (carrier.reason() != null) {
-				applySkip(arm, task, entry, entry.onTimeout, carrier.reason());
+			// ★ 范围仍然要判（这是上一版就有的守卫，不是"伸过去"的一部分）：坐标指的是**这条臂**
+			//   周边的那一格。走 preCheckFailure 是为了让这条理由与其它操作**同源同文案**
+			//   （对 FILTER 它只做"世界加载 + 臂的范围"两件事，物品能力那一段由下面自己报）。
+			BlockPos offset = offsetOf(arm, entry);
+			String blocked = preCheckFailure(arm, entry, offset);
+			if (blocked != null) {
+				handleFailure(arm, task, entry, blocked);
 				return;
 			}
-			int slot = firstNonEmptySlot(carrier.handler());
+			// 外部容器：只解析**那一格**的物品能力（只读）。方块不是容器 / 没有物品能力 ⇒
+			// 返回 null ⇒ 走失败后（重试）并给出中文理由，**不抛异常**（用户点名要求）。
+			// ⚠️ 用 `peekContainerHandler`（不过 Create 交互点那道门）而不是 `peekHandler`：
+			//   过滤**不需要**目标是 Create 交互点，保险箱 / 箱子这类普通容器就该能读
+			//   （`needsInteractionPoint()` 只认取/放/卸/组装）。
+			// ⚠️ 也不用 `arm.getMovingHandler()`：臂不为过滤动身，那个缓存指的是**别的**条目那一格。
+			IItemHandler handler = arm.peekContainerHandler(offset);
+			if (handler == null) {
+				handleFailure(arm, task, entry, "过滤：目标不是容器（没有物品能力）");
+				return;
+			}
+			int slot = firstNonEmptySlot(handler);
 			if (slot < 0) {
-				applySkip(arm, task, entry, entry.onTimeout, "过滤：容器里没有物品");
+				handleFailure(arm, task, entry, "过滤：容器里没有物品");
 				return;
 			}
 			// ★ **只看第一格**（第一个非空槽），不挑"任意一格符合的"（用户选定的口径）。
 			//   反证：把它换成"遍历所有槽找匹配的"，自检里那条「容器 = [金锭, 铁锭]、幽灵 = 铁锭 ⇒ 失败」
 			//   会立刻变绿 —— 那条断言就是钉这个口径的。
-			candidate = carrier.handler()
-				.extractItem(slot, 1, true);
+			candidate = handler.extractItem(slot, 1, true);
 		} else {
 			candidate = arm.getHeldItem();
 		}
 		if (candidate.isEmpty()) {
-			applySkip(arm, task, entry, entry.onTimeout,
+			// "没有物品可比"也是一种**不满足** —— 与"不匹配"走同一条路（重试窗口内反复判断）。
+			handleFailure(arm, task, entry,
 				entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER ? "过滤：容器里没有物品" : "过滤：手上没有物品");
 			return;
 		}
@@ -1095,28 +1122,9 @@ public class ProgramRuntime {
 			succeed(arm, task, entry);
 			return;
 		}
-		applySkip(arm, task, entry, entry.onTimeout, "过滤不符：" + candidate.getHoverName()
+		// 不匹配 = "时机还没到"，不是"做错了"：与等红石一样在重试窗口里反复判断（见方法头注释）。
+		handleFailure(arm, task, entry, "过滤不符：" + candidate.getHoverName()
 			.getString());
-	}
-
-	/**
-	 * 目标那一格的物品能力 + "为什么没有"的现成理由（容器模式的前置解析）。
-	 *
-	 * <p>抽成一个小载体的理由：{@code null} 有两种含义（"不是容器"与"没伸过去"），
-	 * 分开表达才不会把"目标不是容器"报成"容器里没有物品"（用户要求理由要写清楚）。
-	 */
-	private record OffsetCarrier(@Nullable IItemHandler handler, @Nullable String reason) {
-	}
-
-	private static OffsetCarrier peekTargetHandler(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
-		// 先走"臂当前目标"（到位之后就是它，缓存也由它自己按 movingOffset 重解析）；
-		// 没动身时（前置检查那一支）退回按 offset 现场解析 —— 与「取出」的 preCheckFailure 同源。
-		IItemHandler handler = arm.getMovingHandler();
-		if (handler == null)
-			handler = arm.peekHandler(offsetOf(arm, entry));
-		if (handler == null)
-			return new OffsetCarrier(null, "过滤：目标不是容器（没有物品能力）");
-		return new OffsetCarrier(handler, null);
 	}
 
 	private static String describeFailure(SequencedArmBlockEntity arm) {
@@ -1209,8 +1217,12 @@ public class ProgramRuntime {
 		if (isHalted())
 			return null;
 		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
-		// needsTarget()（条目级）：过滤的容器模式**有**目标，但它不认领（下面那句只挑取物/组装）——
-		// 这里换成条目级判据是为了不把"有没有目标"回答错，认领的资格仍由下一句决定。
+		// 两道门，问的是**两个不同的问题**（两处判据都不能少）：
+		//   ① `needsTarget()`（条目级）：这一条**有没有坐标** —— 过滤的容器模式有（容器模式的坐标是
+		//      "读哪个方块"的数据参数），等待类没有；
+		//   ② 类型门：只有「取物 / 组装」才**认领**（把目标格里的物品按住等臂来加工）。
+		//   ★ 所以控制类条目（过滤 / 等红石 / 收发信号 / 调用 …）永远走不到认领那一支 ——
+		//   认领等于"占住一个交互点等臂过来"，而控制类**根本没有臂过去这件事**。
 		if (entry == null || !entry.needsTarget())
 			return null;
 		if (entry.op != OperationType.TAKE && entry.op != OperationType.DEPLOY)
@@ -1223,11 +1235,15 @@ public class ProgramRuntime {
 	 *
 	 * <p>与 {@link #pinOffset} 的区别只有一条：**不看操作类型**。给"关心这一格本身"的用法
 	 * （带速宽限期、目标是不是带子）用 —— 那些地方不该因为条目是「投放」就退回旧位置。
+	 *
+	 * <p>过滤容器模式在这里照旧返回它读的那一格（{@code needsTarget()} 为真）：这条问的是
+	 * "这条条目指着哪一格"，**不是**"臂要不要伸过去"（后者见 {@code ArmProgramEntry.movesArm()}）。
+	 * 它现在其实用不到（过滤不动身 ⇒ 不走前置检查、也不认领），留着是为了让"有坐标就有这一格"
+	 * 这件事只有一处答案 —— 换成类型判据会在下次有人让控制类也关心格子时静默指错位置。
 	 */
 	@Nullable
 	public BlockPos entryOffset(SequencedArmBlockEntity arm) {
 		ArmProgramEntry entry = currentEntryOrNull(arm.getProgram());
-		// needsTarget()（条目级）：带速宽限期与"目标是不是带子"都该认过滤的容器模式那一格。
 		if (entry == null || !entry.needsTarget())
 			return null;
 		return offsetOf(arm, entry);

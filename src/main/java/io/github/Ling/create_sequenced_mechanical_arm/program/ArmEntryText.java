@@ -271,6 +271,10 @@ public final class ArmEntryText {
 	 * —— 编辑器根本不给他们时限控件（{@link ArmProgramEntry#hasRetryWindow()} 为假），所以 {@code failAmount}
 	 * 恒为 -1，而失败是**立刻**发生、去向**马上生效**的。拿 -1 去报"一直重试"就与实际行为刚好相反：
 	 * 玩家选了「失败后 跳转 2」，卡片上却写着"一直重试（没设时限）"。这类操作直接报去向。
+	 *
+	 * <p>★ 「过滤」走的是**上面那条**（它有重试窗口）：不匹配 / 没有物品可比就一直在窗口里判断，
+	 * {@code failAmount < 0} 时卡片上写「一直重试」是**对的** —— 那正是它的默认行为。
+	 * 这几句文案与编辑器那几个控件同源于 {@link ArmProgramEntry#hasRetryWindow()}，不要各写一份。
 	 */
 	public static Component failureText(ArmProgramEntry entry) {
 		// 按**条目**判（不是按类型）：同一条 SIGNAL，收有失败出口、发没有（§7.16b 一.7）

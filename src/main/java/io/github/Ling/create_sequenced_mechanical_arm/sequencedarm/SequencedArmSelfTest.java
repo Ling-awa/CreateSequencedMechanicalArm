@@ -2468,6 +2468,11 @@ public class SequencedArmSelfTest {
 	 *
 	 * <p>同一条 {@code SIGNAL}：收 = 有重试窗口（等一下条件就变）；发 = **没有失败出口**
 	 * （发送永远成功、也不阻塞）—— 写成"按类型"就会在发的卡片上冒出一个**永不触发**的「失败后」。
+	 *
+	 * <p>★ 「过滤」按用户口径也在"有重试窗口"那一类（控制类判断、**失败默认 retry**）——
+	 * 这里顺带把**新建条目的默认值**也钉住：{@code failAmount = -1} 就是"一直重试"，
+	 * 编辑器因此会给它「时限/单位」两个控件（判据同源 {@link ArmProgramEntry#hasRetryWindow()}）。
+	 * 反证：把 {@code hasRetryWindow()} 里 FILTER 那一支删掉 ⇒ filterRetry 变 false ⇒ 这条红。
 	 */
 	private static void checkEntryPredicates() {
 		ArmProgramEntry recv = new ArmProgramEntry();
@@ -2486,14 +2491,33 @@ public class SequencedArmSelfTest {
 		call.op = OperationType.CALL;
 		boolean hardOnly = !mine.hasRetryWindow() && mine.hasHardFailureExit() && !call.hasRetryWindow()
 			&& call.hasHardFailureExit();
+		// 过滤：新建条目就落在"会重试"这一类，默认窗口 = 一直重试（-1）
+		ArmProgramEntry filterHeld = new ArmProgramEntry();
+		filterHeld.op = OperationType.FILTER;
+		ArmProgramEntry filterContainer = new ArmProgramEntry();
+		filterContainer.op = OperationType.FILTER;
+		filterContainer.filterSource = ArmProgramEntry.FilterSource.CONTAINER;
+		boolean filterRetry = filterHeld.hasRetryWindow() && filterHeld.hasFailureExit()
+			&& !filterHeld.hasHardFailureExit() && filterHeld.failAmount == -1
+			&& filterContainer.hasRetryWindow() && filterContainer.failAmount == -1;
+		// 两处判据各问各的：过滤**不移动**（类型级），但容器模式**有坐标**（条目级）
+		boolean filterTwoQuestions = !filterHeld.movesArm() && !filterHeld.needsTarget() && !filterContainer.movesArm()
+			&& filterContainer.needsTarget();
 
-		LOGGER.info("[selftest] 失败出口谓词: 收有失败={} 发无失败={}", recvHasFailure, !sendHasNone);
+		LOGGER.info("[selftest] 失败出口谓词: 收有失败={} 发无失败={} 过滤会重试={} 过滤两问分开={}", recvHasFailure,
+			!sendHasNone, filterRetry, filterTwoQuestions);
 		if (!recvHasFailure)
 			LOGGER.error("[selftest] 收信号说自己没有重试窗口（编辑器不会给时限控件）");
 		if (!sendHasNone)
 			LOGGER.error("[selftest] 发信号也说自己有重试窗口（卡片上会冒出永不触发的「失败后」）");
 		if (!hardOnly)
 			LOGGER.error("[selftest] 挖 / 调用的硬失败谓词错了（应当有失败出口、没有重试窗口）");
+		if (!filterRetry)
+			LOGGER.error("[selftest] 过滤不在「会重试」那一类（或者默认值不是「一直重试」）—— 用户口径："
+				+ "过滤是控制类操作，失败默认 retry；编辑器该给它「时限/单位」控件");
+		if (!filterTwoQuestions)
+			LOGGER.error("[selftest] 过滤的两处判据混了（应当：不移动手臂 + 容器模式有坐标）—— "
+				+ "movesArm() 是类型级、needsTarget() 是条目级，删掉任何一个都会让臂先飞过去或让坐标框消失");
 	}
 
 	/**
@@ -4165,6 +4189,15 @@ public class SequencedArmSelfTest {
 	/**
 	 * 「过滤」操作的自检（用户口径：幽灵物品 + 过滤位置二选一）。
 	 *
+	 * <p><b>用户口径的两条新语义（本轮）</b>：
+	 * <ol>
+	 *   <li><b>过滤是控制类操作、臂不移动</b>（"判断过滤是一瞬间的事情，不需要动力臂伸过去判断"）：
+	 *       容器模式的坐标只是"<b>读哪个方块</b>"的数据参数 ⇒ 容器那几条必须在**完全不模拟到位**
+	 *       的条件下跑出结果，而且整个过程中臂<b>一次都不许进 MOVING</b>（⑩ 的两条正面证据）；</li>
+	 *   <li><b>失败默认 retry</b>（与「等红石 / 收信号」同一条路）：不匹配 / 没有物品可比都是
+	 *       "还没到时机"，在重试窗口里反复判断、窗口到了才走「失败后」（⑨ 的两条）。</li>
+	 * </ol>
+	 *
 	 * <p><b>为什么这里的断言全都用真物品、真数据组件</b>：过滤的语义**完全**是 Create 本体的
 	 * （{@code FilterItemStack.of(幽灵物品)} 按物品类型选 {@code ListFilterItemStack} /
 	 * {@code AttributeFilterItemStack} / {@code PackageFilterItemStack}）。拿假对象/mock 去测，
@@ -4239,6 +4272,10 @@ public class SequencedArmSelfTest {
 		boolean containerMismatch = false;
 		boolean containerEmpty = false;
 		boolean firstSlotOnly = false;
+		boolean containerNeverMoved = false;
+		boolean retryStaysWaiting = false;
+		boolean retryWindowExpires = false;
+		boolean emptyCandidateRetries = false;
 		boolean routeSuccess = false;
 		boolean routeFailure = false;
 		String detail;
@@ -4266,39 +4303,68 @@ public class SequencedArmSelfTest {
 			}
 			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
 
+			// ★ 重试窗口（tick）：⑧⑨ 两条都用它 —— 窗口**不为 0** 才能看出"先重试、再到时"这件事。
+			final int retryWindow = 4;
+
 			// ③ 手持过滤：手上放铁锭 → 符合；改装金锭 → 同一份条目变成不符合；手空 → 总是失败。
 			//    反证：把 filter() 里 HELD 那一支读成 overflow / 读错槽 ⇒ 三条一起变味。
-			//    手持模式不碰世界（needsTarget() 为假）⇒ 不需要模拟到位，一句 beginEntry 就进执行态。
+			//    手持模式本来就不碰世界（臂不移动）⇒ 一句 beginEntry 就进执行态。
 			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.HELD, listFilter, depotPos.subtract(armPos)));
 			arm.setHeldItem(new ItemStack(Items.IRON_INGOT));
-			heldMatch = runFilterEntry(arm, 80, false);
+			heldMatch = runFilterEntry(arm, 80).success();
 			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.HELD, listFilter, depotPos.subtract(armPos)));
 			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT));
-			heldMismatch = !runFilterEntry(arm, 80, false);
+			heldMismatch = !runFilterEntry(arm, 80).success();
 			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.HELD, listFilter, depotPos.subtract(armPos)));
 			arm.setHeldItem(ItemStack.EMPTY);
-			heldEmpty = !runFilterEntry(arm, 80, false);
+			heldEmpty = !runFilterEntry(arm, 80).success();
 
 			// ⑧ 出口路由（真解释器 + 成功后/失败后跳转）：同一条程序、只换手上那一份，
 			//    符合时必须落到"成功后"的落点、不符合时必须落到"失败后"的落点。
+			//    ⚠️ 那条失败路**要穿过重试窗口**（不匹配 → 重试 → 窗口到了才跳）⇒ 程序必须给一个**有限**窗口：
+			//    `failAmount` 默认是 -1（一直重试），去向永远到不了 —— 这正是本轮的新语义，
+			//    拿默认值写这条路由用例会得到"永远不跳转"（上一版这里是 applySkip，才没暴露这一点）。
 			//    反证：把 filter() 里的 succeed/applySkip 互换 ⇒ 两条一起红。
-			arm.setProgram(routeProgram(depotPos.subtract(armPos)));
+			arm.setProgram(routeProgram(depotPos.subtract(armPos), retryWindow));
 			arm.setHeldItem(new ItemStack(Items.IRON_INGOT));
 			routeSuccess = runRoute(arm) == 0; // 0 = 成功后跳回条目 1
-			arm.setProgram(routeProgram(depotPos.subtract(armPos)));
+			arm.setProgram(routeProgram(depotPos.subtract(armPos), retryWindow));
 			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT));
 			routeFailure = runRoute(arm) == 1; // 1 = 失败后跳到条目 2（那条抛错 ⇒ 停在下标 1）
-			arm.setHeldItem(ItemStack.EMPTY);
+
+			// ⑨ 不匹配**不是立刻停机**，而是在窗口内重试（用户口径：失败默认 retry）。
+			//    上半：跑满窗口**之前**必须还在重试（没停机、游标还在条目 1、重试计时已经在走）；
+			//    下半：窗口一到就走失败后（落到条目 2 的「抛错」⇒ 停机且游标停在下标 1）。
+			//    ⚠️ 判据**不能**写成 `state == RETRY`：重试是"每 tick 重跑一次判断"，
+			//    状态在 RETRY / EXECUTING 之间来回跳（看一眼正好落在 EXECUTING 会假红）。
+			//    真正要断言的是"**没停机、也没跳到失败落点**，而且重试计时已经在累加"。
+			//    ★ 反证（改一行就会红）：把 `filter()` 里那三处 `handleFailure(...)` 换回上一版的
+			//      `applySkip(arm, task, entry, entry.onTimeout, ...)` ⇒ 第 1 tick 就跳到条目 2
+			//      ⇒ entryIndex 变 1 ⇒ retryStaysWaiting 变 false；
+			//      把窗口判据（`timeoutTicks()`）改成恒 0 ⇒ 同样立刻跳。
+			arm.setProgram(routeProgram(depotPos.subtract(armPos), retryWindow));
+			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT)); // 列表过滤器只认铁锭 ⇒ 必不匹配
+			for (int i = 0; i < retryWindow - 1; i++)
+				arm.runtime.tick(arm);
+			retryStaysWaiting = !arm.runtime.isHalted() && arm.runtime.entryIndex == 0
+				&& arm.runtime.waitElapsed > 0;
+			for (int i = 0; i < 30 && !arm.runtime.isHalted(); i++)
+				arm.runtime.tick(arm);
+			retryWindowExpires = arm.runtime.isHalted() && arm.runtime.entryIndex == 1;
 
 			// ⑥/⑦ 外部容器：容器模式取**第一个非空槽**（只看第一格）。
-			//    ⚠️ 容器模式 needsTarget() 为真 ⇒ 要先**真伸到那一格**才执行；而自检不跑运动学
-			//    （`arm.tick()` 要真实动力网络）⇒ runFilterEntry 的 simulateArrival 每轮把
-			//    `chasedPointProgress` 置 1 当作"已到位"。少了它，条目永远停在 MOVING、
-			//    一次都执行不到（上一版 ⑦ 就是这么变成"容器模式永远失败"的假红的）。
+			//    ★ 臂**不移动**（过滤是控制类操作）：所以这几条**完全不模拟到位** ——
+			//    上一版那个 `simulateArrival`（每轮把 chasedPointProgress 置 1）已经删掉，
+			//    判据只剩"容器模式照样在几十 tick 内跑出结果，且期间一次都没进 MOVING"。
+			//    反证：把 beginEntry 的问法改回 `entry.needsTarget()`（= 让臂为容器模式先飞过去）
+			//    ⇒ 条目永远停在 MOVING、一次都执行不到 ⇒ containerNeverMoved 与 ⑥⑦ 一起红。
+			clearContainer(level, vaultPos); // 先摆成"空的保险箱"：⑥ 要看的就是"没有物品可比"
 			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
 				vaultPos.subtract(armPos)));
-			containerEmpty = !runFilterEntry(arm, 400, true);
+			FilterRun containerEmptyRun = runFilterEntry(arm, 40);
+			containerEmpty = !containerEmptyRun.success();
 			arm.setHeldItem(ItemStack.EMPTY);
+			boolean containerMoved = containerEmptyRun.moved();
 
 			// ⑦ [金锭, 铁锭] + 幽灵铁锭 ⇒ **失败**（第一格是金锭，不能"找任意一格符合的"）。
 			//    反证：把 filter() 里那个 firstNonEmptySlot 换成"遍历所有槽找匹配的" ⇒ 这条变真。
@@ -4310,21 +4376,42 @@ public class SequencedArmSelfTest {
 			boolean ironSecond = putOneInto(level, vaultPos, new ItemStack(Items.IRON_INGOT));
 			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
 				vaultPos.subtract(armPos)));
-			boolean bothMismatch = !runFilterEntry(arm, 400, true);
+			FilterRun bothMismatchRun = runFilterEntry(arm, 40);
+			boolean bothMismatch = !bothMismatchRun.success();
+			containerMoved |= bothMismatchRun.moved();
 			// 反例：把第一格换成铁锭 ⇒ 同一份条目必须成功（证明上一条不是"容器模式永远失败"）
 			clearContainer(level, vaultPos);
 			putOneInto(level, vaultPos, new ItemStack(Items.IRON_INGOT));
 			putOneInto(level, vaultPos, new ItemStack(Items.GOLD_INGOT));
 			arm.setProgram(filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
 				vaultPos.subtract(armPos)));
-			boolean firstMatch = runFilterEntry(arm, 400, true);
+			FilterRun firstMatchRun = runFilterEntry(arm, 40);
+			boolean firstMatch = firstMatchRun.success();
+			containerMoved |= firstMatchRun.moved();
 			firstSlotOnly = goldFirst && ironSecond && bothMismatch && firstMatch;
 			containerMatch = firstMatch;
 			containerMismatch = bothMismatch;
+			containerNeverMoved = !containerMoved;
+
+			// ⑨b "候选没有物品"也走**同一条路**（也是"不满足"，不是立刻停机）：容器空着，
+			//    跑满窗口之前必须还在重试（没停机、重试计时在走）。判据同上：不看是不是正好落在 RETRY。
+			//    反证：把 `filter()` 里那条"容器里没有物品"改回 `applySkip(...)` ⇒ 立刻停机
+			//    ⇒ emptyCandidateRetries 变 false。
+			clearContainer(level, vaultPos);
+			ArmProgram emptyRetry = filterProgram(ArmProgramEntry.FilterSource.CONTAINER, listFilter,
+				vaultPos.subtract(armPos));
+			emptyRetry.tasks.get(0).entries.get(0).failAmount = retryWindow;
+			arm.setProgram(emptyRetry);
+			for (int i = 0; i < retryWindow - 1; i++)
+				arm.runtime.tick(arm);
+			emptyCandidateRetries = !arm.runtime.isHalted() && arm.runtime.entryIndex == 0
+				&& arm.runtime.waitElapsed > 0;
 			// ⚠️ 这两个标签曾经写反（bothMismatch 印成"符合"、还标注"应为 false"），
 			//    而断言要的恰恰是"金锭在前 ⇒ 不符 = true" —— 误导性的文案会让人去改断言而不是查夹具。
 			detail = "容器=[金锭,铁锭]→不符=" + bothMismatch + "（应为 true） 容器=[铁锭,金锭]→符合=" + firstMatch
-				+ "（应为 true） 摆进保险箱=" + goldFirst + "/" + ironSecond;
+				+ "（应为 true） 摆进保险箱=" + goldFirst + "/" + ironSecond + " 容器模式没动过臂=" + containerNeverMoved
+				+ " 窗口内还在重试=" + retryStaysWaiting + " 窗口到了才走失败后=" + retryWindowExpires
+				+ " 无物品也是重试=" + emptyCandidateRetries;
 		} catch (Throwable t) {
 			detail = "异常 " + t;
 		} finally {
@@ -4335,10 +4422,12 @@ public class SequencedArmSelfTest {
 
 		LOGGER.info("[selftest] 过滤: 物品(铁符合={} 金不符={}) 列表标签(木板符合={}) 属性过滤(木板符合={} 铁不符={}) "
 			+ "包裹(同址={} 异址={}) 空过滤器匹配一切={}(空={}) 手持(符合={} 不符={} 空={}) "
-			+ "容器(符合={} 不符={} 空={}) 只看第一格={} 出口路由(成功={} 失败={}) （{}）",
+			+ "容器(符合={} 不符={} 空={}) 只看第一格={} 出口路由(成功={} 失败={}) "
+			+ "不移动臂={} 窗口内重试={} 窗口到了才走失败后={} 无物品也重试={} （{}）",
 			ironMatches, !goldMatches, plankMatches, plankByTag, !ironByTag, sameAddress, !otherAddress,
 			emptyMatchesEverything, emptyIsEmpty, heldMatch, heldMismatch, heldEmpty, containerMatch, containerMismatch,
-			containerEmpty, firstSlotOnly, routeSuccess, routeFailure, detail);
+			containerEmpty, firstSlotOnly, routeSuccess, routeFailure, containerNeverMoved, retryStaysWaiting,
+			retryWindowExpires, emptyCandidateRetries, detail);
 
 		if (!ironMatches || goldMatches || !plankMatches)
 			LOGGER.error("[selftest] 过滤①失败：列表过滤器没按物品比（铁符合={} 金不符={} 木板符合={}）—— "
@@ -4358,17 +4447,32 @@ public class SequencedArmSelfTest {
 				+ "② 条目压根没执行到 filter()（判据见 runFilterEntry 的注释：必须看见过 EXECUTING 才算跑了）",
 				heldMatch, heldMismatch);
 		if (!heldEmpty)
-			LOGGER.error("[selftest] 过滤⑥失败：手上没有物品时没有走失败后（用户口径：没有物品就总是不符合）");
+			LOGGER.error("[selftest] 过滤⑥失败：手上没有物品时被当成了成功（用户口径：没有物品就**不满足** —— "
+				+ "默认「一直重试」时它永远不该成功，手一空就成功的唯一可能是比对那一段短路了）");
 		if (!containerMatch || !containerMismatch || !firstSlotOnly)
 			LOGGER.error("[selftest] 过滤⑦失败：外部容器没有「只看第一格」（符合=[铁锭,金锭]={} 不符=[金锭,铁锭]={} "
 				+ "只看第一格={}）—— 两种可能：① firstNonEmptySlot 被换成「遍历找匹配的」（那会变成 符合=true 不符=false）；"
-				+ "② 条目压根没执行到（容器模式要先伸到位，见 runFilterEntry 的 simulateArrival 说明）（{}）", containerMatch,
+				+ "② 条目压根没执行到（容器模式现在**不移动手臂**、也不该需要任何「模拟到位」）（{}）", containerMatch,
 				containerMismatch, firstSlotOnly, detail);
 		if (!containerEmpty)
-			LOGGER.error("[selftest] 过滤⑥失败：容器里一个非空格都没有时没有走失败后（用户口径：没有物品就总是不符合）");
+			LOGGER.error("[selftest] 过滤⑥失败：容器里一个非空格都没有时被当成了成功（用户口径：没有物品就**不满足** —— "
+				+ "与不匹配同一条路，默认「一直重试」时它永远不该成功）");
+		if (!containerNeverMoved)
+			LOGGER.error("[selftest] 过滤⑩失败：容器模式**让臂动过**（期间进过 MOVING）—— 过滤是控制类操作，"
+				+ "判断是一瞬间的事，臂不该伸过去。改的是 ProgramRuntime.beginEntry 那个判据"
+				+ "（应当是 `entry.movesArm()`，不是 `entry.needsTarget()`）（{}）", detail);
 		if (!routeSuccess || !routeFailure)
 			LOGGER.error("[selftest] 过滤⑧失败：出口路由错了（符合→成功后={} 不符→失败后={}）—— "
-				+ "filter() 里 succeed/applySkip 用反了，或条目的落点没生效", routeSuccess, routeFailure);
+				+ "filter() 里 succeed 与失败那条路用反了，或条目的落点没生效、或路由程序忘了给重试窗口"
+				+ "（默认 -1 = 一直重试 ⇒ 失败后永远到不了）", routeSuccess, routeFailure);
+		if (!retryStaysWaiting || !retryWindowExpires)
+			LOGGER.error("[selftest] 过滤⑨失败：不匹配没有「在窗口内重试、窗口到了才走失败后」"
+				+ "（窗口内还在重试={} 窗口到了才走失败后={}）—— 反证一行：把 filter() 里那三处 handleFailure(...) "
+				+ "换回 applySkip(...) ⇒ 第 1 tick 就停机 ⇒ 这条红（用户口径：过滤失败默认 retry）",
+				retryStaysWaiting, retryWindowExpires);
+		if (!emptyCandidateRetries)
+			LOGGER.error("[selftest] 过滤⑨b失败：候选没有物品时不是「重试」而是立刻走了失败出口"
+				+ "（用户口径：没有物品也是一种不满足，与不匹配同一条路）");
 	}
 
 	/** 「过滤」条目的最小程序：主任务 = [过滤]，成功后不设（收工）——单独跑一条时"成功"= 条目走完。 */
@@ -4388,47 +4492,57 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 跑一条「过滤」条目，返回"它是不是**成功**走完了"。
+	 * 跑一条「过滤」条目的结果：{@code success} = 走的是成功出口；{@code moved} = 期间见过 {@code MOVING}。
+	 *
+	 * <p><b>为什么要把"动过没有"也带出来</b>：过滤是**控制类操作**（用户口径："判断过滤是一瞬间的事情，
+	 * 不需要动力臂伸过去判断"），臂**一次都不该移动** —— 那是"容器模式的坐标只是数据参数"这件事的
+	 * <b>正面证据</b>，光断言"跑出结果了"证明不了它没先飞过去（上一版就是靠模拟到位才跑得动的）。
+	 */
+	private record FilterRun(boolean success, boolean moved) {
+	}
+
+	/**
+	 * 跑一条「过滤」条目，返回 {@link FilterRun}（走的是成功出口吗 / 期间臂动过没有）。
 	 *
 	 * <p><b>判据为什么不能是 {@code getLastFailure()}</b>（上一版就是它，于是 ③⑥⑦ 读到的全是假值）：
-	 * 「不符 / 手上没有物品 / 容器里没有物品」走的是 {@code applySkip(entry.onTimeout)}，而 FILTER 条目的
-	 * {@code onTimeout} 默认是 {@code NONE} ⇒ 落到 {@code halt()}；而 {@code halt()} **只写 {@code error}**
-	 * （停机原因，护目镜上是单独一行：{@code SequencedArmBlockEntity:891}），**从不写 {@code lastFailure}**
-	 * —— 那个字段是"重试中的黄字提示"，只有 {@code CONTINUE} / {@code SKIP_TO} / {@code UNTIL_FAIL}
-	 * 三条出口会写。于是 {@code lastFailure == null} 在"成功"与"停机"两种情况下**都成立**，
-	 * 它根本不是成败判据（"不符"被读成了"成功"，"手空"同样）。
+	 * 失败出口最终落到 {@code halt()}（{@code onTimeout} 默认 {@code NONE}），而 {@code halt()}
+	 * **只写 {@code error}**（停机原因，护目镜上是单独一行：{@code SequencedArmBlockEntity:891}），
+	 * **从不写 {@code lastFailure}** —— 那个字段是"重试中的黄字提示"，只有 {@code CONTINUE} /
+	 * {@code SKIP_TO} / {@code UNTIL_FAIL} 三条出口会写。于是 {@code lastFailure == null} 在"成功"
+	 * 与"停机"两种情况下**都成立**，它根本不是成败判据（"不符"被读成了"成功"，"手空"同样）。
 	 *
 	 * <p>现在改看**运行时状态**，并且要求"**看见过执行态**"才算成功：
 	 * <ul>
-	 *   <li>{@code HALTED} ⇒ 失败（用户口径：不符 / 没有物品就是走失败后；NONE 出口把它变成停机）；</li>
+	 *   <li>{@code HALTED} ⇒ 失败（用户口径：不符 / 没有物品就是走失败后；NONE 出口在窗口到点后把它变成停机）；</li>
 	 *   <li>先看见 {@code EXECUTING}、之后又回到 {@code IDLE} ⇒ 成功（{@code succeed} 会
 	 *       {@code resetEntryCounters()} 把状态恢复成 IDLE）。为什么必须两步都在：单看"最后不是停机"
 	 *       会把"压根没执行到 filter()"（转速为 0、目标没解析出来）也判成成功 —— 那是自检最怕的假绿。</li>
+	 *   <li>一直停在 {@code RETRY}（不匹配 + 默认"一直重试"）⇒ 既不是成功也不是停机 ⇒ 返回 false。
+	 *       这正是"失败默认 retry"在自检里的样子：**不是立刻停机**，所以这里不能把 RETRY 当停机。</li>
 	 * </ul>
 	 * 从而窗口内既没成功也没停机的，一律判失败（**不默认成功**）。
 	 *
-	 * @param ticks           给多少 tick —— 外部容器模式要先**真伸到那一格**才执行
-	 *                        （{@code needsTarget()} 为真），比手持模式多给两个数量级
-	 * @param simulateArrival 容器模式专用：自检不跑运动学（{@code arm.tick()} 要真实动力网络，
-	 *                        见「认领窗口」「收回时序」那几条的同样处理）—— 每轮把 {@code chasedPointProgress}
-	 *                        置 1 当作"已到位"，其余全走**真实入口** {@code runtime.tick()}。
-	 *                        ⚠️ 少了这一步，容器模式永远停在 {@code MOVING}：一条条目都执行不到，
-	 *                        三条容器断言会一起变成假的"不符"（这就是上一版 ⑦ 的第二个根因）。
+	 * <p>★ 这个入口**不需要也不再有**"模拟到位"那一步（上一版有个 {@code simulateArrival} 参数，
+	 * 每轮把 {@code chasedPointProgress} 置 1）：过滤不移动手臂，容器模式与手持模式跑法完全一样 ——
+	 * "不模拟到位也能跑出结果"本身就是"臂没有伸过去"的一半证据（另一半见 {@link FilterRun#moved()}）。
+	 *
+	 * @param ticks 给多少 tick（判据是"结果"不是"到位"，所以手持与容器给的是同一个量级）
 	 */
-	private static boolean runFilterEntry(SequencedArmBlockEntity arm, int ticks, boolean simulateArrival) {
+	private static FilterRun runFilterEntry(SequencedArmBlockEntity arm, int ticks) {
 		boolean executed = false;
+		boolean moved = false;
 		for (int i = 0; i < ticks; i++) {
-			if (simulateArrival)
-				arm.chasedPointProgress = 1f;
 			arm.runtime.tick(arm);
+			if (arm.runtime.state == ProgramRuntime.EntryState.MOVING)
+				moved = true;
 			if (arm.runtime.isHalted())
-				return false; // 失败出口（onTimeout 默认 NONE ⇒ halt，只写 error）
+				return new FilterRun(false, moved); // 失败出口（窗口到点后的 onTimeout = NONE ⇒ halt）
 			if (arm.runtime.state == ProgramRuntime.EntryState.EXECUTING)
 				executed = true;
 			else if (executed && arm.runtime.state == ProgramRuntime.EntryState.IDLE)
-				return true; // 执行过、又回到空闲 ⇒ 走的是成功出口
+				return new FilterRun(true, moved); // 执行过、又回到空闲 ⇒ 走的是成功出口
 		}
-		return false;
+		return new FilterRun(false, moved);
 	}
 
 	/**
@@ -4441,8 +4555,13 @@ public class SequencedArmSelfTest {
 	 * 那会把 {@code entryIndex} 重置成 0 并让程序收工 —— 于是"失败落点"与"成功落点"在
 	 * 观察窗口里**长得一模一样**（下标都是 0）。抛错会真的是"停机 + 游标停在下标 1"，
 	 * 两个出口才区分得开（判据见 {@link #runRoute}）。
+	 *
+	 * @param retryWindow 失败重试窗口（ticks）—— ★ <b>必须给一个有限值</b>：{@code failAmount} 的默认值
+	 *                    是 {@code -1} = "一直重试"（用户口径：过滤**失败默认 retry**），
+	 *                    不去向就永远到不了，这条用例会变成"两个出口都没到"（{@code -1}）。
+	 *                    运行时那条路是 {@code handleFailure} → {@code RETRY} → 窗口到点 → {@code applySkip}。
 	 */
-	private static ArmProgram routeProgram(BlockPos offset) {
+	private static ArmProgram routeProgram(BlockPos offset, int retryWindow) {
 		ArmProgram program = new ArmProgram();
 		ArmProgramTask task = new ArmProgramTask();
 		task.name = "自检过滤路由";
@@ -4451,6 +4570,8 @@ public class SequencedArmSelfTest {
 		filter.filterSource = ArmProgramEntry.FilterSource.HELD;
 		filter.filterItem = new ItemStack(Items.IRON_INGOT);
 		filter.offset = offset;
+		filter.failAmount = retryWindow;
+		filter.failUnit = ArmProgramEntry.WaitUnit.TICK;
 		filter.onSuccess = ArmProgramEntry.SkipAction.SKIP_TO;
 		filter.successTarget = "1"; // 回到自己 ⇒ 只有"成功"这一条路能到
 		filter.onTimeout = ArmProgramEntry.SkipAction.SKIP_TO;

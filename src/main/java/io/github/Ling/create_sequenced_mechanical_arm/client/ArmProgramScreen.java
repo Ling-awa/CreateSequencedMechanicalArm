@@ -1882,7 +1882,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 用户定的属性表（第三轮 + 第四轮定稿）：
 		//  · **所有动作**（含等待）都能"完成后跳转" —— 成功出口是通用的；
 		//  · 「失败后」一个属性**合并了原来的「时限」+「超时后」**（用户第四轮要求）：
-		//    会重试的动作第二行是四个控件（去向 / 落点 / 时限 0–120 / 单位 t·s·m）；
+		//    会重试的动作（含**过滤**：控制类判断，失败默认 retry）第二行是四个控件
+		//    （去向 / 落点 / 时限 0–120 / 单位 t·s·m）；
 		//    只有硬失败的动作（左键）第二行只有两个（去向 / 落点）—— 硬失败是立刻发生的，没有重试窗口；
 		//  · 前摇（delay）删掉了：已经有独立的"等待"操作。
 		// 「退出 / 抛出错误」是终结操作：执行之后就不在这个任务里了，没有"成功后/失败后"可谈。
@@ -1969,6 +1970,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 有"失败判定"、且会**无限等**的操作（§7.7）：只有它们才有「时限」+「超时后」。
 	 *
 	 * <p>⚠️ 按**条目**判而不是按类型（§7.16b 一.6）：同一条 {@code SIGNAL}，收有失败出口、发没有。
+	 *
+	 * <p>★ 「过滤」在这一类（用户口径：过滤是控制类操作、**失败默认 retry**）：不匹配 / 没有物品
+	 * 就与「等红石」一样在重试窗口里反复判断 ⇒ 它必须有「时限 + 单位」那两个控件
+	 * （判据仍然只有 {@link ArmProgramEntry#hasRetryWindow()} 一处）。
 	 */
 	private static boolean hasFailure(ArmProgramEntry entry) {
 		return entry.hasRetryWindow();
@@ -2041,10 +2046,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/**
 	 * 「失败后」—— <b>一个属性管住整条失败路径</b>（用户第四轮要求：把「时限」和「失败后」合起来）。
 	 *
-	 * <p>第二行（{@code retryWindow=true}，即取/放/卸/组装/等红石）：四个控件 ——
+	 * <p>第二行（{@code retryWindow=true}，即取/放/卸/组装/等红石/**过滤**）：四个控件 ——
 	 * ① 去向（停下 / 跳过 / 跳转）② 落点输入框 ③ 时限 0–120 ④ 单位 t / s / m。
 	 * 语义：失败时<b>重试</b>，攒够 时限×单位 之后执行①；时限 = 0 就是"立刻"执行①；
-	 * ①②③④ 全不设（这个属性没加上）= 一直重试（{@code failAmount = -1}）。
+	 * ①②③④ 全不设（这个属性没加上）= 一直重试（{@code failAmount = -1}）——
+	 * 这正是**新建条目的默认值**，也就是用户要的"失败默认 retry"。
 	 *
 	 * <p>第二行（{@code retryWindow=false}，即左键的硬失败）：只有 ①去向 + ②落点 ——
 	 * 硬失败是立刻发生的，给它"重试多久"没有意义。
@@ -2942,10 +2948,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			// 退出是终结操作：第二行什么都不需要
 			case BREAK -> {
 			}
-			// 过滤：第二行 = **过滤位置**（必填）+（容器模式才有的）坐标与朝向。
+			// 过滤：第二行 = **过滤位置**（必填）+（容器模式才有的）坐标。
 			// ★ 起点 {@code FIELD_X_FILTER}（GUI 96）：这个操作占了两个幽灵槽，第二行必须让开它们 ——
 			//   与「收发信号」让开三个槽是同一条规矩（见 FIELD_X_SIGNAL 的说明）。
-			//   用户口径：**手持模式不写坐标**，所以那三格只在容器模式出现。
+			//   用户口径：**手持模式不写坐标**，所以那一格只在容器模式出现。
+			// ★ 那个坐标是"**读哪个方块**"的数据参数，不是"伸过去的目标"：过滤是控制类操作、
+			//   臂不移动（用户口径），所以这条的第二行与"要不要伸过去"无关 ——
+			//   判据是条目级的 {@code needsTarget()}（有没有坐标），不是 {@code movesArm()}。
 			case FILTER -> {
 				inlinePicker(FIELD_X_FILTER, FILTER_SRC_W, tr("entry.filter_source"),
 					tr("hint.entry_filter_source"), filterSourceLabels(), entry.filterSource.ordinal(), i -> {
@@ -4443,7 +4452,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 属性表 / 基础内容必须跟动作走（用户实测反馈："等待不该有超时，也不该有时限"、
 	 * "选了等待还让我填坐标"、"朝向应该放第二行"、"所有动作都能加完成后跳转"）。
 	 *
-	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出/放入/卸货/组装/等红石）
+	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出/放入/卸货/组装/等红石/过滤）
 	 * 才有「超时后 + 时限」；③ 前摇已经删掉（任何动作都不该再有它）；④ 朝向**不在任何卡片的胶囊里**；
 	 * ⑤ 第二行的 DATA_AREA 盒子数：位置类 1（坐标）、左键/右键 2（坐标+朝向）、等红石 2、等待 3。
 	 */
