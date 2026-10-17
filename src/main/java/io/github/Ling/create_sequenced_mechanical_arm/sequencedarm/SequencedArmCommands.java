@@ -17,6 +17,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ScriptFiles;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptResult;
 
@@ -31,7 +32,6 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 /**
@@ -99,7 +99,8 @@ public class SequencedArmCommands {
 	 */
 	private static LiteralArgumentBuilder<CommandSourceStack> codeCommand() {
 		return Commands.literal("code")
-			// 不给名字：只打印到聊天（看/复制用）；给了名字：同时落到 config/…/scripts/<名字>.sma
+			// 不给名字：只打印到聊天（看/复制用）；给了名字：同时落到 run/sequenced_arm/scripts/<名字>.sma
+			//（目录见 ScriptFiles：用户口径已从 config/…/scripts 搬到这里）
 			.then(Commands.literal("export")
 				.executes(ctx -> codeExport(ctx.getSource(), null))
 				.then(Commands.argument("名字", StringArgumentType.word())
@@ -172,25 +173,27 @@ public class SequencedArmCommands {
 
 	// ————————————————————————— 脚本（§12 的 P1） —————————————————————————
 
-	/** 脚本文件的目录：{@code config/create_sequenced_mechanical_arm/scripts}（§12.3c）。 */
-	private static Path scriptDir() {
-		return FMLPaths.CONFIGDIR.get()
-			.resolve(Create_sequenced_mechanical_arm.MODID)
-			.resolve("scripts");
+	/**
+	 * 脚本目录：{@code run/sequenced_arm/scripts/}（用户口径，**不再是** {@code config/…/scripts}）。
+	 *
+	 * <p>★ 路径与名字规则都只有一处 —— {@link ScriptFiles}。操作记录表的上传（{@code ArmScriptExport}）
+	 * 与将来启动时的脚本自动解析都从那里取同一个常量；各写一份就会出现"导出的文件 import 不回来"
+	 * 这种不报错的分叉。包可见（不是 private）是给启动自检读的：
+	 * {@code SequencedArmSelfTest.checkOperationRecordExport} 的 ⑤ 就断言两边**真的**是同一个目录。
+	 */
+	static Path scriptDir() {
+		return ScriptFiles.directory();
 	}
 
-	/** 脚本文件名：只用字母数字下划线连字符，免得 {@code ../} 之类跑出脚本目录。 */
+	/**
+	 * 脚本文件名；名字不合法时 {@code null}（不替调用方兜底）。
+	 *
+	 * <p>规则搬去了 {@link ScriptFiles#file}，与记录表导出**完全一致**（含允许中文）——
+	 * 否则导出 {@code 炒菜.sma} 之后 {@code /sma code import 炒菜} 会说不认识这个名字。
+	 */
 	@Nullable
-	private static Path scriptFile(String name) {
-		if (name == null || name.isEmpty())
-			return null;
-		for (int i = 0; i < name.length(); i++) {
-			char c = name.charAt(i);
-			boolean ok = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-';
-			if (!ok)
-				return null;
-		}
-		return scriptDir().resolve(name + ".sma");
+	static Path scriptFile(String name) {
+		return ScriptFiles.file(name);
 	}
 
 	/**

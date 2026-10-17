@@ -17,7 +17,9 @@ public class SequencedArmNetwork {
 			.playToServer(ArmProgramEditPacket.TYPE, ArmProgramEditPacket.STREAM_CODEC, ArmProgramEditPacket::handle)
 			.playToServer(CardUiPacket.TYPE, CardUiPacket.STREAM_CODEC, CardUiPacket::handle)
 			.playToServer(CardViewPacket.TYPE, CardViewPacket.STREAM_CODEC, CardViewPacket::handle)
-			.playToServer(CardNotesPacket.TYPE, CardNotesPacket.STREAM_CODEC, CardNotesPacket::handle);
+			.playToServer(CardNotesPacket.TYPE, CardNotesPacket.STREAM_CODEC, CardNotesPacket::handle)
+			// 操作记录表的上传意图（名字 + 目标臂坐标）：服务端校验后导出成脚本文件
+			.playToServer(ExportScriptPacket.TYPE, ExportScriptPacket.STREAM_CODEC, ExportScriptPacket::handle);
 	}
 
 }

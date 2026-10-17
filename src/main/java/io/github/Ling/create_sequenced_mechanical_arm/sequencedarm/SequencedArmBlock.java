@@ -8,6 +8,7 @@ import com.simibubi.create.foundation.block.IBE;
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.ClipboardPlan;
+import io.github.Ling.create_sequenced_mechanical_arm.item.OperationRecordItem;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
@@ -140,6 +141,12 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 		// ★ 操作表**不参与**下面的"交换物品"（用户第二十七轮："操作表除外"）—— 它有自己的手势。
 		if (OperationTableItem.isTable(stack))
 			return onBlockEntityUseItemOn(level, pos, arm -> loadProgramFromCard(arm, stack, player, level));
+		// 手持**操作记录表**右键 = 什么都不做：它的手势是"潜行右键上传"（见 item/OperationRecordHandler）。
+		// ⚠️ 必须在这里挡一下，否则它会掉进下面的"交换物品"：玩家只是忘了潜行，手边这张记录表就被塞进
+		//    臂手上、换回来臂原来拿的那件 —— 一个完全没有意义、还挺难解释的动作。
+		//    （记录表不携带数据，所以没丢东西；但"右键臂 = 东西被换走"这种意外仍然是 bug。）
+		if (OperationRecordItem.isRecord(stack))
+			return ItemInteractionResult.SUCCESS;
 		// 手持**普通物品**右键 = 与臂交换手上的东西（用户第二十七轮）。
 		// 只认主手：副手那个手势留给别的用途，两边同时换会让"我到底给了什么"变得说不清。
 		//

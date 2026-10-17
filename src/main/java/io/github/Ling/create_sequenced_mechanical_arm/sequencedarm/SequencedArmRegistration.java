@@ -1,6 +1,7 @@
 package io.github.Ling.create_sequenced_mechanical_arm.sequencedarm;
 
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
+import io.github.Ling.create_sequenced_mechanical_arm.item.OperationRecordItem;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.menu.ArmProgramMenu;
 
@@ -58,6 +59,14 @@ public class SequencedArmRegistration {
 	public static final DeferredItem<OperationTableItem> OPERATION_TABLE_RELATIVE =
 		ITEMS.register("operation_table_relative",
 			() -> new OperationTableItem(new Item.Properties().stacksTo(1)));
+
+	// ——— 操作记录表 ———
+	// **不携带任何数据**的物品：手持它 + 潜行右键一条臂 = "把这条臂的程序导出成脚本文件"
+	// （用户口径，见 item/OperationRecordItem 的类注释）。它只是"授权用的钥匙"，
+	// 所以这里除了 stacksTo(1) 没有任何组件 / NBT 相关的东西 —— 别往它身上加程序。
+	public static final DeferredItem<OperationRecordItem> OPERATION_RECORD =
+		ITEMS.register("operation_record",
+			() -> new OperationRecordItem(new Item.Properties().stacksTo(1)));
 
 	public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<SequencedArmBlockEntity>> SEQUENCED_ARM_BE =
 		BLOCK_ENTITIES.register("sequenced_arm",
