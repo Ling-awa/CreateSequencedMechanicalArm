@@ -92,8 +92,34 @@ public class ProgramRuntime {
 	 * 所以每 tick 再压一道 8 条的天花板（对默认速率 2 完全无影响，只是把"配置填得很大"与
 	 * "脚本自跳转"这两种情况都按住）。取 8 而不是 1：常规控制链（收信号 → 过滤 → 调用）
 	 * 常常是几连跳，压到 1 就等于把配置项废掉了。
+	 *
+	 * <p>⚠️ 它的单位是**条**，落到主循环里要乘 {@link #STEPS_PER_ENTRY} 换成步数（见 {@link #maxStepsPerTick()}）。
 	 */
 	public static final int MIN_ENTRY_BUDGET_PER_TICK = 8;
+	/**
+	 * 「一条（一瞬间出结果的）条目」在状态机里要走**几步**。
+	 *
+	 * <p>正好两步：{@code IDLE → beginEntry}（进 {@code EXECUTING}）与 {@code EXECUTING → execute}
+	 * （出结果、游标前进）。所以"每 tick 推进 N 条" ⇔ "每 tick 给 {@code N × 2} 步的预算" ——
+	 * {@link #tick} 里那两处（累积与硬上限）都用这个常量换算，别在两处各写一个 2。
+	 *
+	 * <p><b>为什么不直接按"游标前进一次 = 1 条"记账</b>（用户口径的字面读法，曾经想这么写）：
+	 * 那样 {@code beginEntry} 与 {@code execute} 会被挤进**同一个 tick**，于是"控制类条目在两拍之间
+	 * 停在 {@code EXECUTING}"这个窗口在 tick 边界上**永远看不到**。而自检里有两条判据正是拿它当
+	 * "真的执行了"的唯一证人（{@code checkSignalCutHasNoDuration} 的 {@code sawExecuting}、
+	 * {@code runFilterEntry} 的"先看见 EXECUTING 再回到 IDLE"），它们都写明过理由：
+	 * 看不见就等于"测了空气"。步粒度记账两者都保得住 —— 观感/速率口径与"按条"完全一致
+	 * （速率 2 ⇒ 一 tick 两条、速率 0.5 ⇒ 一条控制类条目跨 2 tick），中间态也照旧可见。
+	 */
+	public static final int STEPS_PER_ENTRY = 2;
+	/**
+	 * 小数预算的比较容差（单位 = 步）。
+	 *
+	 * <p>为什么需要：{@code 0.05 条/tick} 这种速率累加 10 次得到的是 {@code 0.9999999999999999}
+	 * （二进制表示误差），严格比 {@code 1.0} 会让"每 10 tick 一条"变成每 11 tick 一条。
+	 * 容差只用来**判够没够一步**；扣账永远是整 1.0，所以它不会让预算漂移。
+	 */
+	private static final double BUDGET_EPSILON = 1.0e-9;
 	/** {@code MAX} 卸货模式下单次操作的搬运上限。 */
 	public static final int MAX_TRANSFER_PER_OP = 64;
 	/**
@@ -149,12 +175,21 @@ public class ProgramRuntime {
 	 */
 	public int idleSpins;
 	/**
-	 * 速率预算里**不足一条的那点余量**（跨 tick 累积到这里）。
+	 * 速率预算里**不足一步的那点余量**（跨 tick 累积到这里）。
 	 *
-	 * <p>{@code entriesPerTick = 0.5} 时每 tick 只加 0.5：第一 tick 攒到 0.5 不满 1 条、第二 tick 攒到
-	 * 1.0 才够一条 —— 小数就是这样跨 tick 累积的。<b>不落盘</b>（重启后从 0 重新攒，最多让一条晚半拍，
-	 * 不值得为它加一个 NBT 键去污染存档格式）；换卡 / 回到开头 / 待机让出时清零（"不攒账"，
-	 * 否则等待几百 tick 之后会一次性吐出几百条）。
+	 * <p>⚠️ <b>单位是"状态机步"，不是"条"</b>：一条一瞬间出结果的条目 = {@link #STEPS_PER_ENTRY} 步
+	 * （见那个常量的注释）。{@code entriesPerTick = 0.5} 时每 tick 只加 {@code 0.5 × 2 = 1} 步 ——
+	 * 于是控制类条目每 tick 前进**一步**：第 1 tick 进 {@code EXECUTING}、第 2 tick 出结果，
+	 * 正是旧版（每 tick 一个状态机 case）的节奏；{@code 2} 时每 tick 加 4 步 = 两条。
+	 *
+	 * <p>纯小数速率（{@code 0.05}）靠它跨 tick 累积：每 tick 攒 0.1 步，攒够 1 步才动一下。
+	 * <b>每走一步就扣一步</b>（{@link #tick} 里的 {@code rateBudget -= 1.0}），所以它**不会只涨不消** ——
+	 * 之前的实现只加不扣，于是速率随运行时间自己越涨越高（攒到几万步就等于把配置项废掉了）。
+	 *
+	 * <p><b>不落盘</b>（重启后从 0 重新攒，最多让一条晚半拍，不值得为它加一个 NBT 键去污染存档格式）；
+	 * 换卡 / 回到开头（{@link #resetToStart}）清零、停机（{@link #halt}）清零、待机让出时清零
+	 * （"不攒账"，否则等待几百 tick 之后会一次性吐出几百条 —— 速率 0.5 的人看到的就是
+	 * "卡住半天然后瞬移"）。
 	 */
 	public double rateBudget;
 
@@ -163,10 +198,14 @@ public class ProgramRuntime {
 	 *
 	 * <p><b>优先级：覆盖值优先于配置项</b> —— 配置是运行期现读的（玩家可能在游戏里改），
 	 * 而自检要的是"钉死的节奏"：老夹具全按"一 tick 一步"写（例如"第 2 拍进 EXECUTING、
-	 * 第 3 拍出结果"），速率一变它们读到的中间状态就变了。所以自检统一钉 1.0；
-	 * 只有专门验速率的几条会自己覆盖成 2.0 / 0.5。
+	 * 第 3 拍出结果"），速率一变它们读到的中间状态就变了。所以自检统一钉
+	 * {@code 0.5 条/tick}（= 每 tick 一步 = 旧版节奏，见 {@link #STEPS_PER_ENTRY} 与
+	 * {@code SequencedArmSelfTest.OLD_PACE_RATE}）；只有专门验速率的几条会自己覆盖成 2.0 / 0.5。
 	 *
-	 * <p>为什么要这个开关而不是"让老夹具跑 2.0"：断言本身**一条都不许放松**
+	 * <p>⚠️ 别把常态值钉成 1.0：那等于"每 tick 两步"，控制类条目一 tick 就走完了，
+	 * 靠"看见过 EXECUTING"当证人的老夹具会集体失去观察窗口（理由见 {@link #STEPS_PER_ENTRY}）。
+	 *
+	 * <p>为什么要这个开关而不是"让老夹具跑配置值"：断言本身**一条都不许放松**
 	 * （决策 88：错的期望值和错的实现一样有害），钉住速率才能证明"速率换了，老语义没变"。
 	 */
 	@Nullable
@@ -197,6 +236,17 @@ public class ProgramRuntime {
 	 */
 	public static int maxEntriesPerTick() {
 		return Math.max(MIN_ENTRY_BUDGET_PER_TICK, (int) Math.ceil(effectiveRate()));
+	}
+
+	/**
+	 * 一个 tick 内允许走过的**状态机步数**硬上限 = {@code maxEntriesPerTick() × STEPS_PER_ENTRY}。
+	 *
+	 * <p>预算按步记（理由见 {@link #STEPS_PER_ENTRY}），所以天花板也必须换成步，否则速率一大，
+	 * "两步才算一条"的控制类条目会被这道闸卡掉一半。取 {@code 2 × 条数}：每条最多两步，
+	 * 于是"合法速率恰好不被卡住"，而"自跳转脚本"仍然被按住（速率 2 ⇒ 16 步 = 8 条）。
+	 */
+	public static int maxStepsPerTick() {
+		return maxEntriesPerTick() * STEPS_PER_ENTRY;
 	}
 
 	/**
@@ -251,7 +301,7 @@ public class ProgramRuntime {
 
 	// ——— 瞬态 ———
 	private int unloadMoved;
-	/** 本 tick 已经用掉的预算（每次循环迭代 +1，见 {@link #tick}）——只服务"本 tick 还让不让继续推"。 */
+	/** 本 tick 已经走过的**状态机步数**（每次循环迭代 +1，见 {@link #tick}）—— 只服务硬上限 {@link #maxStepsPerTick()}；速率预算另记在 {@link #rateBudget}。 */
 	private int tickBudgetUsed;
 	@Nullable
 	private String lastFailure;
@@ -309,11 +359,15 @@ public class ProgramRuntime {
 	 * 推进一个 tick（PLAN.md §7.6 v4 的主循环）。
 	 *
 	 * <h2>推进速率（本值新增）</h2>
-	 * 每 tick 先给本 tick 一笔**条目预算**（{@code budget += entriesPerTick}，小数跨 tick 累积：
-	 * 0.5 就是攒两 tick 才够 1 条），然后在"还能推进"时**连续推进**。所谓"推进一条"的口径是
-	 * <b>"游标真的往前走了一次"</b>（{@code succeed} / 跳转 / 收工 / 返回调用方都算一次），
-	 * 而不是"状态机走了一步" —— 因为同一 tick 内允许**先 {@code beginEntry} 再 {@code execute}**
-	 * （控制类条目本来就是"一瞬间出结果"，硬按状态机一 tick 一步会让速率只剩下一半）。
+	 * 每 tick 先给本 tick 一笔**步数预算**（{@code budget += 速率 × STEPS_PER_ENTRY}，小数跨 tick 累积：
+	 * 0.5 条/tick = 每 tick 一步），然后在"还能推进"时**连续推进**，每走一步扣一步。
+	 *
+	 * <p>★ <b>为什么按"状态机步"记账、而不是按字面的"游标前进一次 = 1 条"</b>（这是这一处最关键的推导，
+	 * 见 {@link #STEPS_PER_ENTRY} 的注释）：一条"一瞬间出结果"的条目**正好两步**（{@code beginEntry}
+	 * 进 {@code EXECUTING}，{@code execute} 出结果并推进游标），所以"每 tick 2×速率 步"就等价于
+	 * "每 tick 速率 条"：速率 2 ⇒ 一 tick 两条、速率 0.5 ⇒ 一条控制类条目跨 2 tick。
+	 * 若真按"游标前进一次"记 1 条，那两步会被挤进同一 tick，{@code EXECUTING} 这个中间态在 tick
+	 * 边界上再也看不到 —— 而自检两条判据正是拿它当"真的执行了"的唯一证人（见 {@link #STEPS_PER_ENTRY}）。
 	 *
 	 * <h2>什么时候立刻让出（剩下的预算清零，留到下一 tick）</h2>
 	 * <b>清零而不是留着</b>，理由是"小数跨 tick 累积"的口径要干净：移动 / 等待可能持续几百 tick，
@@ -323,9 +377,9 @@ public class ProgramRuntime {
 	 *   <li>{@link #isPaced}（移动 / 等待 / 延迟 / 重试）—— <b>有动作的条目一点都不变快</b>，
 	 *       它们仍然按真实 tick 走，所以"抬手 → 加工 → 收回"的观感与旧版逐字节相同；</li>
 	 *   <li>停机 / 无转速 / 红石锁定 / 程序为空 / {@code idleCooldown > 0} —— 主循环的早退门；</li>
-	 *   <li>本 tick 推进的条数达到硬上限 {@link #maxEntriesPerTick()} —— 防止"一条自跳转脚本"
+	 *   <li>本 tick 走过的步数达到硬上限 {@link #maxStepsPerTick()} —— 防止"一条自跳转脚本"
 	 *       把服务器卡在这一个 tick 里；</li>
-	 *   <li>本 tick 已经用掉的预算 ≥ 本 tick 拿到的预算 —— 速率本身用完了。</li>
+	 *   <li>本 tick 的预算用完了（{@code rateBudget < 1} 步）—— 速率本身用完了。</li>
 	 * </ol>
 	 */
 	public void tick(SequencedArmBlockEntity arm) {
@@ -343,10 +397,15 @@ public class ProgramRuntime {
 		if (arm.getSpeed() == 0)
 			return; // 无转速冻结
 
-		// 本 tick 的速率预算：小数跨 tick 累积（0.5 = 每 2 tick 一条；2 = 每 tick 两条）。
+		// 本 tick 的速率预算：**以"状态机步"为单位**（一条一瞬间出结果的条目 = STEPS_PER_ENTRY 步），
+		// 小数跨 tick 累积 —— 0.5 条/tick = 每 tick 一步（一条控制类条目跨 2 tick，= 旧版节奏），
+		// 2 条/tick = 每 tick 四步（= 一 tick 两条）。
 		// 只在**真的跑到这里**时累积 —— 上面那些早退（停机 / 锁定 / 无转速 / 空程序）都不攒预算，
 		// 否则"暂停几小时后恢复"会一次性吐出几千条。
-		rateBudget += effectiveRate();
+		rateBudget += effectiveRate() * STEPS_PER_ENTRY;
+		// 单 tick 额度封顶：预算**每走一步就扣一步**（见循环里那句 `rateBudget -= 1.0`），余量正常永远
+		// < 1 步、这道封顶用不上 —— 留着是防"将来某条路径忘了扣"时它悄悄攒成一大笔（那正是本值修掉的旧 bug）。
+		rateBudget = Math.min(rateBudget, maxStepsPerTick());
 		tickBudgetUsed = 0;
 
 		// §7.6 v4：没有调度器了 —— 谁在跑就是谁。任务数变了（卡被编辑过）就回到主任务。
@@ -389,6 +448,9 @@ public class ProgramRuntime {
 		}
 		if (entryIndex >= task.entries.size()) {
 			finishTask(arm, task);
+			// 这一步也要记账：不扣的话它会留下整整一步的零头，下一 tick 就会"多走一步"
+			// （0.5 条/tick 时正好是 1 步，攒成 2 步 ⇒ 老夹具的时间线错开一拍）。
+			rateBudget -= 1.0;
 			return;
 		}
 
@@ -399,10 +461,10 @@ public class ProgramRuntime {
 		while (true) {
 			if (idleCooldown > 0 || isHalted())
 				break; // 上一步可能刚把它设上（前置检查失败 / 停机）
-			if (tickBudgetUsed >= maxEntriesPerTick())
-				break; // 硬上限：本 tick 已经够多了，剩下的留给下一 tick
-			if (tickBudgetUsed >= (int) rateBudget)
-				break; // 本 tick 拿到的预算用完了（0.5 时就是"攒够 1 条才动一次"）
+			if (tickBudgetUsed >= maxStepsPerTick())
+				break; // 硬上限：本 tick 走够步数了，剩下的留给下一 tick
+			if (rateBudget < 1.0 - BUDGET_EPSILON)
+				break; // 本 tick 拿到的预算用完了（0.5 条/tick 时就是"攒够一步才动一下"）
 
 			task = program.task(taskIndex);
 			if (task == null) {
@@ -411,8 +473,9 @@ public class ProgramRuntime {
 				break;
 			}
 			if (entryIndex >= task.entries.size()) {
-				finishTask(arm, task); // 一轮走完（可能重跑 / 返回调用方 / 收工）：也是一次"推进"
+				finishTask(arm, task); // 一轮走完（可能重跑 / 返回调用方 / 收工）：也是一步
 				tickBudgetUsed++;
+				rateBudget -= 1.0;
 				continue;
 			}
 
@@ -448,8 +511,11 @@ public class ProgramRuntime {
 				}
 			}
 
-			// ★ 每一步都要花一笔预算（否则"一条自跳转脚本"能在同一 tick 里无限转下去）。
+			// ★ 每一步都花掉一步的预算（否则"一条自跳转脚本"能在同一 tick 里无限转下去）。
+			//   ⚠️ **必须真的从 rateBudget 里扣**：只加不扣的话它会随运行时间越攒越多
+			//   （攒到几万步 = 速率配置彻底失效，表现是"一 tick 把能推的全推完"）。
 			tickBudgetUsed++;
+			rateBudget -= 1.0;
 
 			// ★ 让出：移动 / 等待 / 延迟 / 重试 = "在跟世界打交道、要花真实时间" ⇒ 本 tick 到此为止。
 			//   ⚠️ 这一条就是"有动作的条目**不许**变快"的实现：它们永远走这条 break，
@@ -1751,6 +1817,10 @@ public class ProgramRuntime {
 		error = reason;
 		errorEntryIndex = entryIndex;
 		arm.cancelMove(); // 停机也收回：出错时把手臂留在目标前面既难看又挡视线
+		// 停机后 tick() 会在累积预算之前就早退，所以这笔记账**不清也不会自己涨**；这里还是清掉：
+		// 它是"本份程序还没花掉的那点余量"，而停机 = 这份程序到此为止（复位走 resetToStart 也会清）。
+		// 留着它只会在将来有人加"解除停机"时变成一个"一恢复就多走一步"的暗坑。
+		rateBudget = 0;
 		// ⚠️ §7.16e 有意的**反转**：停机**不再清信号**（旧行为在 §7.16c 里被 D 验过，用户这轮推翻）。
 		// 理由与"主任务正常结束"一样：信号是**持久变量**，停机只是"程序停了"，不等于"变量复位"。
 		arm.markProgramDirty();
@@ -1770,7 +1840,8 @@ public class ProgramRuntime {
 		loopCounter = 0;
 		idleSpins = 0;
 		idleCooldown = 0;
-		// 速率预算的小数余量也要归零：换卡 / 回到开头是"另一份程序"，不该继承上一份攒下的零头。
+		// 速率预算的余量也要归零：换卡 / 回到开头是"另一份程序"，不该继承上一份攒下的零头
+		// （自检的速率夹具正是靠这一点拿到"第一 tick 的预算是确定值"，见 checkEntryRate ①）。
 		rateBudget = 0;
 		cachedPowerVersion = -1;
 		callStack.clear();
