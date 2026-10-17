@@ -53,7 +53,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmR
 import io.netty.buffer.Unpooled;
 import net.createmod.catnip.animation.LerpedFloat;
 import net.createmod.catnip.animation.LerpedFloat.Chaser;
-import net.createmod.catnip.gui.UIRenderHelper;
 import net.createmod.catnip.data.Couple;
 import net.createmod.catnip.gui.element.GuiGameElement;
 import net.createmod.catnip.gui.widget.AbstractSimiWidget;
@@ -102,6 +101,15 @@ import net.neoforged.neoforge.network.PacketDistributor;
  *       （{@code SCHEDULE_EDITOR_ADDITIONAL_SLOT} + 玩家背包 + {@code GhostItemSubmitPacket}）。</li>
  *   <li><b>允许删光</b>：任务、操作都能删到一条不剩。</li>
  * </ol>
+ *
+ * <h2>贴图归属（资源自持第 4 片）</h2>
+ * 用户要把界面的<b>暗色改成黄铜色</b>，所以"主体贴图"已经搬进本模组、一律走 {@link ModGuiTextures}
+ * ——面板 / 卡片 / 条带 / 胶囊 / 条件 / 指针 / 滚动条 / 编辑子面板 / 输入框底，uv 与宽高<b>逐字照抄</b>
+ * Create 的 {@code AllGuiTextures}（所以下面各处引用的 {@code SCHEDULE_*} 等名字都只是<b>上游出处</b>，
+ * 本类不再引用它们）。<b>按钮与图标不动</b>：仍用 Create 的 {@code IconButton} + {@link AllIcons}；
+ * 玩家背包底板 {@code PLAYER_INVENTORY} 也继续借用（那是原版容器的通用底板）。
+ * 拉伸一律用 {@link ModGuiTextures#renderStretched}（上游 {@code UIRenderHelper.drawStretched} 把
+ * 图集尺寸写死 256×256，对裁出来的小图是错的）。
  *
  * <h2>照抄数值（改前先对照上游行号）</h2>
  * {@code CARD_WIDTH=195}、{@code CARD_HEADER=22}、卡片画在 {@code (leftPos+25, topPos+yOffset)}、
@@ -569,7 +577,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	@Override
 	protected void init() {
-		AllGuiTextures bg = AllGuiTextures.SCHEDULE;
+		// 窗口尺寸从**我们自己的**面板贴图取（用户要把暗色改黄铜：主体贴图已搬进本模组）。
+		// 数值与 Create 的 SCHEDULE 逐字相同（256×226），所以换引用不改布局。
+		ModGuiTextures bg = ModGuiTextures.EDITOR_PANEL;
 		setWindowSize(bg.getWidth(), bg.getHeight());
 		super.init();
 		clearWidgets();
@@ -829,12 +839,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		graphics.pose()
 			.translate(0, 0, 300);
 		graphics.fill(x, topPos + 16, x + BAR_W, topPos + 189, draggingBar ? 0x88000000 : 0x55000000);
-		AllGuiTextures pad = AllGuiTextures.STOCK_KEEPER_REQUEST_SCROLL_PAD;
-		UIRenderHelper.drawStretched(graphics, x, thumbY, pad.getWidth(), thumbH, 0, pad);
-		AllGuiTextures.STOCK_KEEPER_REQUEST_SCROLL_TOP.render(graphics, x, thumbY);
+		// 滑块是"主体贴图"（用户要改的那类）—— 从 Create 的 stock_keeper.png 里裁成 5×20 的独立小图
+		// （那张整张是"仓库管理员请求界面"，不该整张搬）；getWidth() 仍是 5，几何不变。
+		ModGuiTextures pad = ModGuiTextures.SCROLL_BAR_PAD;
+		pad.renderStretched(graphics, x, thumbY, pad.getWidth(), thumbH, 0);
+		ModGuiTextures.SCROLL_BAR_TOP.render(graphics, x, thumbY);
 		if (thumbH > 16)
-			AllGuiTextures.STOCK_KEEPER_REQUEST_SCROLL_MID.render(graphics, x, thumbY + thumbH / 2 - 4);
-		AllGuiTextures.STOCK_KEEPER_REQUEST_SCROLL_BOT.render(graphics, x, thumbY + thumbH - 5);
+			ModGuiTextures.SCROLL_BAR_MID.render(graphics, x, thumbY + thumbH / 2 - 4);
+		ModGuiTextures.SCROLL_BAR_BOT.render(graphics, x, thumbY + thumbH - 5);
 		graphics.pose()
 			.popPose();
 	}
@@ -872,7 +884,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	@Override
 	protected void renderBg(GuiGraphics graphics, float partialTick, int mouseX, int mouseY) {
-		AllGuiTextures.SCHEDULE.render(graphics, leftPos, topPos);
+		ModGuiTextures.EDITOR_PANEL.render(graphics, leftPos, topPos);
 		ArmProgramTask current = task(currentTask);
 		Component heading;
 		if (editingDialog != null)
@@ -883,7 +895,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			heading = tr("title_tasks", program.tasks.size());
 		else
 			heading = tr("title_entries", currentTask + 1, current == null ? "?" : current.name);
-		int center = leftPos + (AllGuiTextures.SCHEDULE.getWidth() - 8) / 2;
+		int center = leftPos + (ModGuiTextures.EDITOR_PANEL.getWidth() - 8) / 2;
 		graphics.drawString(font, heading, center - font.width(heading) / 2, topPos + 4, 0x505050, false);
 
 		if (editingDialog != null)
@@ -899,16 +911,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	/** 上游 {@code renderSchedule}（:388-485）的移植：竖轨 + 裁剪 + 逐卡 + 指针 + 末尾新卡 + 淡出。 */
 	private void renderCards(GuiGraphics graphics, float partialTicks) {
-		UIRenderHelper.drawStretched(graphics, leftPos + 33, topPos + 16, 3, 173, 200,
-			AllGuiTextures.SCHEDULE_STRIP_DARK);
+		ModGuiTextures.STRIP_DARK.renderStretched(graphics, leftPos + 33, topPos + 16, 3, 173, 200);
 
 		List<Card> cards = layout();
 		float scrollOffset = -listScroll().getValue(partialTicks);
 		graphics.enableScissor(leftPos + 16, topPos + 16, leftPos + 236, topPos + 189);
 
 		if (cards.isEmpty() || pointerIndex == 0)
-			UIRenderHelper.drawStretched(graphics, leftPos + 33, topPos + 16, 3, 10, -100,
-				AllGuiTextures.SCHEDULE_STRIP_LIGHT);
+			ModGuiTextures.STRIP_LIGHT.renderStretched(graphics, leftPos + 33, topPos + 16, 3, 10, -100);
 
 		for (int i = 0; i < cards.size(); i++) {
 			int y = cardY(i);
@@ -920,7 +930,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				float actual = Mth.clamp(expected, topPos + 18, topPos + 170);
 				graphics.pose()
 					.translate(0, actual, 0);
-				(expected == actual ? AllGuiTextures.SCHEDULE_POINTER : AllGuiTextures.SCHEDULE_POINTER_OFFSCREEN)
+				(expected == actual ? ModGuiTextures.POINTER : ModGuiTextures.POINTER_OFFSCREEN)
 					.render(graphics, leftPos, 0);
 				graphics.pose()
 					.popPose();
@@ -939,7 +949,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					.pushPose();
 				graphics.pose()
 					.translate(0, scrollOffset, 0);
-				AllGuiTextures.SCHEDULE_STRIP_DOTTED.render(graphics, leftPos + 29, topPos + y + CARD_HEIGHT - 3);
+				ModGuiTextures.STRIP_DOTTED.render(graphics, leftPos + 29, topPos + y + CARD_HEIGHT - 3);
 				graphics.pose()
 					.popPose();
 			}
@@ -950,8 +960,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		graphics.pose()
 			.translate(0, scrollOffset, 0);
 		int newY = newCardY(cards);
-		AllGuiTextures.SCHEDULE_STRIP_END.render(graphics, leftPos + 29, topPos + newY);
-		AllGuiTextures.SCHEDULE_CARD_NEW.render(graphics, leftPos + 43, topPos + newY);
+		ModGuiTextures.STRIP_END.render(graphics, leftPos + 29, topPos + newY);
+		ModGuiTextures.CARD_NEW.render(graphics, leftPos + 43, topPos + newY);
 		graphics.pose()
 			.popPose();
 
@@ -974,29 +984,29 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		graphics.pose()
 			.translate(leftPos + 25, topPos + y, 0);
 
-		AllGuiTextures light = AllGuiTextures.SCHEDULE_CARD_LIGHT;
-		AllGuiTextures medium = AllGuiTextures.SCHEDULE_CARD_MEDIUM;
-		AllGuiTextures dark = AllGuiTextures.SCHEDULE_CARD_DARK;
+		ModGuiTextures light = ModGuiTextures.CARD_LIGHT;
+		ModGuiTextures medium = ModGuiTextures.CARD_MEDIUM;
+		ModGuiTextures dark = ModGuiTextures.CARD_DARK;
 
-		UIRenderHelper.drawStretched(graphics, 0, 1, CARD_WIDTH, CARD_HEIGHT - 2, 0, light);
-		UIRenderHelper.drawStretched(graphics, 1, 0, CARD_WIDTH - 2, CARD_HEIGHT, 0, light);
-		UIRenderHelper.drawStretched(graphics, 1, 1, CARD_WIDTH - 2, CARD_HEIGHT - 2, 0, dark);
-		UIRenderHelper.drawStretched(graphics, 2, 2, CARD_WIDTH - 4, CARD_HEIGHT - 4, 0, medium);
-		UIRenderHelper.drawStretched(graphics, 2, 2, CARD_WIDTH - 4, CARD_HEADER, 0, light);
+		light.renderStretched(graphics, 0, 1, CARD_WIDTH, CARD_HEIGHT - 2, 0);
+		light.renderStretched(graphics, 1, 0, CARD_WIDTH - 2, CARD_HEIGHT, 0);
+		dark.renderStretched(graphics, 1, 1, CARD_WIDTH - 2, CARD_HEIGHT - 2, 0);
+		medium.renderStretched(graphics, 2, 2, CARD_WIDTH - 4, CARD_HEIGHT - 4, 0);
+		light.renderStretched(graphics, 2, 2, CARD_WIDTH - 4, CARD_HEADER, 0);
 
-		AllGuiTextures.SCHEDULE_CARD_REMOVE.render(graphics, CARD_WIDTH - 14, 2);
+		ModGuiTextures.CARD_REMOVE.render(graphics, CARD_WIDTH - 14, 2);
 		// 「复制卡片」在右下角（上游位置原样）。它自带一块**等于卡片主体色**的底色，
 		// 所以只能待在主体上 —— 放进标题栏（浅色带）会显出一个色块（用户实测）。
-		AllGuiTextures.SCHEDULE_CARD_DUPLICATE.render(graphics, DUPLICATE_X, DUPLICATE_Y);
+		ModGuiTextures.CARD_DUPLICATE.render(graphics, DUPLICATE_X, DUPLICATE_Y);
 		if (index > 0)
-			AllGuiTextures.SCHEDULE_CARD_MOVE_UP.render(graphics, CARD_WIDTH, CARD_HEADER - 14);
+			ModGuiTextures.CARD_MOVE_UP.render(graphics, CARD_WIDTH, CARD_HEADER - 14);
 		if (index < cards.size() - 1)
-			AllGuiTextures.SCHEDULE_CARD_MOVE_DOWN.render(graphics, CARD_WIDTH, CARD_HEADER);
+			ModGuiTextures.CARD_MOVE_DOWN.render(graphics, CARD_WIDTH, CARD_HEADER);
 
-		UIRenderHelper.drawStretched(graphics, 8, 0, 3, CARD_HEIGHT + 10, 0, AllGuiTextures.SCHEDULE_STRIP_LIGHT);
-		(card.task ? AllGuiTextures.SCHEDULE_STRIP_ACTION : AllGuiTextures.SCHEDULE_STRIP_TRAVEL)
+		ModGuiTextures.STRIP_LIGHT.renderStretched(graphics, 8, 0, 3, CARD_HEIGHT + 10, 0);
+		(card.task ? ModGuiTextures.STRIP_ACTION : ModGuiTextures.STRIP_TRAVEL)
 			.render(graphics, 4, 6);
-		AllGuiTextures.SCHEDULE_STRIP_WAIT.render(graphics, 4, 28);
+		ModGuiTextures.STRIP_WAIT.render(graphics, 4, 28);
 
 		// 序号（1 基）：跳转/调用时填的就是这个号。主任务（第 1 张任务卡）用金色标出来。
 		graphics.drawString(font, String.valueOf(index + 1), 14, 8,
@@ -1025,9 +1035,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			float target = rowScrolls.get(Math.min(index, rowScrolls.size() - 1))
 				.getChaseTarget();
 			if (!Mth.equal(target, 0))
-				AllGuiTextures.SCHEDULE_SCROLL_LEFT.render(graphics, SCROLL_LEFT_X, center);
+				ModGuiTextures.SCROLL_LEFT.render(graphics, SCROLL_LEFT_X, center);
 			if (!Mth.equal(target, maxRowScroll(card)))
-				AllGuiTextures.SCHEDULE_SCROLL_RIGHT.render(graphics, SCROLL_RIGHT_X, center);
+				ModGuiTextures.SCROLL_RIGHT.render(graphics, SCROLL_RIGHT_X, center);
 		}
 
 		graphics.pose()
@@ -1065,7 +1075,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 而命中那一侧用的是可见坐标 —— 于是表现为"有悬停提示、却没有按钮"。
 		int plusX = plusLocalX(x - 26, rowOffset);
 		if (addPropVisible(plusX))
-			AllGuiTextures.SCHEDULE_CONDITION_NEW.render(graphics, plusX, CARD_ROW_Y);
+			ModGuiTextures.CONDITION_NEW.render(graphics, plusX, CARD_ROW_Y);
 	}
 
 	/**
@@ -1155,19 +1165,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			.pushPose();
 		graphics.pose()
 			.translate(x, y, 0);
-		UIRenderHelper.drawStretched(graphics, 0, 0, width, CHIP_H, 0, AllGuiTextures.SCHEDULE_CONDITION_MIDDLE);
-		(clean ? AllGuiTextures.SCHEDULE_CONDITION_LEFT_CLEAN : AllGuiTextures.SCHEDULE_CONDITION_LEFT)
+		ModGuiTextures.CONDITION_MIDDLE.renderStretched(graphics, 0, 0, width, CHIP_H, 0);
+		(clean ? ModGuiTextures.CONDITION_LEFT_CLEAN : ModGuiTextures.CONDITION_LEFT)
 			.render(graphics, clean ? 0 : -3, 0);
-		AllGuiTextures.SCHEDULE_CONDITION_RIGHT.render(graphics, width - 2, 0);
+		ModGuiTextures.CONDITION_RIGHT.render(graphics, width - 2, 0);
 		if (hasItem) {
-			AllGuiTextures.SCHEDULE_CONDITION_ITEM.render(graphics, 3, 0);
+			ModGuiTextures.CONDITION_ITEM.render(graphics, 3, 0);
 			GuiGameElement.of(icon)
 				.at(4, 0)
 				.render(graphics);
 		}
 		if (hasSecond) {
 			int secondX = hasItem ? 22 : 3;
-			AllGuiTextures.SCHEDULE_CONDITION_ITEM.render(graphics, secondX, 0);
+			ModGuiTextures.CONDITION_ITEM.render(graphics, secondX, 0);
 			GuiGameElement.of(icon2)
 				.at(secondX + 1, 0)
 				.render(graphics);
@@ -1225,12 +1235,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			.pushPose();
 		graphics.pose()
 			.translate(x, y, 0);
-		UIRenderHelper.drawStretched(graphics, 0, 0, width, CHIP_H, 0, AllGuiTextures.SCHEDULE_CONDITION_MIDDLE);
-		AllGuiTextures.SCHEDULE_CONDITION_LEFT.render(graphics, -3, 0);
-		AllGuiTextures.SCHEDULE_CONDITION_RIGHT.render(graphics, width - 2, 0);
+		ModGuiTextures.CONDITION_MIDDLE.renderStretched(graphics, 0, 0, width, CHIP_H, 0);
+		ModGuiTextures.CONDITION_LEFT.render(graphics, -3, 0);
+		ModGuiTextures.CONDITION_RIGHT.render(graphics, width - 2, 0);
 
 		// ① 图标（自定义优先，否则用默认的红石链接）
-		AllGuiTextures.SCHEDULE_CONDITION_ITEM.render(graphics, 3, 0);
+		ModGuiTextures.CONDITION_ITEM.render(graphics, 3, 0);
 		GuiGameElement.of(entryIcon)
 			.at(4, 0)
 			.render(graphics);
@@ -1242,7 +1252,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 		// ③ 两个信号物品槽（空的也画空框，位置留出来）
 		for (ItemStack item : new ItemStack[] { first, second }) {
-			AllGuiTextures.SCHEDULE_CONDITION_ITEM.render(graphics, textX - 1, 0);
+			ModGuiTextures.CONDITION_ITEM.render(graphics, textX - 1, 0);
 			if (!item.isEmpty())
 				GuiGameElement.of(item)
 					.at(textX, 0)
@@ -2499,7 +2509,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private void renderEditor(GuiGraphics graphics) {
 		graphics.fillGradient(0, 0, width, height, -1072689136, -804253680);
-		AllGuiTextures.SCHEDULE_EDITOR.render(graphics, leftPos - 2, topPos + 40);
+		ModGuiTextures.EDITOR_BODY.render(graphics, leftPos - 2, topPos + 40);
 		AllGuiTextures.PLAYER_INVENTORY.render(graphics, leftPos + 38, topPos + 122);
 		graphics.drawString(font, playerInventoryTitle, leftPos + 46, topPos + 128, 0x505050, false);
 		boolean header = editing == null || editing.propName() == null;
@@ -2509,14 +2519,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 面板顶上的那行字：编辑属性时就是属性名（上游也是"指令编辑器 / 条件编辑器"这样标），
 		// 所以第一行的框里放的都是"值"，不会让人猜自己在改什么。
 		Component hint = editingProp != null ? editingProp.name : header ? tr("editor.hint_op") : tr("editor.hint");
-		int center = leftPos + (AllGuiTextures.SCHEDULE.getWidth() - 8) / 2;
+		int center = leftPos + (ModGuiTextures.EDITOR_PANEL.getWidth() - 8) / 2;
 		graphics.drawString(font, hint, center - font.width(hint) / 2, topPos + 44, 0x505050, false);
 
 		// 幽灵槽：**只画当前用得到的那些**（槽 0 = 图标；槽 1/2 = 「收发信号」的一对频率，
 		// 「过滤」时槽 1 = 幽灵过滤器物品）。
 		// 用不上时既不画框、也不激活（槽里的物品由 openEditor 推空清掉，见 sendGhostSlots）。
 		for (int i = 0; i < menu.targetSlotsActive && i < menu.ghostInventory.getSlots(); i++) {
-			AllGuiTextures.SCHEDULE_EDITOR_ADDITIONAL_SLOT.render(graphics, leftPos + 53 + 20 * i, topPos + 87);
+			ModGuiTextures.EDITOR_GHOST_SLOT.render(graphics, leftPos + 53 + 20 * i, topPos + 87);
 			ItemStack stored = menu.ghostInventory.getStackInSlot(i);
 			// 槽 0 空着时显示"这个动作的默认图标"当预览；频率槽空 = 还没绑，不预览（免得看着像已绑定）
 			ItemStack preview = i == 0 && stored.isEmpty() ? defaultIconForPreview() : stored;
@@ -2711,12 +2721,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 画输入框那一页（面板 + 标题 + 文本框底 + 错误行）。 */
 	private void renderDialog(GuiGraphics graphics) {
 		graphics.fillGradient(0, 0, width, height, -1072689136, -804253680);
-		AllGuiTextures.SCHEDULE_EDITOR.render(graphics, leftPos - 2, topPos + 40);
+		ModGuiTextures.EDITOR_BODY.render(graphics, leftPos - 2, topPos + 40);
 		AllGuiTextures.PLAYER_INVENTORY.render(graphics, leftPos + 38, topPos + 122);
 		graphics.drawString(font, playerInventoryTitle, leftPos + 46, topPos + 128, 0x505050, false);
 
 		Component hint = editingDialog == Dialog.ORIGIN ? tr("title.origin_dialog") : tr("title.shift_dialog");
-		int center = leftPos + (AllGuiTextures.SCHEDULE.getWidth() - 8) / 2;
+		int center = leftPos + (ModGuiTextures.EDITOR_PANEL.getWidth() - 8) / 2;
 		graphics.drawString(font, hint, center - font.width(hint) / 2, topPos + 44, 0x505050, false);
 
 		for (int[] box : editorBoxes)
@@ -3121,11 +3131,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		editorBoxes.add(new int[] { leftPos + x, topPos + y, width });
 	}
 
-	/** 上游 {@code ModularGuiLine.box:65-72}：DATA_AREA 拉伸 + START/END 两个包头。 */
+	/** 上游 {@code ModularGuiLine.box:65-72}：DATA_AREA 拉伸 + START/END 两个包头（贴图已裁成本模组自己的 8×18）。 */
 	private void renderDataArea(GuiGraphics graphics, int x, int y, int width) {
-		UIRenderHelper.drawStretched(graphics, x, y, width, 18, 0, AllGuiTextures.DATA_AREA);
-		AllGuiTextures.DATA_AREA_START.render(graphics, x, y);
-		AllGuiTextures.DATA_AREA_END.render(graphics, x + width - 2, y);
+		ModGuiTextures.DATA_AREA.renderStretched(graphics, x, y, width, 18, 0);
+		ModGuiTextures.DATA_AREA_START.render(graphics, x, y);
+		ModGuiTextures.DATA_AREA_END.render(graphics, x + width - 2, y);
 	}
 
 	/** 第二行的枚举选择框（上游 {@code addSelectionScrollInput}）。 */
