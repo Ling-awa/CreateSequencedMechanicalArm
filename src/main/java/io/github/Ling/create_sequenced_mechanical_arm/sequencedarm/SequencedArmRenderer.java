@@ -2,9 +2,10 @@ package io.github.Ling.create_sequenced_mechanical_arm.sequencedarm;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import com.simibubi.create.AllPartialModels;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntityRenderer;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmRenderer;
+
+import io.github.Ling.create_sequenced_mechanical_arm.client.ModPartialModels;
 
 import dev.engine_room.flywheel.api.visualization.VisualizationManager;
 import dev.engine_room.flywheel.lib.transform.TransformStack;
@@ -22,10 +23,15 @@ import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
- * 臂身渲染：复用 Create 的机械臂部件模型与部件变换。
+ * 臂身渲染：复用 Create 的机械臂部件变换，绘制<b>我们自己的</b>动态部件模型与贴图。
  *
  * <p>{@code ArmRenderer.transformBase/LowerArm/UpperArm/Head/ClawHalf} 都是 public static，
- * {@code AllPartialModels.ARM_*} 也全部公开，所以这里只负责"喂自己的角度"，不复制变换数学。
+ * 这里只负责"喂自己的角度"，<b>不复制变换数学</b>（那几个 rotate/translate 常数没有美术，
+ * 抄一份只会和上游姿态漂移）。
+ *
+ * <p>部件模型走 {@link ModPartialModels}（{@code block/sequenced_arm/*}）而不是 Create 的
+ * {@code AllPartialModels.ARM_*}：用户要求资源自持 —— 静态方块模型（第 2 片）与这些会动的部件
+ * 必须是同一套贴图，否则会出现"底座换了、关节和爪子还是 Create 的画"。
  *
  * <p>阶段 1 的取舍：末端先用动力臂自带的爪子（claw）——它的几何是为这个位置量身做的，
  * 保证摆位正确。换成机械手的手（{@code DEPLOYER_HAND_*}）需要对着画面调偏移，
@@ -39,7 +45,7 @@ public class SequencedArmRenderer extends KineticBlockEntityRenderer<SequencedAr
 
 	@Override
 	protected SuperByteBuffer getRotatedModel(SequencedArmBlockEntity be, BlockState state) {
-		return CachedBuffers.partial(AllPartialModels.ARM_COG, state);
+		return CachedBuffers.partial(ModPartialModels.ARM_COG.model, state);
 	}
 
 	@Override
@@ -80,19 +86,19 @@ public class SequencedArmRenderer extends KineticBlockEntityRenderer<SequencedAr
 			msr.rotateXDegrees(180);
 
 		ArmRenderer.transformBase(msr, base);
-		CachedBuffers.partial(AllPartialModels.ARM_BASE, state)
+		CachedBuffers.partial(ModPartialModels.ARM_BASE.model, state)
 			.light(light)
 			.transform(local)
 			.renderInto(ms, vb);
 
 		ArmRenderer.transformLowerArm(msr, lower);
-		CachedBuffers.partial(AllPartialModels.ARM_LOWER_BODY, state)
+		CachedBuffers.partial(ModPartialModels.ARM_LOWER_BODY.model, state)
 			.light(light)
 			.transform(local)
 			.renderInto(ms, vb);
 
 		ArmRenderer.transformUpperArm(msr, upper);
-		CachedBuffers.partial(AllPartialModels.ARM_UPPER_BODY, state)
+		CachedBuffers.partial(ModPartialModels.ARM_UPPER_BODY.model, state)
 			.light(light)
 			.transform(local)
 			.renderInto(ms, vb);
@@ -100,7 +106,8 @@ public class SequencedArmRenderer extends KineticBlockEntityRenderer<SequencedAr
 		ArmRenderer.transformHead(msr, head);
 		if (inverted)
 			msr.rotateZDegrees(180);
-		CachedBuffers.partial(be.goggles ? AllPartialModels.ARM_CLAW_BASE_GOGGLES : AllPartialModels.ARM_CLAW_BASE, state)
+		CachedBuffers.partial((be.goggles ? ModPartialModels.ARM_CLAW_BASE_GOGGLES : ModPartialModels.ARM_CLAW_BASE).model,
+			state)
 			.light(light)
 			.transform(local)
 			.renderInto(ms, vb);
@@ -110,8 +117,8 @@ public class SequencedArmRenderer extends KineticBlockEntityRenderer<SequencedAr
 		for (int flip : Iterate.positiveAndNegative) {
 			local.pushPose();
 			ArmRenderer.transformClawHalf(msr, hasItem, isBlockItem, flip);
-			CachedBuffers.partial(flip > 0 ? AllPartialModels.ARM_CLAW_GRIP_LOWER : AllPartialModels.ARM_CLAW_GRIP_UPPER,
-				state)
+			CachedBuffers.partial(
+				(flip > 0 ? ModPartialModels.ARM_CLAW_GRIP_LOWER : ModPartialModels.ARM_CLAW_GRIP_UPPER).model, state)
 				.light(light)
 				.transform(local)
 				.renderInto(ms, vb);
