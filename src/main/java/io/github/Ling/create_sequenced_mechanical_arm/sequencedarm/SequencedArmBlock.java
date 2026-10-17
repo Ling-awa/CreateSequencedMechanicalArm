@@ -5,7 +5,9 @@ import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.simpleRelays.ICogWheel;
 import com.simibubi.create.foundation.block.IBE;
 
+import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
+import io.github.Ling.create_sequenced_mechanical_arm.item.ClipboardPlan;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
@@ -36,6 +38,10 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.shapes.CollisionContext;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.common.util.FakePlayer;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent.RightClickBlock;
 
 /**
  * 可编程动力臂方块（阶段 1：硬件骨架）。
@@ -51,7 +57,12 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * <p>注意：{@code KineticBlock.hasShaftTowards} 默认返回 <b>false</b>
  * （Create 6.0.10 KineticBlock.java:51-53），所以动力臂必须像原版一样实现
  * {@link ICogWheel} —— 靠<b>相邻齿轮</b>取力，而不是靠传动轴。
+ *
+ * <p>本类同时挂一个 <b>游戏总线</b>事件（{@link #onClipboardLogExport}）：
+ * "手持剪贴板 + 潜行右键本方块 = 导出运行日志"，它**不能**写在 {@link #useItemOn} 里
+ * （潜行会跳过方块交互，理由见那个方法的注释）。
  */
+@EventBusSubscriber(modid = Create_sequenced_mechanical_arm.MODID)
 public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmBlockEntity>, ICogWheel {
 
 	public static final BooleanProperty CEILING = BooleanProperty.create("ceiling");
@@ -139,6 +150,54 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 			return onBlockEntityUseItemOn(level, pos, arm -> exchangeHeldItem(arm, player, level));
 
 		return super.useItemOn(stack, state, level, pos, player, hand, hitResult);
+	}
+
+	/**
+	 * 手持 Create 剪贴板 + **潜行** + 右键这块臂 = 把这条臂的运行日志（环形缓冲）写进那块剪贴板。
+	 *
+	 * <p><b>为什么挂在事件上、而不是上面的 {@link #useItemOn}</b>：原版对"潜行 + 手上有东西"直接
+	 * 跳过方块交互（`ServerPlayerGameMode` 里那个 flag，判据与 {@code RightClickBridge:301-303} 抄的同一行：
+	 * `isShiftKeyDown() && !stack.isEmpty()`，除非手上物品 {@code doesSneakBypassUse}）——
+	 * 剪贴板没有 bypass ⇒ 潜行右键时 {@code useItemOn} **根本收不到**这一下。
+	 * 这与"空手潜行右键 = 取溢出"能用到 {@code useWithoutItem} 并不矛盾：那条路上手是空的。
+	 *
+	 * <p><b>为什么必须拦得这么窄</b>（只认：服务端 + 主手 + 潜行 + 剪贴板 + 指着**我们的**臂）：
+	 * 剪贴板自己的手势一个都不能碰坏 ——
+	 * <ul>
+	 *   <li>潜行右键**别的**方块 = 原地放下一个剪贴板方块（`ClipboardBlockItem.useOn:41-43` → `BlockItem.useOn`）；</li>
+	 *   <li>非潜行右键 = 打开它的编辑界面（`ClipboardBlockItem.useOn:43` → `use(...)`；`:58-71`）；</li>
+	 *   <li>它右键"可写方块"时 Create 自己还有动作（`ClipboardValueSettingsHandler`），我们也不插手。</li>
+	 * </ul>
+	 * 只认主手也是为了不撞"空手潜行右键取溢出"：副手持剪贴板 + 空手潜行时手是空的，不该被这里吃掉。
+	 *
+	 * <p>假玩家（臂自己的 {@code DeployerFakePlayer}，一条臂用「使用」去点另一条臂）一律不算玩家手势。
+	 */
+	@SubscribeEvent
+	public static void onClipboardLogExport(RightClickBlock event) {
+		Level level = event.getLevel();
+		if (level.isClientSide())
+			return; // 服务端裁决就够：客户端这一侧只负责把包发出去（见 OperationTableHandler 的类注释）
+		if (event.getHand() != InteractionHand.MAIN_HAND)
+			return;
+		Player player = event.getEntity();
+		if (player == null || player.isSpectator() || player instanceof FakePlayer)
+			return;
+		if (!player.isShiftKeyDown())
+			return;
+		ItemStack stack = player.getMainHandItem();
+		if (!ClipboardPlan.isClipboard(stack))
+			return;
+		BlockPos pos = event.getPos();
+		if (!(level.getBlockState(pos)
+			.getBlock() instanceof SequencedArmBlock))
+			return;
+		if (!(level.getBlockEntity(pos) instanceof SequencedArmBlockEntity arm))
+			return;
+		// 吃掉这一下：不拦的话原版会顺着剪贴板的 `useOn` 去"放下一个剪贴板方块"（见方法头）。
+		// NeoForge 21.1 的 setCanceled(true) 会把 useBlock/useItem 一起置成 FALSE
+		// （`PlayerInteractEvent:341-345`，出处见 RightClickBridge:283-287）⇒ 方块与物品两条路都被挡住。
+		event.setCanceled(true);
+		arm.exportLogToClipboard(player, stack);
 	}
 
 	/**

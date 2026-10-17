@@ -208,6 +208,7 @@ public class SequencedArmSelfTest {
 		checkCallSuccessExit(server);
 		checkFilterOperation(server);
 		checkEntryRate(server);
+		checkRunLog(server);
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
@@ -2152,6 +2153,237 @@ public class SequencedArmSelfTest {
 		if (!capHolds)
 			LOGGER.error("[selftest] 每 tick 的条目数硬上限不对（{}）—— `maxEntriesPerTick()` 必须 ≥ max(8, ceil(速率))，"
 				+ "否则「一条跳回自己的脚本」能在同一个 tick 里无限转（或者合法速率被上限卡住）", detail);
+	}
+
+	/**
+	 * 运行日志自检（用户需求："导出最近的日志，比如用剪贴板潜行右键可以打印最近的日志"）。
+	 *
+	 * <p>四条断言，每条都写清"改哪一行会让它变红"：
+	 * <ol>
+	 *   <li><b>记录</b>：夹具是 {@code [等待 1t, 取出 空置物台]}，跑 10 个 tick ⇒ 缓冲里必须出现
+	 *       {@code [+Nt] 日志#2 take 失败：…}。变红的方式：删掉 {@code ProgramRuntime.handleFailure}
+	 *       里那句 {@code arm.logLine(...)}；或把 {@code logWhere} 的 {@code entryIndex + 1} 改成
+	 *       {@code entryIndex}（序号会差 1，"#2" 变 "#1"）。</li>
+	 *   <li><b>不刷屏</b>：同一段里重试了好几 tick，缓冲**只能有 2 行**（等待开始 + 那条失败）。
+	 *       变红的方式：把记录点从"状态变化处"挪进 {@code tick()} 每 tick 一行；或者把
+	 *       {@code handleFailure} 里的 {@code changed} 条件去掉。</li>
+	 *   <li><b>上限</b>：容量钉成 8，跑 40 条「等待」⇒ 只剩最后 8 行、最旧那行真的没了。
+	 *       变红的方式：把 {@code logLine} 里那个 {@code while (logLines.size() >= capacity) pollFirst()}
+	 *       删掉。</li>
+	 *   <li><b>关闭</b>：容量 0 ⇒ 一行都不产生。变红的方式：让 {@code logCapacity()} 忽略 0
+	 *       （比如把 {@code Mth.clamp(..., 0, MAX)} 改成 {@code Math.max(1, ...)}）。</li>
+	 *   <li><b>导出</b>：真的调 {@code SequencedArmBlockEntity.exportLog}（公开静态，与
+	 *       {@code CardEditPacket.addEntry} 同一手法）⇒ 读回来的剪贴板里有头部、行数不超容量；
+	 *       另外验"装不下时只带最新那些行"与"只读剪贴板拒写"。
+	 *       变红的方式：把 {@code exportLog} 里的 {@code new ClipboardContent(...)} 换成"就地改"
+	 *       （读回来就看不到新内容）、或者把头部那一行删掉。</li>
+	 * </ol>
+	 *
+	 * <p>⚠️ <b>为什么不断言 {@code [+Nt]} 里的 N &gt; 0</b>：本自检整个跑在
+	 * {@code ServerStartedEvent} 里，{@code level.getGameTime()} 在这期间**不前进**，
+	 * 所以每条间隔都必然是 0。能钉的只有**格式**（`[+0t]` 开头、全部匹配 {@code ^\[\+\d+t\] }），
+	 * 写一条"N ≥ 1"的断言只会变成永远红的假守卫（决策 88③）。
+	 */
+	private static void checkRunLog(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 108, 200, spawn.getZ() + 108);
+		BlockPos depotPos = armPos.offset(2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldDepot = level.getBlockState(depotPos);
+		boolean ran = false;
+		boolean failureLogged = false;
+		boolean tickPrefix = false;
+		boolean noSpam = false;
+		boolean cappedAtEight = false;
+		boolean oldestDropped = false;
+		boolean disabledSilent = false;
+		boolean exported = false;
+		boolean headerPresent = false;
+		boolean fitsCapacity = false;
+		boolean trimmedKeepsNewest = false;
+		boolean readOnlyRefused = false;
+		String detail = "没跑起来";
+		try {
+			BlockState depotState = stateOf("create:depot");
+			Item clipboardItem = BuiltInRegistries.ITEM.get(ResourceLocation.fromNamespaceAndPath("create", "clipboard"));
+			if (depotState == null || clipboardItem == Items.AIR) {
+				LOGGER.error("[selftest] 运行日志自检**没跑起来**：缺少 create:depot / create:clipboard");
+				return;
+			}
+			level.getChunkAt(armPos);
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			level.setBlockAndUpdate(depotPos, depotState);
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 运行日志自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过
+			ran = true;
+
+			// ——— ①② 记录：等待 1 tick → 对空置物台取出（前置检查必报原因）———
+			// 容量钉成一个**远大于本段产出**的确定值（= 一次导出的总容量 8×50）：
+			// 配置是运行期现读的，玩家把 logLines 改成 0 也不该让这条断言变成"没测到"。
+			SequencedArmBlockEntity.pinLogLinesForTests(SequencedArmBlockEntity.LOG_LINES_PER_PAGE
+				* SequencedArmBlockEntity.LOG_MAX_PAGES);
+			arm.setProgram(runLogProgram("日志", depotPos.subtract(armPos), 1));
+			for (int i = 0; i < 10; i++)
+				arm.runtime.tick(arm);
+			List<String> lines = arm.logSnapshot();
+			failureLogged = lines.stream()
+				.anyMatch(line -> line.contains("失败：") && line.contains("#2 take"));
+			// 第一行是 [+0t]（缓冲的第一行没有"上一条"），并且每一行都带那个前缀
+			tickPrefix = !lines.isEmpty() && lines.get(0)
+				.startsWith("[+0t] ")
+				&& lines.stream()
+					.allMatch(line -> line.matches("^\\[\\+\\d+t\\] .*"));
+			noSpam = lines.size() == 2;
+			detail = "①②" + String.join(" ｜ ", lines);
+
+			// ——— ③ 上限：容量 8，跑一长串「等待」⇒ 只剩最后 8 行 ———
+			SequencedArmBlockEntity.pinLogLinesForTests(8);
+			arm.setProgram(runLogProgram("上限", null, 40));
+			arm.runtime.tick(arm);
+			String firstEver = arm.logSnapshot()
+				.isEmpty() ? "" : arm.logSnapshot()
+					.get(0);
+			// 一条「等待 1t」在 0.5 条/tick 下约 3 tick ⇒ 60 tick 能产出约 20 行，足够把 8 行的缓冲挤满
+			for (int i = 0; i < 60; i++)
+				arm.runtime.tick(arm);
+			List<String> capped = arm.logSnapshot();
+			cappedAtEight = capped.size() == 8;
+			// 最旧那行必须真的没了（只判 size 不够：容量若写成"全部保留"这里也照样 8 行就错了）
+			oldestDropped = !firstEver.isEmpty() && !capped.contains(firstEver);
+			detail += " ③" + capped.size() + "行 最后一行=[" + (capped.isEmpty() ? "" : capped.get(capped.size() - 1)) + "]";
+
+			// ——— ④ 关闭：容量 0 ⇒ 一行都不产生 ———
+			SequencedArmBlockEntity.pinLogLinesForTests(0);
+			arm.setProgram(runLogProgram("关闭", depotPos.subtract(armPos), 5));
+			for (int i = 0; i < 30; i++)
+				arm.runtime.tick(arm);
+			disabledSilent = !arm.logEnabled() && arm.logSnapshot()
+				.isEmpty();
+
+			// ——— ⑤ 导出：真的写进一块剪贴板（新建的，连组件都没有）———
+			SequencedArmBlockEntity.pinLogLinesForTests(SequencedArmBlockEntity.LOG_LINES_PER_PAGE
+				* SequencedArmBlockEntity.LOG_MAX_PAGES);
+			arm.setProgram(runLogProgram("导出", depotPos.subtract(armPos), 3));
+			for (int i = 0; i < 12; i++)
+				arm.runtime.tick(arm);
+			List<String> buffered = arm.logSnapshot();
+			ItemStack clipboard = new ItemStack(clipboardItem);
+			SequencedArmBlockEntity.LogExport result = SequencedArmBlockEntity.exportLog(clipboard, arm.getBlockPos(),
+				buffered);
+			List<ClipboardEntry> flat = flatClipboardEntries(clipboard);
+			exported = result.ok() && result.written() == buffered.size()
+				&& !buffered.isEmpty()
+				&& flat.size() == buffered.size() + 1;
+			headerPresent = !flat.isEmpty() && flat.get(0).text.getString()
+				.contains("运行日志");
+			fitsCapacity = flat.size() <= SequencedArmBlockEntity.LOG_LINES_PER_PAGE
+				* SequencedArmBlockEntity.LOG_MAX_PAGES;
+			detail += " ⑤导出=" + result.written() + "行/丢" + result.dropped() + "行 块内条目=" + flat.size();
+
+			// 装不下时：只带**最新**那些行，并如实报出丢了几行
+			int room = SequencedArmBlockEntity.LOG_LINES_PER_PAGE * SequencedArmBlockEntity.LOG_MAX_PAGES - 1;
+			List<String> many = new ArrayList<>();
+			for (int i = 0; i < room + 50; i++)
+				many.add("[+0t] 合成第" + i + "行");
+			ItemStack big = new ItemStack(clipboardItem);
+			SequencedArmBlockEntity.LogExport trimmed = SequencedArmBlockEntity.exportLog(big, arm.getBlockPos(), many);
+			List<ClipboardEntry> bigFlat = flatClipboardEntries(big);
+			// 一并钉住分页：400 条 ÷ 每页 8 条 = 50 页（正好是 Create 界面能翻到的最后一页）
+			trimmedKeepsNewest = trimmed.ok() && trimmed.written() == room && trimmed.dropped() == 50
+				&& ClipboardEntry.readAll(big)
+					.size() == SequencedArmBlockEntity.LOG_MAX_PAGES
+				&& !bigFlat.isEmpty()
+				&& bigFlat.get(bigFlat.size() - 1)
+					.text.getString()
+					.contains("合成第" + (many.size() - 1) + "行");
+			detail += " ⑤裁剪=" + trimmed.written() + "/" + trimmed.dropped();
+
+			// 只读剪贴板（1.20 老存档迁移过来的那种）一个字都不该动
+			ItemStack readOnly = clipboardWith(buffered, true);
+			ClipboardContent roBefore = readOnly.get(AllDataComponents.CLIPBOARD_CONTENT);
+			SequencedArmBlockEntity.LogExport refused = SequencedArmBlockEntity.exportLog(readOnly, arm.getBlockPos(),
+				buffered);
+			readOnlyRefused = !refused.ok() && refused.problem() == SequencedArmBlockEntity.LogProblem.READ_ONLY
+				&& readOnly.get(AllDataComponents.CLIPBOARD_CONTENT) == roBefore;
+
+			// 交回"读配置"给后面的夹具
+			SequencedArmBlockEntity.pinLogLinesForTests(null);
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			SequencedArmBlockEntity.pinLogLinesForTests(null); // 异常路径也不能把容量留给后面的夹具
+			level.setBlockAndUpdate(depotPos, oldDepot);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 运行日志: 记录失败原因={} tick前缀={} 不刷屏={} 上限8行={} 丢最旧={} 关闭即静默={} ｜ "
+			+ "导出={} 有头部={} 行数≤容量={} 超量只带最新={} 只读拒写={} （{}）", failureLogged, tickPrefix, noSpam,
+			cappedAtEight, oldestDropped, disabledSilent, exported, headerPresent, fitsCapacity, trimmedKeepsNewest,
+			readOnlyRefused, detail);
+		if (!ran)
+			LOGGER.error("[selftest] 运行日志自检**没跑起来**（{}）—— 等于没测", detail);
+		if (!failureLogged)
+			LOGGER.error("[selftest] 条目失败了，缓冲里却没有那行原因（{}）—— 用户导出日志正是要看它："
+				+ "检查 ProgramRuntime.handleFailure 里的 arm.logLine（以及 logWhere 的序号）", detail);
+		if (!tickPrefix)
+			LOGGER.error("[selftest] 日志行没有带上 [+Nt] 前缀（或者第一行不是 [+0t]）—— 用户要的是"
+				+ "「看清节奏」，没有 tick 差的绝对时间对他没用：检查 SequencedArmBlockEntity.logLine", detail);
+		if (!noSpam)
+			LOGGER.error("[selftest] 一次失败 + 重试在缓冲里留下了 {} 行（应当只有 2 行：等待开始 + 那条失败）"
+				+ "—— 记录点不能放进每 tick 都跑的 tick()，也不能去掉 handleFailure 里的 changed 条件", detail);
+		if (!cappedAtEight || !oldestDropped)
+			LOGGER.error("[selftest] 环形缓冲没有按容量丢最旧的（上限8行={} 丢最旧={}）—— "
+				+ "检查 SequencedArmBlockEntity.logLine 里的 while (size() >= capacity) pollFirst()", detail);
+		if (!disabledSilent)
+			LOGGER.error("[selftest] logLines = 0 时仍然产生了日志行 —— 关闭记录必须一行都不产生，"
+				+ "而且每个记录点都要先判 arm.logEnabled()", detail);
+		if (!exported || !headerPresent || !fitsCapacity)
+			LOGGER.error("[selftest] 日志没能写进剪贴板（导出={} 有头部={} 行数≤容量={}）—— "
+				+ "检查 SequencedArmBlockEntity.exportLog（必须新建 ClipboardContent 写回去，并且带头部那一行）", detail);
+		if (!trimmedKeepsNewest)
+			LOGGER.error("[selftest] 剪贴板装不下时没有「只带最新那些行」或丢的行数没报对", detail);
+		if (!readOnlyRefused)
+			LOGGER.error("[selftest] 只读剪贴板被改写了 —— 1.20 老存档迁移过来的那种剪贴板必须一个字都不动", detail);
+	}
+
+	/**
+	 * 运行日志夹具：{@code [等待 1t × waits]}（{@code offset} 非空时再加一条「取出」）。
+	 *
+	 * <p>「等待」是**最确定**的产日志条目（不碰世界、不依赖交互点、一条必然产生一行）；
+	 * 末尾那条「取出」指向**空的**置物台 ⇒ 前置检查必然失败 ⇒ 一定产出"失败原因"那一行。
+	 */
+	private static ArmProgram runLogProgram(String name, @Nullable BlockPos offset, int waits) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = name;
+		for (int i = 0; i < waits; i++) {
+			ArmProgramEntry wait = new ArmProgramEntry();
+			wait.op = OperationType.WAIT;
+			wait.waitAmount = 1;
+			wait.waitUnit = ArmProgramEntry.WaitUnit.TICK;
+			task.entries.add(wait);
+		}
+		if (offset != null) {
+			ArmProgramEntry take = new ArmProgramEntry();
+			take.op = OperationType.TAKE;
+			take.offset = offset;
+			task.entries.add(take);
+		}
+		program.tasks.add(task);
+		return program;
+	}
+
+	/** 把一个剪贴板里的**所有页**摊成一条条目表（读回来的东西，断言用）。 */
+	private static List<ClipboardEntry> flatClipboardEntries(ItemStack clipboard) {
+		List<ClipboardEntry> flat = new ArrayList<>();
+		for (List<ClipboardEntry> page : ClipboardEntry.readAll(clipboard))
+			flat.addAll(page);
+		return flat;
 	}
 
 	/** 在给定速率下问一个静态问题（自检专用：问完就恢复成常态钉速 {@link #OLD_PACE_RATE}，免得影响其它夹具）。 */

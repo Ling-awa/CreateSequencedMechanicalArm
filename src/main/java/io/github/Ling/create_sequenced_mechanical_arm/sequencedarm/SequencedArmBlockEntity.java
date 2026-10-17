@@ -1,18 +1,25 @@
 package io.github.Ling.create_sequenced_mechanical_arm.sequencedarm;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
+import com.simibubi.create.AllDataComponents;
 import com.simibubi.create.Create;
 import com.simibubi.create.api.contraption.transformable.TransformableBlockEntity;
 import com.simibubi.create.content.contraptions.StructureTransform;
+import com.simibubi.create.content.equipment.clipboard.ClipboardContent;
+import com.simibubi.create.content.equipment.clipboard.ClipboardEntry;
+import com.simibubi.create.content.equipment.clipboard.ClipboardOverrides.ClipboardType;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.kinetics.belt.BeltBlockEntity;
 import com.simibubi.create.content.kinetics.belt.behaviour.TransportedItemStackHandlerBehaviour;
@@ -27,6 +34,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanica
 import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.AnyBlockInteractionPoint;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.RightClickBridge;
+import io.github.Ling.create_sequenced_mechanical_arm.item.ClipboardPlan;
 import io.github.Ling.create_sequenced_mechanical_arm.mixin.ArmInteractionPointAccessor;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmEntryText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
@@ -57,6 +65,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -225,6 +234,214 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	public void markProgramDirty() {
 		setChanged();
 		sendData();
+	}
+
+	// ————————————————————————— 运行日志（环形缓冲，只在内存） —————————————————————————
+
+	/**
+	 * 导出到剪贴板时**一页写几行**。
+	 *
+	 * <p>8 不是随手取的：Create 的剪贴板界面**没有滚动**，一页能画的高度由
+	 * {@code ClipboardScreen.validateTextForEntry} 卡在 185 px，而每条目占
+	 * {@code max(12, 换行后行数 * 9 + 3)}（`ClipboardScreen:186-196/220-229`）。
+	 * 我们的一行日志约 30〜45 个字符 ⇒ 在 150 px 宽度上会折成 2 行 ⇒ 21 px/条 ⇒ 185/21 ≈ 8.8。
+	 * 取 8 是"最长的那些行也不会被挤出纸面"的档位。
+	 */
+	public static final int LOG_LINES_PER_PAGE = 8;
+	/**
+	 * 一次导出最多写几页：Create 的界面把页码 {@code clamp(..., 0, 50)}（`ClipboardScreen:245`），
+	 * 所以第 50 页之后的条目玩家**永远翻不到** —— 写了也等于没写。
+	 */
+	public static final int LOG_MAX_PAGES = 50;
+
+	/**
+	 * 运行日志（环形缓冲）。
+	 *
+	 * <p><b>为什么存在方块实体上、而且不写 NBT</b>：它是"给玩家看刚才发生了什么"的诊断材料，
+	 * 不是程序状态 —— 写进存档只会让区块 NBT 变大、让重进世界后出现一份"上次运行"的假现场。
+	 * 换程序（{@code ProgramRuntime.resetToStart}）会清空它：日志永远只描述**当前这份程序**。
+	 */
+	private final Deque<String> logLines = new ArrayDeque<>();
+	/**
+	 * 上一条日志写在哪一 tick（{@link #logLine} 用它算 {@code [+Nt]}）；{@code Long.MIN_VALUE} = 缓冲刚清空。
+	 *
+	 * <p><b>为什么记 tick 差而不是绝对时间</b>：绝对 tick 数对玩家没有任何意义（也随存档/重进漂移），
+	 * 而"距上一条过了多少 tick"正好回答用户要的那个问题 —— <i>"它到底卡了多久 / 节奏是快是慢"</i>。
+	 */
+	private long lastLogTick = Long.MIN_VALUE;
+	/** 自检用：把容量钉成固定值（配置是运行期现读的，自检要的是确定值，与 {@code pinRateForTests} 同一手法）。 */
+	@Nullable
+	private static Integer logLinesOverride;
+
+	/** 自检用：钉住日志容量；{@code null} = 恢复读配置。 */
+	public static void pinLogLinesForTests(@Nullable Integer lines) {
+		logLinesOverride = lines;
+	}
+
+	/** 当前生效的日志容量（0 = 关闭记录）。 */
+	public static int logCapacity() {
+		Integer pinned = logLinesOverride;
+		return Mth.clamp(pinned != null ? pinned : SequencedArmConfig.logLines(), 0, SequencedArmConfig.MAX_LOG_LINES);
+	}
+
+	/**
+	 * 现在要不要记日志（每个记录点的第一句）。
+	 *
+	 * <p>★ <b>先判它、再拼字符串</b>：拼串的分配代价不该付在一个被关掉的功能上
+	 * （记录点全在 {@code ProgramRuntime} 的热路径里，正常运行时每秒会经过好几次）。
+	 */
+	public boolean logEnabled() {
+		return logCapacity() > 0;
+	}
+
+	/**
+	 * 记一行（自动加 {@code [+Nt]} 前缀 = 距上一条的 tick 差；缓冲的第一行是 {@code [+0t]}）。
+	 *
+	 * <p>满了丢最旧的（环形缓冲）—— 用户要的是"最近发生了什么"，不是完整历史。
+	 */
+	public void logLine(String text) {
+		if (text == null)
+			return;
+		int capacity = logCapacity();
+		if (capacity <= 0)
+			return;
+		long now = level == null ? 0L : level.getGameTime();
+		long delta = lastLogTick == Long.MIN_VALUE ? 0L : Math.max(0L, now - lastLogTick);
+		lastLogTick = now;
+		// 容量可能在运行期被配置改小（配置是现读的）——写之前按当前容量腾位置，不依赖"上次清过"
+		while (logLines.size() >= capacity)
+			logLines.pollFirst();
+		logLines.addLast("[+" + delta + "t] " + text);
+	}
+
+	/** 缓冲的一份快照（旧 → 新）。关闭记录时恒为空表。 */
+	public List<String> logSnapshot() {
+		int capacity = logCapacity();
+		if (capacity <= 0) {
+			logLines.clear(); // 关掉记录 ⇒ 旧内容也不该再被导出
+			return List.of();
+		}
+		while (logLines.size() > capacity)
+			logLines.pollFirst();
+		return List.copyOf(logLines);
+	}
+
+	/** 清空（换程序 / 回到开头时调，见 {@code ProgramRuntime.resetToStart}）。 */
+	public void clearLog() {
+		logLines.clear();
+		lastLogTick = Long.MIN_VALUE;
+	}
+
+	/** 导出失败的原因（给调用方映射成 lang 键，不给玩家看这些英文常量）。 */
+	public enum LogProblem {
+		/** 没有失败。 */
+		NONE,
+		/** 手上那个物品不是 Create 的剪贴板。 */
+		NOT_CLIPBOARD,
+		/** 只读剪贴板（1.20 老存档迁移过来的那种）。 */
+		READ_ONLY,
+		/** 缓冲里没有任何行（程序还没跑过，或配置 {@code logLines = 0} 关掉了记录）。 */
+		EMPTY
+	}
+
+	/**
+	 * 一次导出的结果。
+	 *
+	 * @param written 真正写进剪贴板的**日志行数**（不含头部那一行）
+	 * @param dropped 剪贴板装不下、被丢掉的最旧行数
+	 */
+	public record LogExport(boolean ok, int written, int dropped, LogProblem problem) {}
+
+	/**
+	 * 把缓冲里的行**写进那块剪贴板**（公开静态 = 自检可以直接调，与 {@code CardEditPacket.addEntry} 同一手法）。
+	 *
+	 * <p><b>Create 剪贴板的多行怎么存</b>（全部照源码）：
+	 * 一条 {@code ClipboardEntry} = 屏幕上的一行（`ClipboardEntry:53-57`：`(boolean checked, MutableComponent text)`），
+	 * 一页 = {@code List<ClipboardEntry>}，整块 = {@code ClipboardContent(type, pages, readOnly, previouslyOpenedPage, copiedValues)}。
+	 * 所以我们按 {@link #LOG_LINES_PER_PAGE} 分页、每行建一条**未勾选**的条目。
+	 *
+	 * <p>⚠️ 三条必须照做的细节：
+	 * <ol>
+	 *   <li><b>新建对象写回去，绝不就地改</b>：{@code AbstractContainerMenu.remoteSlots} 里那份副本与手上这份
+	 *       共享同一个组件值对象，就地改会让"变了吗"的判定为否 ⇒ 客户端永远看不到新内容
+	 *       （这条纪律出自 {@code ClipboardPlan.writeTicks} 的注释）；</li>
+	 *   <li>只读剪贴板一个字都不动（返回值里带 {@link LogProblem#READ_ONLY} 让调用方说清楚）；</li>
+	 *   <li>类型置 {@code WRITTEN}（不是 {@code EDITING}）：玩家再右键它就是"看清单"，不会一开界面就进编辑态。</li>
+	 * </ol>
+	 *
+	 * @param lines 旧 → 新的日志行（{@link #logSnapshot()}）；**头部由本方法加**，调用方不用管
+	 */
+	public static LogExport exportLog(ItemStack clipboard, BlockPos armPos, List<String> lines) {
+		if (!ClipboardPlan.isClipboard(clipboard))
+			return new LogExport(false, 0, 0, LogProblem.NOT_CLIPBOARD);
+		ClipboardContent old = clipboard.get(AllDataComponents.CLIPBOARD_CONTENT);
+		if (old != null && old.readOnly())
+			return new LogExport(false, 0, 0, LogProblem.READ_ONLY);
+		if (lines == null || lines.isEmpty())
+			return new LogExport(false, 0, 0, LogProblem.EMPTY);
+
+		// 头部占一条 ⇒ 能装的日志行 = 总容量 - 1。只留**最后**（最新）那些行：导出的意思是
+		// "刚才到底发生了什么"，最旧的行被挤掉比整份写不进去有用。
+		int room = LOG_LINES_PER_PAGE * LOG_MAX_PAGES - 1;
+		int dropped = Math.max(0, lines.size() - room);
+		List<String> kept = dropped == 0 ? lines : lines.subList(dropped, lines.size());
+
+		List<String> all = new ArrayList<>(kept.size() + 1);
+		all.add(logHeader(armPos, lines.size(), dropped));
+		all.addAll(kept);
+
+		List<List<ClipboardEntry>> pages = new ArrayList<>();
+		for (int i = 0; i < all.size(); i += LOG_LINES_PER_PAGE) {
+			List<String> chunk = all.subList(i, Math.min(i + LOG_LINES_PER_PAGE, all.size()));
+			List<ClipboardEntry> page = new ArrayList<>(chunk.size());
+			for (String line : chunk)
+				page.add(new ClipboardEntry(false, Component.literal(line)));
+			pages.add(page);
+		}
+		clipboard.set(AllDataComponents.CLIPBOARD_CONTENT,
+			new ClipboardContent(ClipboardType.WRITTEN, pages, false, 0, Optional.empty()));
+		return new LogExport(true, kept.size(), dropped, LogProblem.NONE);
+	}
+
+	/** 剪贴板第一行：说明这是谁的日志、有没有被剪贴板容量截断、{@code [+Nt]} 是什么意思。 */
+	private static String logHeader(BlockPos armPos, int total, int dropped) {
+		return "运行日志 · 可编程动力臂 " + (armPos == null ? "?" : armPos.toShortString()) + " · 缓冲 " + total + " 行"
+			+ (dropped > 0 ? "（剪贴板最多装 " + (LOG_LINES_PER_PAGE * LOG_MAX_PAGES - 1) + " 行，更早的 " + dropped
+				+ " 行没带）" : "") + " · [+Nt] = 距上一条的 tick 差";
+	}
+
+	/**
+	 * 玩家手势的落地：把这条臂的日志写进他手上那块剪贴板，并给一条 actionbar 反馈。
+	 *
+	 * <p>手势本身（手持剪贴板 + 潜行右键这块臂）在 {@link SequencedArmBlock} 的事件钩子里 ——
+	 * 那里必须用事件是因为"潜行 + 手上有东西"会跳过方块交互，写在这里只是为了让"写剪贴板 + 报结果"
+	 * 与缓冲挨在一起。
+	 */
+	public void exportLogToClipboard(Player player, ItemStack clipboard) {
+		LogExport result = exportLog(clipboard, worldPosition, logSnapshot());
+		Object[] args;
+		String key;
+		ChatFormatting color;
+		if (result.ok()) {
+			color = ChatFormatting.GREEN;
+			if (result.dropped() > 0) {
+				key = "log.exported_trimmed";
+				args = new Object[] { result.written(), result.dropped() };
+			} else {
+				key = "log.exported";
+				args = new Object[] { result.written() };
+			}
+		} else {
+			color = ChatFormatting.YELLOW;
+			key = switch (result.problem()) {
+				case NOT_CLIPBOARD -> "log.not_clipboard";
+				case READ_ONLY -> "log.read_only";
+				default -> "log.empty";
+			};
+			args = new Object[0];
+		}
+		player.displayClientMessage(Component.translatable("create_sequenced_mechanical_arm." + key, args)
+			.withStyle(color), true);
 	}
 
 	// ————————————————————————— 目标 / 移动 —————————————————————————

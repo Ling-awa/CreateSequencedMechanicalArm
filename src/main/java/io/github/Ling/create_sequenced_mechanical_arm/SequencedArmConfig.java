@@ -28,6 +28,10 @@ public final class SequencedArmConfig {
 	public static final int DEFAULT_MAX_ENTRIES_TOTAL = 1024;
 	/** 默认推进速率：每 tick 2 条（用户定稿的默认值）。 */
 	public static final double DEFAULT_ENTRIES_PER_TICK = 2.0;
+	/** 默认运行日志行数（环形缓冲，0 = 关闭）。 */
+	public static final int DEFAULT_LOG_LINES = 256;
+	/** 运行日志行数的上限 —— 再多就是拿内存换几乎没人会翻的旧历史。 */
+	public static final int MAX_LOG_LINES = 4096;
 	/**
 	 * 推进速率的**下限**。
 	 *
@@ -114,6 +118,29 @@ public final class SequencedArmConfig {
 			"只对控制类条目生效；有动作的条目（移动 / 等待 / 等待红石 / 重试）不受它影响，仍然按真实 tick 走。")
 		.defineInRange("entriesPerTick", DEFAULT_ENTRIES_PER_TICK, MIN_ENTRIES_PER_TICK, MAX_ENTRIES_PER_TICK);
 
+	/**
+	 * 每条臂在**内存里**保留多少行运行日志（环形缓冲，满了丢最旧的）。
+	 *
+	 * <p><b>0 = 关闭</b>：那种情况下 {@code SequencedArmBlockEntity.logLine} 一行都不产生，
+	 * 而且每个记录点都是"先判配置、再拼字符串"（拼串的代价绝不能付在一个被关掉的功能上）。
+	 *
+	 * <p>数值越大越占内存：一行 ≈ 一个字符串对象 + 几十字节内容（`[+37t] 主任务#4 take 失败：目标为空`），
+	 * 按 64 字节估，256 行/臂 ≈ 16 KiB/臂 —— 单条臂可以忽略，但**每个方块实体一份**，
+	 * 所以别在大基地里随手填 4096（那是 256 KiB/臂）。
+	 *
+	 * <p>为什么默认 256：{@link #entriesPerTick()} = 2 时正常情况下每秒只产生几行（只在状态变化处记），
+	 * 256 行足够回看几分钟的运行史；玩家要"导出最近的日志"时，一页剪贴板也装得下问题的现场。
+	 */
+	public static final ModConfigSpec.IntValue LOG_LINES = BUILDER
+		.comment("How many run-log lines each arm keeps in memory (ring buffer; 0 = off).",
+			"The log is what 'sneak-use a Create clipboard on the arm' writes into that clipboard:",
+			"entry starts, failure/retry reasons, jump landings, call stack push/pop and halts.",
+			"每条臂在内存里保留多少行运行日志（环形缓冲，满了丢最旧的）。0 = 关闭，一行都不记录。",
+			"数值越大越占内存：每行约几十字节（一行 ≈ 64 字节，256 行 ≈ 16 KiB/臂）。",
+			"日志只在内存里（不写存档），内容 = 潜行右键持剪贴板时写进那块剪贴板的东西。",
+			"默认 256：正常节奏每秒只有几行，够回看几分钟；0 = 关闭记录（省内存 / 不想让玩家导出）。")
+		.defineInRange("logLines", DEFAULT_LOG_LINES, 0, MAX_LOG_LINES);
+
 	public static final ModConfigSpec SPEC = BUILDER.build();
 
 	private SequencedArmConfig() {}
@@ -148,13 +175,23 @@ public final class SequencedArmConfig {
 	}
 
 	/**
+	 * 运行日志行数（配置未加载 ⇒ {@link #DEFAULT_LOG_LINES}）。
+	 *
+	 * <p>与上面几个访问器同一套懒读纪律；`0` 是一个**合法值**（= 关闭记录），
+	 * 所以调用方必须用 `<= 0` 判"关掉"，不要拿 0 当"没配"。
+	 */
+	public static int logLines() {
+		return read(LOG_LINES, DEFAULT_LOG_LINES);
+	}
+
+	/**
 	 * 生效值的一行摘要（自检/日志用）。
 	 *
 	 * <p>两端各读自己那份 {@code config/} 文件 ⇒ 这行日志就是"这一侧到底按什么数在跑"的证据。
 	 */
 	public static String effectiveSummary() {
 		return "配置: 任务上限=" + maxTasks() + " 信号上限=" + maxHeldSignals() + " 条目上限=" + maxEntriesTotal()
-			+ " 推进速率=" + entriesPerTick() + " 条/tick (specLoaded=" + isLoaded() + ")";
+			+ " 推进速率=" + entriesPerTick() + " 条/tick 日志行数=" + logLines() + " (specLoaded=" + isLoaded() + ")";
 	}
 
 	private static int read(ModConfigSpec.IntValue value, int fallback) {

@@ -3,6 +3,7 @@ package io.github.Ling.create_sequenced_mechanical_arm.program;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -353,6 +354,39 @@ public class ProgramRuntime {
 		lastFailure = null;
 	}
 
+	// ————————————————————————— 运行日志（用户要的"导出最近的日志"） —————————————————————————
+
+	/**
+	 * 日志行的"在哪一条"前缀：{@code 任务名#条目号 动作名}，条目号<b>从 1 数</b>
+	 * （与界面、脚本里显示的序号是同一套，用户看到 "第 3 条" 时日志里就是 {@code #3}）。
+	 *
+	 * <p>动作名用枚举的小写名（{@code take} / {@code wait} / {@code call}…）而不是界面上的中文：
+	 * 那些名字就是 {@code .sma} 脚本里的写法，玩家贴给别人的时候两处能对上。
+	 *
+	 * <p>★ <b>拼接纪律</b>：调用点一律写成
+	 * {@code if (arm.logEnabled()) arm.logLine(logWhere(task, entry) + " …");} ——
+	 * <b>先判配置、再拼字符串</b>（关掉记录时一行都不产生、也不付分配代价）。
+	 */
+	private String logWhere(@Nullable ArmProgramTask task, @Nullable ArmProgramEntry entry) {
+		String name = task == null ? "?" : task.name;
+		String op = entry == null ? "?" : entry.op.name()
+			.toLowerCase(Locale.ROOT);
+		return name + "#" + (entryIndex + 1) + " " + op;
+	}
+
+	/**
+	 * 「这一条开始执行」那行的后半句。等待类必须带上"等多久 / 等哪个极性" ——
+	 * 用户要回答的问题里有一半（"等了多久"）的答案就落在这一句上。
+	 */
+	private static String beginText(ArmProgramEntry entry) {
+		return switch (entry.op) {
+			case WAIT -> " 开始等待 " + entry.waitTicks() + "t";
+			case WAIT_REDSTONE -> " 开始等红石" + (entry.waitForPowered ? "通电" : "断电");
+			case SIGNAL -> entry.isSignalReceive() ? " 开始等信号" : " 发信号";
+			default -> entry.op.isWait() ? " 开始等待" : " 开始执行";
+		};
+	}
+
 	// ————————————————————————— 主循环 —————————————————————————
 
 	/**
@@ -576,6 +610,10 @@ public class ProgramRuntime {
 			// ★ 进入子任务时生效的调用偏移 = 调用方此刻的生效偏移 + 这条调用卡的 Δ（嵌套因此自然叠加：
 			//   A→B(Δ1)→C(Δ2) 时 C 的帧里存的就是 Δ1+Δ2）。弹帧即恢复，不需要单独的恢复代码。
 			effectiveCallShift().offset(entry.callShift)));
+		// ★ 记录点⑥：**压栈**。必须在把游标切到被调任务**之前**拼（logWhere 读的是 entryIndex）。
+		//   用户问的"它为什么停了"很多时候答案是"陷在一层调用里"，所以栈深一起写出来。
+		if (arm.logEnabled())
+			arm.logLine(logWhere(caller, entry) + " 调用 → " + callee.name + "#1（栈深 " + callStack.size() + "）");
 		taskIndex = calleeIndex;
 		entryIndex = 0;
 		loopCounter = 0;
@@ -614,6 +652,11 @@ public class ProgramRuntime {
 			ArmProgramEntry callEntry = caller != null && callIndex >= 0 && callIndex < caller.entries.size()
 				? caller.entries.get(callIndex)
 				: null;
+			// ★ 记录点⑦：**弹栈**（被调任务跑完 / 失败都从这里回去）。做成一条与⑥对称的行 ——
+			//   日志里成对的 "调用 → …" / "↩ 返回 …" 就是调用栈的完整来去。
+			if (arm.logEnabled())
+				arm.logLine("↩ 返回 " + (caller == null ? "?" : caller.name) + "#" + (callIndex + 1)
+					+ (failed ? "（被调任务失败）" : "（被调任务跑完）"));
 			if (failed) {
 				// 把失败**冒泡到那张调用卡**：调用行为没有时限，立刻执行它的「失败后」。
 				if (callEntry != null) {
@@ -649,8 +692,15 @@ public class ProgramRuntime {
 		}
 		// 主任务结束
 		if (failed) {
-			halt(arm, reason == null ? "程序抛出错误" : reason);
+			halt(arm, reason == null ? "程序抛出错误" : reason); // 停机那行由 halt 记
 			return;
+		}
+		// ★ 记录点⑧：主任务**正常跑完**（"它为什么不动了？" 的另一半答案：不是卡住，是跑完了）。
+		//   ⚠️ 报**任务名**，不要直接拼 task 对象：ArmProgramTask 没有 toString()，
+		//   拼进去是一个对象哈希（同一个坑见下面 endTask 里那句"被调任务失败（…）"的注释）。
+		if (arm.logEnabled()) {
+			ArmProgramTask done = program.task(taskIndex);
+			arm.logLine("收工 · 主任务 " + (done == null ? "?" : done.name) + " 跑完");
 		}
 		arm.cancelMove(); // 收工：手臂折回待机位，别举在最后一个目标前面（与「等待」同一条理由）
 		// ⚠️ §7.16e 有意的**反转**：主任务正常结束**不再清信号** —— 信号是持久变量，跨循环、跨停机、
@@ -700,6 +750,12 @@ public class ProgramRuntime {
 			if (entry.op.isWait())
 				arm.cancelMove();
 			state = EntryState.EXECUTING;
+			// ★ 记录点①：一条"不移动的命令"开始执行（控制类 / 等待类）。
+			//   为什么在这里、而不是 `tick()` 里每 tick 一行：tick() 每 tick 都跑，那样缓冲会在
+			//   半秒内被同一件事刷爆，玩家反而看不出节奏。这里**一条条目只写一行**，
+			//   tick 差（[+Nt]）负责把节奏显出来 —— 这正是用户要的"看清节奏"。
+			if (arm.logEnabled())
+				arm.logLine(logWhere(task, entry) + beginText(entry));
 			return;
 		}
 		BlockPos offset = offsetOf(arm, entry);
@@ -738,6 +794,10 @@ public class ProgramRuntime {
 			handleFailure(arm, task, entry, "目标无效或不属于 Create 交互点");
 			return;
 		}
+		// ★ 记录点②：真的动身了（记录点①在前置检查通过后才轮到这一支，所以"目标为空"那种
+		//   永远走不到这里 —— 日志里看到「移动」就说明前置检查是真的过了）。
+		if (arm.logEnabled())
+			arm.logLine(logWhere(task, entry) + " 移动 → " + offset.toShortString() + (pinsTarget ? "（按住目标）" : ""));
 		state = EntryState.MOVING;
 		arm.markProgramDirty();
 	}
@@ -1652,8 +1712,14 @@ public class ProgramRuntime {
 		lastFailure = reason;
 		if (entry.timeoutTicks() < 0 || waitElapsed <= entry.timeoutTicks()) {
 			state = EntryState.RETRY; // 阻塞重试（前摇不重跑；计时在 RETRY 分支按 tick 累加）
-			if (changed)
+			if (changed) {
+				// ★ 记录点③：**失败与重试的原因**。只在 `changed` 时写 —— 重试是每 tick 的，
+				//   同一条原因每 tick 一行会把缓冲变成刷屏器；而"原因变了"正是玩家最想看到的
+				//   （"刚才报的是目标为空，现在报臂内已满"）。
+				if (arm.logEnabled())
+					arm.logLine(logWhere(task, entry) + " 失败：" + reason);
 				arm.markProgramDirty();
+			}
 			return;
 		}
 		applySkip(arm, task, entry, entry.onTimeout, reason + "（重试了 " + entry.failAmount + entry.failUnit.name() + "）");
@@ -1676,6 +1742,10 @@ public class ProgramRuntime {
 		switch (action) {
 			case CONTINUE -> {
 				lastFailure = reason + "（跳过）";
+				// ★ 记录点④：超时后的**去向**（放弃这一条 / 跳到别处 / 原地等）。
+				//   与记录点③合起来回答"它为什么停了？停在哪一条？"：③是原因，④是结论。
+				if (arm.logEnabled())
+					arm.logLine(logWhere(task, entry) + " 放弃 → 继续下一条（" + reason + "）");
 				resetEntryCounters();
 				entryIndex++;
 				if (entryIndex >= task.entries.size())
@@ -1685,6 +1755,8 @@ public class ProgramRuntime {
 			}
 			case SKIP_TO -> {
 				lastFailure = reason + "（跳转 " + entry.timeoutTarget + "）";
+				if (arm.logEnabled())
+					arm.logLine(logWhere(task, entry) + " 放弃 → 跳转 " + entry.timeoutTarget + "（" + reason + "）");
 				jumpTo(arm, entry.timeoutTarget);
 			}
 			case NONE -> {
@@ -1694,12 +1766,14 @@ public class ProgramRuntime {
 					// 正确做法是停在当前条目上、原地节流重试；条件恢复后自然继续往下走，
 					// 只有一轮真正走完才回到开头。
 					lastFailure = reason + "（UNTIL_FAIL 等待中）";
+					if (arm.logEnabled())
+						arm.logLine(logWhere(task, entry) + " 到了时限但保持原地等（UNTIL_FAIL）：" + reason);
 					resetEntryCounters(); // 同一条目重新尝试：清计时/计数，但**保留游标**
 					if (idleCooldown <= 0)
 						idleCooldown = PRECHECK_RETRY_TICKS;
 					arm.markProgramDirty();
 				} else
-					halt(arm, reason);
+					halt(arm, reason); // 停机那行由 halt 自己记（含"停在哪一条"）
 			}
 		}
 	}
@@ -1724,6 +1798,11 @@ public class ProgramRuntime {
 				if (oneBased >= 1 && oneBased <= task.entries.size() + 1) {
 					resetEntryCounters();
 					entryIndex = oneBased - 1; // size+1 → entryIndex = size → 下一 tick 收尾
+					// ★ 记录点⑤：**跳转的落点**。数字落点写"任务名#序号"而不是只写数字 ——
+					//   用户翻日志时最常问的是"它跳到哪条去了"，只给一个 7 还得自己回去数。
+					if (arm.logEnabled())
+						arm.logLine("↪ 落点 " + task.name + "#" + oneBased
+							+ (oneBased > task.entries.size() ? "（末尾，本轮到此为止）" : ""));
 					arm.markProgramDirty();
 					return;
 				}
@@ -1739,6 +1818,8 @@ public class ProgramRuntime {
 				resetEntryCounters();
 				taskIndex = i;
 				entryIndex = 0;
+				if (arm.logEnabled())
+					arm.logLine("↪ 落点 " + program.tasks.get(i).name + "#1（换任务）");
 				arm.markProgramDirty();
 				return;
 			}
@@ -1816,6 +1897,11 @@ public class ProgramRuntime {
 		state = EntryState.HALTED;
 		error = reason;
 		errorEntryIndex = entryIndex;
+		// ★ 记录点⑨：**停机**（用户的问题"它为什么停了？停在哪一条？"就靠这一行回答）。
+		//   带上"停在哪一条"：停机时游标还指着出错的那一条，logWhere 给的序号正是界面上的序号。
+		if (arm.logEnabled())
+			arm.logLine("停机 @" + logWhere(arm.getProgram()
+				.task(taskIndex), currentEntryOrNull(arm.getProgram())) + "：" + (reason == null ? "未说明" : reason));
 		arm.cancelMove(); // 停机也收回：出错时把手臂留在目标前面既难看又挡视线
 		// 停机后 tick() 会在累积预算之前就早退，所以这笔记账**不清也不会自己涨**；这里还是清掉：
 		// 它是"本份程序还没花掉的那点余量"，而停机 = 这份程序到此为止（复位走 resetToStart 也会清）。
@@ -1840,6 +1926,9 @@ public class ProgramRuntime {
 		loopCounter = 0;
 		idleSpins = 0;
 		idleCooldown = 0;
+		// ★ 运行日志跟着这份程序走：换卡 / 回到开头 = 另一个故事，上一份程序的现场不该混进来
+		//   （否则玩家导出后看到的是"两条臂混在一起"的时间线，`[+Nt]` 的差也会跨程序乱跳）。
+		arm.clearLog();
 		// 速率预算的余量也要归零：换卡 / 回到开头是"另一份程序"，不该继承上一份攒下的零头
 		// （自检的速率夹具正是靠这一点拿到"第一 tick 的预算是确定值"，见 checkEntryRate ①）。
 		rateBudget = 0;
