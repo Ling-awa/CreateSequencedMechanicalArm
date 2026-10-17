@@ -1,22 +1,22 @@
 {
   "variants": {
     "facing=north": {
-      "model": "create:block/schematic_table",
+      "model": "create_sequenced_mechanical_arm:block/program_import_table",
       "y": 180,
       "uvlock": true
     },
     "facing=east": {
-      "model": "create:block/schematic_table",
+      "model": "create_sequenced_mechanical_arm:block/program_import_table",
       "y": 270,
       "uvlock": true
     },
     "facing=south": {
-      "model": "create:block/schematic_table",
+      "model": "create_sequenced_mechanical_arm:block/program_import_table",
       "y": 0,
       "uvlock": true
     },
     "facing=west": {
-      "model": "create:block/schematic_table",
+      "model": "create_sequenced_mechanical_arm:block/program_import_table",
       "y": 90,
       "uvlock": true
     }

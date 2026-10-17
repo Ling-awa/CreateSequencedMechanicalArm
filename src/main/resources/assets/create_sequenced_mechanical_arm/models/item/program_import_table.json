@@ -1,3 +1,3 @@
 {
-  "parent": "create:block/schematic_table"
+  "parent": "create_sequenced_mechanical_arm:block/program_import_table"
 }

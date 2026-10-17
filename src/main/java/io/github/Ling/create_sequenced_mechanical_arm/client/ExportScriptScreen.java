@@ -2,7 +2,6 @@ package io.github.Ling.create_sequenced_mechanical_arm.client;
 
 import org.lwjgl.glfw.GLFW;
 
-import com.simibubi.create.foundation.gui.AllGuiTextures;
 import com.simibubi.create.foundation.gui.AllIcons;
 import com.simibubi.create.foundation.gui.widget.IconButton;
 
@@ -23,13 +22,15 @@ import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 /**
- * 「上传操作记录表」的**文件名输入界面** —— 布局与贴图**照抄 Create 的蓝图与笔**
+ * 「上传操作记录表」的**文件名输入界面** —— 布局**照抄 Create 的蓝图与笔**
  * （{@code content/schematics/client/SchematicPromptScreen.java:37-93}）。
  *
- * <h2>为什么是"照抄"而不是自己画</h2>
- * 用户口径：导出功能对了，但界面不是他预想的那块"蓝图与笔的文件名面板"；**暂时复用 Create 的 GUI 资源**，
- * 等他画好自己的资源再换。所以这里不新建任何贴图（仓库里仍然没有 {@code textures/}，PLAN §0.7），
- * 整块面板、按钮底板与按钮图标全部直接用 {@link AllGuiTextures} / {@link AllIcons} 的现成常量渲染。
+ * <h2>贴图已改成"我们自己的"</h2>
+ * Create 那张 {@code schematics_2.png} 已经整张复制成
+ * {@code assets/create_sequenced_mechanical_arm/textures/gui/prompt_panel.png}，
+ * uv 与宽高登记在 {@link ModGuiTextures#SCRIPT_NAME_PROMPT}（用户要求资源自持，方便他自己画）。
+ * 按钮图标（{@link AllIcons}，{@code icons.png} 图集）**仍借用 Create** ——
+ * 用户口径"大部分按钮就用现在原版风格即可"，本片不动按钮。
  *
  * <h2>与上游的两个动作</h2>
  * <ul>
@@ -54,10 +55,12 @@ import net.neoforged.neoforge.network.PacketDistributor;
 public class ExportScriptScreen extends Screen {
 
 	/**
-	 * 文件名面板：{@code SCHEMATIC_PROMPT("schematics_2", 213, 79)}
+	 * 文件名面板 = {@code textures/gui/prompt_panel.png} 里 213×79 那一块。
+	 *
+	 * <p>uv 与宽高原样搬自 Create：{@code SCHEMATIC_PROMPT("schematics_2", 213, 79)}
 	 * （{@code AllGuiTextures.java:31}；三参构造 ⇒ 起点 (0,0)，见 {@code :278-280}）。
 	 */
-	private static final AllGuiTextures BACKGROUND = AllGuiTextures.SCHEMATIC_PROMPT;
+	private static final ModGuiTextures BACKGROUND = ModGuiTextures.SCRIPT_NAME_PROMPT;
 
 	// ————————————————————— 上游原样数值（SchematicPromptScreen.java:42-92） —————————————————————
 	/** 控件整体比面板再下移 2px（上游 {@code :43} 的 {@code guiTop + 2}）。 */
@@ -137,7 +140,7 @@ public class ExportScriptScreen extends Screen {
 		int widgetY = top + WIDGET_DY;
 
 		nameField = new EditBox(font, left + FIELD_X, widgetY + FIELD_Y, FIELD_W, FIELD_H, Component.empty());
-		// 上游 :46-48：白字、无不可编辑态色差、**无边框**（边框和底板都长在 schematics_2.png 上）。
+		// 上游 :46-48：白字、无不可编辑态色差、**无边框**（边框和底板都长在 prompt_panel.png 上）。
 		nameField.setTextColor(-1);
 		nameField.setTextColorUneditable(-1);
 		nameField.setBordered(false);

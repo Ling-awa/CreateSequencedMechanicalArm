@@ -30,9 +30,11 @@ import org.jetbrains.annotations.NotNull;
  * 「操作导入桌」方块 —— **逐条照抄 Create 蓝图桌**（{@code SchematicTableBlock.java:30-103}）。
  *
  * <p>为什么照抄而不自创：蓝图桌已经是"一格格子 + 一个进度条 + 一个文件列表"这块界面的既成范式，
- * 连形状、碰撞箱、方块状态定义都能直接借 Create 的 {@link AllShapes}（用户口径：界面资源先复用，
- * 等他自己画好再换）。差异只有一处：**方块模型**借的是 {@code create:block/schematic_table}
- * （见 {@code assets/.../blockstates/program_import_table.json}）。
+ * 连形状、碰撞箱、方块状态定义都能直接借 Create 的 {@link AllShapes}。
+ * 差异只有一处：**方块模型/贴图已经是我们自己的了** —— `models/block/program_import_table.json`
+ * 是 {@code create:block/schematic_table} 的原样副本，只把两张贴图改指向
+ * {@code create_sequenced_mechanical_arm:block/program_import_table_side/_top}
+ * （用户要求资源自持，方便他自己画；见 {@code assets/.../blockstates/program_import_table.json}）。
  *
  * <p>{@code getCollisionShape} 用 {@code TABLE_POLE_SHAPE}（只有那根桌腿挡人）而
  * {@code getShape} 用整张桌子：桌子面比碰撞箱宽，玩家可以"贴着桌沿走"，视觉与手感都和蓝图桌一致。

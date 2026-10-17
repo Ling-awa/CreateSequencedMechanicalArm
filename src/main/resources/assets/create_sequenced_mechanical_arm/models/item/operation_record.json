@@ -1,6 +1,6 @@
 {
   "parent": "minecraft:item/generated",
   "textures": {
-    "layer0": "minecraft:item/writable_book"
+    "layer0": "create_sequenced_mechanical_arm:item/operation_record"
   }
 }

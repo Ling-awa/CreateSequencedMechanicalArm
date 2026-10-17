@@ -1,15 +1,12 @@
 package io.github.Ling.create_sequenced_mechanical_arm.client;
 
 import static com.simibubi.create.foundation.gui.AllGuiTextures.PLAYER_INVENTORY;
-import static com.simibubi.create.foundation.gui.AllGuiTextures.SCHEMATIC_TABLE;
-import static com.simibubi.create.foundation.gui.AllGuiTextures.SCHEMATIC_TABLE_PROGRESS;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 import com.google.common.collect.ImmutableList;
-import com.simibubi.create.foundation.gui.AllGuiTextures;
 import com.simibubi.create.foundation.gui.AllIcons;
 import com.simibubi.create.foundation.gui.menu.AbstractSimiContainerScreen;
 import com.simibubi.create.foundation.gui.widget.IconButton;
@@ -37,8 +34,14 @@ import net.neoforged.api.distmarker.OnlyIn;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 /**
- * 「操作导入桌」界面 —— 布局、贴图、进度条与上游蓝图桌**逐像素一致**
- * （{@code SchematicTableScreen}，用户口径：先复用 Create 那套资源，等他自己画）。
+ * 「操作导入桌」界面 —— 布局、进度条与上游蓝图桌**逐像素一致**
+ * （{@code SchematicTableScreen}），**但贴图已经是我们自己的**：底板与进度条来自
+ * {@code assets/create_sequenced_mechanical_arm/textures/gui/program_table.png}，uv 由
+ * {@link ModGuiTextures} 登记（用户要求资源自持，方便他自己画）。
+ *
+ * <p>仍然借用 Create 的只剩两样，且都与"这张桌子的美术"无关：玩家背包底板
+ * {@code PLAYER_INVENTORY}（原版容器界面的通用底板）与按钮图标 {@code AllIcons}（{@code icons.png} 图集，
+ * 用户口径"大部分按钮就用现在原版风格即可"）。
  *
  * <h2>与上游的三处差异（都是有理由的，不是顺手改的）</h2>
  * <ol>
@@ -66,9 +69,14 @@ import net.neoforged.neoforge.network.PacketDistributor;
  */
 public class ProgramImportScreen extends AbstractSimiContainerScreen<ProgramImportTableMenu> {
 
-	/** 界面底板与进度条：**复用蓝图桌的两张图**（用户口径，见类注释）。 */
-	private static final AllGuiTextures BACKGROUND = SCHEMATIC_TABLE;
-	private static final AllGuiTextures PROGRESS = SCHEMATIC_TABLE_PROGRESS;
+	/**
+	 * 界面底板与进度条：**我们自己的贴图**（{@code textures/gui/program_table.png}）。
+	 *
+	 * <p>uv 与宽高原样搬自 Create 的 {@code AllGuiTextures}（见 {@link ModGuiTextures} 的注释），
+	 * 但 {@code location} 已经指向本模组命名空间 —— 用户要求资源自持，这样他能直接改这两张 PNG。
+	 */
+	private static final ModGuiTextures BACKGROUND = ModGuiTextures.PROGRAM_IMPORT_TABLE;
+	private static final ModGuiTextures PROGRESS = ModGuiTextures.PROGRAM_IMPORT_PROGRESS;
 
 	// ————————————————— 上游原样数值（SchematicTableScreen.java:66-131） —————————————————
 	/** 控件整体比底板再下移 2px（上游 {@code int y = topPos + 2}）。 */
@@ -283,9 +291,7 @@ public class ProgramImportScreen extends AbstractSimiContainerScreen<ProgramImpo
 
 		int width = (int) (PROGRESS.getWidth()
 			* Mth.lerp(partialTicks, lastChasingProgress, chasingProgress));
-		int height = PROGRESS.getHeight();
-		graphics.blit(PROGRESS.location, x + PROGRESS_X, y + PROGRESS_Y, PROGRESS.getStartX(), PROGRESS.getStartY(),
-			width, height);
+		PROGRESS.renderPartially(graphics, x + PROGRESS_X, y + PROGRESS_Y, width);
 	}
 
 	/**
