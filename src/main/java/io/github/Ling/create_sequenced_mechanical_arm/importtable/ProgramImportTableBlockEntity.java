@@ -55,7 +55,8 @@ import net.neoforged.neoforge.items.ItemStackHandler;
  * <ul>
  *   <li>{@link #startImport}：**服务端**的判定与动作（校验槽位 → 校验文件 → 消耗输入 → 置 {@code isImporting}）。
  *       客户端只说"我想导入《某某》"，不参与任何判定；</li>
- *   <li>{@link #tick()}：推进进度，到 1 时调 {@link #finishImport()} 把文本写进输出槽；</li>
+ *   <li>{@link #tick()}：推进进度，到 {@link #PROGRESS_DONE}（= 1 − 半步，**不是** {@code >= 1f}，
+ *       理由见该常量）时调 {@link #finishImport()} 把文本写进输出槽；</li>
  *   <li>输入槽在**开始**时就被消耗（与上游 {@code startUpload} 清空输入槽同一个取舍）：否则玩家能在
  *       5 秒里把那张表抽走，产出却照样落进输出槽 —— 白得一张卡。</li>
  * </ul>
@@ -70,6 +71,24 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 
 	/** 一次导入的固定时长（tick）。100 tick = 5 秒，理由见类注释。 */
 	public static final int IMPORT_TICKS = 100;
+
+	/** 每 tick 推进的进度量。抽成常量：{@link #tick()} 里的加法与"到点"判定必须用同一个数。 */
+	private static final float PROGRESS_STEP = 1f / IMPORT_TICKS;
+
+	/**
+	 * "进度已经到 1"的判定门限 = {@code 1 − 半步}。
+	 *
+	 * <p><b>为什么不直接判 {@code importProgress >= 1f}</b>：{@code 1f / 100} 在 float 里是
+	 * {@code 0.0099999997…}，逐 tick 累加 100 次得到的是 {@code ≈0.999999}（**不是 1.0**）——
+	 * 于是"正好 {@link #IMPORT_TICKS} tick 完成"这件事**永远不会发生**：进度条永久停在 99%、
+	 * 输出槽永远空、{@code isImporting} 永远为真。自检曾因此一路红 7 项，而且后面三条"拒绝类"
+	 * 断言拿到的其实是 {@code ALREADY_IMPORTING}（看起来像"判定漏了"，实则是上一次导入没结束）。
+	 *
+	 * <p>为什么是**半步**而不是随手一个 {@code 1e-6}：100 次 float 累加的最坏误差约 {@code 1e-5}
+	 * 量级，半步（0.005）比它大两个数量级 ⇒ 不会漏判；而进位只发生在最后一次加法之后 ⇒ 也不会让
+	 * 完成提前一 tick（第 99 tick 的进度约 0.99，仍低于 0.995）。
+	 */
+	private static final float PROGRESS_DONE = 1f - PROGRESS_STEP / 2f;
 
 	/** 输入槽（空白操作表）与输出槽（导入结果）的下标 —— 菜单里的槽位顺序必须与它一致。 */
 	public static final int SLOT_INPUT = 0;
@@ -165,13 +184,13 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 		}
 		if (!isImporting || level == null || level.isClientSide)
 			return; // 客户端**不推进**进度（它没有 pendingText，也不能写输出槽），理由见类注释
-		if (importProgress >= 1f) {
+		if (importProgress >= PROGRESS_DONE) {
 			finishImport();
 			return;
 		}
-		importProgress = Math.min(1f, importProgress + 1f / IMPORT_TICKS);
+		importProgress = Math.min(1f, importProgress + PROGRESS_STEP);
 		sendUpdate = true;
-		if (importProgress >= 1f)
+		if (importProgress >= PROGRESS_DONE)
 			finishImport();
 	}
 

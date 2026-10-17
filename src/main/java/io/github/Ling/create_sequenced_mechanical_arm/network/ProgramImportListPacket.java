@@ -61,12 +61,13 @@ public record ProgramImportListPacket(List<String> names) implements CustomPacke
 	/**
 	 * 客户端：把列表交给**当前打开着的**那个界面。
 	 *
-	 * <p>不缓存到任何静态"最后一次列表"里：界面一关就没人要这份数据了，而留一份全局缓存
-	 * 只会带来"下次打开时先显示上一次（可能是别的世界/别的服务器）的列表"这种错。
-	 * 界面还没建好（{@code screen} 不是我们的）就什么都不做 —— 那说明这一包是迟到的，
-	 * 玩家已经关掉界面了，下次打开会再请求一次。
+	 * <p>⚠️ **不能加 `@OnlyIn(Dist.CLIENT)`**：加了之后 `RuntimeDistCleaner` 会在**专用服务端**上把这个方法
+	 * 整个摘掉，而 `SequencedArmNetwork` 的 `playToClient(TYPE, CODEC, ProgramImportListPacket::handle)`
+	 * 是**双端都会注册**的 —— 于是模组在服务端加载阶段直接 `NoSuchMethodError:
+	 * void ProgramImportListPacket.handle(ProgramImportListPacket, IPayloadContext)`（2026-10 实测踩过）。
+	 * 本仓其它包（如 `CardUiPacket.handle`）也都没加，照同一惯例。
+	 * 方法体里引用客户端类是安全的：它只会在客户端被调用。
 	 */
-	@OnlyIn(Dist.CLIENT)
 	public static void handle(ProgramImportListPacket packet, IPayloadContext context) {
 		context.enqueueWork(() -> ProgramImportScreen.acceptList(packet.names()));
 	}

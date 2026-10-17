@@ -6581,7 +6581,11 @@ public class SequencedArmSelfTest {
 	 *   <li>{@code 产出与文本一致}：把 {@code finishImport} 里的
 	 *       {@code CardProgramStorage.writeText(out, text)} 换成写空文本、或把 {@code text} 换成
 	 *       {@code file}（文件名）⇒ 变 false（卡上没有程序 / 程序与文件不一致）；
-	 *       把 {@code inventory.setStackInSlot(SLOT_OUTPUT, out)} 删掉 ⇒ 变 false（没有产出）；</li>
+	 *       把 {@code inventory.setStackInSlot(SLOT_OUTPUT, out)} 删掉 ⇒ 变 false（没有产出）；
+	 *       <b>把 {@code tick()} 的完成门限改回 {@code importProgress >= 1f} ⇒ 同样变 false</b>
+	 *       —— {@code 1f / 100} 在 float 里累加 100 次是 {@code ≈0.999999}，"正好 100 tick 完成"
+	 *       永远不发生 ⇒ {@code finishImport} 只在第 101 tick 才跑，这一项与下面
+	 *       {@code 完成后归位}、以及三条"拒绝类"（它们拿到的是 {@code ALREADY_IMPORTING}）一起变红；</li>
 	 *   <li>{@code 输入被消耗}：把 {@code startImport} 里那句
 	 *       {@code inventory.setStackInSlot(SLOT_INPUT, ItemStack.EMPTY)} 删掉 ⇒ 变 false
 	 *       （输入表还在 + 输出又出来一张 ⇒ 白得一张卡）；</li>
@@ -6645,6 +6649,14 @@ public class SequencedArmSelfTest {
 		boolean failedWriteLeavesEmpty = false;
 		boolean filterOk = false;
 		boolean listed = false;
+		// 诊断用：这三条"拒绝类"以前红过，而错误文案只说"没有拒绝"——实测拿到的是
+		// ALREADY_IMPORTING（上一次导入根本没结束），照文案去查 startImport 的判定会白查一轮。
+		StartResult missingResult = null;
+		StartResult compileResult = null;
+		StartResult busyResult = null;
+		// ② 里 tick 跑完之后的状态：仍然是 true / 进度没归 0 ⇒ 卡在"没完成"，而不是"写了但没写进去"
+		boolean stillImporting = false;
+		float progressAfterTicks = -1f;
 
 		try {
 			level.setBlockAndUpdate(tablePos, Blocks.AIR.defaultBlockState());
@@ -6683,6 +6695,8 @@ public class SequencedArmSelfTest {
 					&& table.isImporting;
 				for (int tick = 1; tick < ProgramImportTableBlockEntity.IMPORT_TICKS; tick++)
 					table.tick();
+				stillImporting = table.isImporting;
+				progressAfterTicks = table.importProgress;
 				ItemStack produced = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT);
 				producedWithProgram = produced.getItem() == SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()
 					.asItem() && CardProgramStorage.hasProgram(produced);
@@ -6701,8 +6715,9 @@ public class SequencedArmSelfTest {
 				// ③ 文件不存在 / 编译不过：拒绝，而且**输入槽里那张空白表还在**
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
 					new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()));
-				missingRejected = table.startImport(missingName, registries) == StartResult.NOT_FOUND;
-				compileRejected = table.startImport(badName, registries) == StartResult.DOES_NOT_COMPILE
+				missingRejected = (missingResult = table.startImport(missingName, registries)) == StartResult.NOT_FOUND;
+				compileResult = table.startImport(badName, registries);
+				compileRejected = compileResult == StartResult.DOES_NOT_COMPILE
 					&& !table.isImporting;
 				ItemStack kept = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT);
 				rejectedKeepsInput = !kept.isEmpty() && !CardProgramStorage.hasProgram(kept);
@@ -6711,7 +6726,8 @@ public class SequencedArmSelfTest {
 
 				// ④ 输出槽有物品：不能开始（也不能把输入表吃掉）
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT, new ItemStack(Items.STONE));
-				outputBusyRejected = table.startImport(goodName, registries) == StartResult.OUTPUT_BUSY
+				busyResult = table.startImport(goodName, registries);
+				outputBusyRejected = busyResult == StartResult.OUTPUT_BUSY
 					&& !table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT)
 						.isEmpty()
 					&& !table.isImporting;
@@ -6743,21 +6759,24 @@ public class SequencedArmSelfTest {
 		if (!progressMoved)
 			problems.add("进度没有从 0 往前推进（tick 里那一句加法或 isImporting 的判定有问题）");
 		if (!producedWithProgram)
-			problems.add("IMPORT_TICKS 之后输出槽里没有一张带程序的操作表");
+			problems.add("IMPORT_TICKS 之后输出槽里没有一张带程序的操作表（tick 跑完：isImporting=" + stillImporting
+				+ " 进度=" + progressAfterTicks + "；进度仍 < 1 = 没走完，不是写失败）");
 		if (!textMatchesFile)
 			problems.add("输出那张操作表里的文本与文件内容不一致");
 		if (!inputConsumed)
 			problems.add("开始导入之后输入槽没有清空（输入会被导入两次）");
 		if (!importStopped)
-			problems.add("完成之后 isImporting / 进度没有归位（会一直循环完成）");
+			problems.add("完成之后 isImporting / 进度没有归位（会一直循环完成）：isImporting=" + stillImporting
+				+ " 进度=" + progressAfterTicks);
 		if (!missingRejected)
-			problems.add("不存在的文件没有被拒（problem 应为 NOT_FOUND）");
+			problems.add("不存在的文件没有被拒（startImport 返回 " + missingResult + "，应为 NOT_FOUND）");
 		if (!compileRejected)
-			problems.add("编译不过的脚本没有被拒（problem 应为 DOES_NOT_COMPILE）");
+			problems.add("编译不过的脚本没有被拒（startImport 返回 " + compileResult + "，应为 DOES_NOT_COMPILE）");
 		if (!rejectedKeepsInput)
 			problems.add("被拒之后输入槽里的空白操作表被消耗掉了");
 		if (!outputBusyRejected)
-			problems.add("输出槽有物品时还是开始了导入（产出会顶掉玩家的东西）");
+			problems.add("输出槽有物品时还是开始了导入（startImport 返回 " + busyResult
+				+ "，应为 OUTPUT_BUSY —— 产出会顶掉玩家的东西）");
 		if (!failedWriteLeavesEmpty)
 			problems.add("写入失败（StoreResult != OK）之后输出槽里仍然出现了东西 —— 一张空卡比什么都没有更糟");
 		if (!filterOk)
