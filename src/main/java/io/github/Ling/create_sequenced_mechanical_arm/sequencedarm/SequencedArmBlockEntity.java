@@ -120,6 +120,17 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	/** 爪子上的护目镜（外观变体，同时决定用 cutout 还是 solid 渲染）。信息显示不依赖它。 */
 	public boolean goggles;
 	protected boolean redstoneLocked;
+	/**
+	 * 臂此刻是否处于「信号活动」（= 客户端该用 {@code base_powered} 而不是 {@code base} 底座的唯一判据）。
+	 *
+	 * <p><b>为什么是"存下来的字段"而不是客户端现算</b>：口径要读程序本体（当前条目是不是
+	 * 「等红石 / 等信号」）与链接表（{@link #getArmLinkLevel()}），而这两样在客户端<b>要么没有</b>
+	 * （程序本体从不同步）、<b>要么只有自己发的那份</b>（客户端不入网）。所以由服务端每 tick 重算
+	 * （{@link #refreshSignalActive()}）、随既有同步包下发（{@code "SignalActive"} 键），
+	 * 渲染器只读 {@link #isSignalActive()}。判据本身**不允许写第二份**（客户端没有那些数据，
+	 * 写两份迟早两边不一致 —— 改口径只改 {@link #computeSignalActive()}）。
+	 */
+	private boolean signalActive;
 
 	/**
 	 * 每次 {@link #beginMove} 自增，并同步给客户端。
@@ -1217,6 +1228,11 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 				return;
 		}
 		runtime.tick(this);
+		// 底座模型切换（信号活动）每 tick 重算一次：电平会被脉冲计时器归零、红石锁会变、
+		// 程序会把条目推进到 / 走完「等红石」「等信号」—— 每一种都能让口径翻转。
+		// 只在翻转时推包：这个字段只决定"画哪个底座"，不该每 tick 一个同步包。
+		if (refreshSignalActive())
+			sendData();
 	}
 
 	/**
@@ -1338,6 +1354,8 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		if (blockPowered == redstoneLocked)
 			return;
 		redstoneLocked = blockPowered;
+		// 口径里含"被红石点亮" ⇒ 先重算再推包：客户端在**同一个**包里就能拿到新的底座状态（不额外发包）
+		refreshSignalActive();
 		sendData();
 	}
 
@@ -1347,6 +1365,77 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 
 	public boolean hasNeighborSignal() {
 		return level != null && level.hasNeighborSignal(worldPosition);
+	}
+
+	// ————————————————————————— 信号活动（底座模型切换） —————————————————————————
+
+	/**
+	 * 臂此刻是否处于**信号活动** —— 渲染器据此把底座从 {@code base} 换成 {@code base_powered}。
+	 *
+	 * <p><b>为什么需要它</b>：用户新做了 {@code base_powered.json}（{@code base.json} 的信号态变体：
+	 * 底座本体一样，红石天线换成点亮的 {@code redstone_antenna_powered}），要求「当臂发出信号或者接收信号
+	 * 的时候，使用这个模型替代原本的 {@code base.json}，没有接收或发出信号的时候再用 {@code base.json}」。
+	 * 所以这条判据只回答一件事：<b>臂现在是不是正在跟红石信号打交道</b>。
+	 *
+	 * <p><b>口径 = 下面三条任一为真</b>：
+	 * <ol>
+	 *   <li><b>发</b>：{@link #getArmLinkLevel()} {@code > 0} —— 此刻真的有一路链接被我们维持在电平 &gt; 0。
+	 *       <b>「曾经发过」不算</b>：脉冲到点后电平归 0、条目却按设计留在表里
+	 *       （见 {@link #tickArmLink()} 的注释），那种情况这里必须是 {@code false}；</li>
+	 *   <li><b>收（被红石点亮）</b>：{@link #redstoneLocked} —— 方块正被相邻红石信号点亮
+	 *       （{@link #redstoneUpdate()} 每次翻转都会 {@code sendData()}）；</li>
+	 *   <li><b>收（正在等）</b>：程序此刻停在 {@code WAIT_REDSTONE}，或 {@code SIGNAL} 的 {@code RECEIVE} 模式上
+	 *       —— 也就是臂正守着那根红石线 / 那一路频率在听。</li>
+	 * </ol>
+	 *
+	 * <p><b>为什么第 3 条要把"等"也算进来</b>：{@code RECEIVE} 的成功窗口是<b>零时长</b> ——
+	 * {@code ProgramRuntime.tickWait} 一发现该频率通电就在<b>同一个 tick</b> 里 {@code succeed} 走掉。
+	 * 只认"真的收到了"的话，收信号这一侧<b>永远不会亮</b>；"正在等"才是臂上与收信号有关、而且看得见的那个时段。
+	 * （{@code WAIT_REDSTONE} 的"等通电/等断电"同样适用：它本来就是红石活动。）
+	 *
+	 * <p>⚠️ 只认<b>当前</b>活动：等完了继续跑、或者只是曾经发过一轮，都不算。
+	 */
+	public boolean isSignalActive() {
+		return signalActive;
+	}
+
+	/**
+	 * {@link #isSignalActive()} 的口径本体。**只在服务端调用**（要读程序本体与链接表）。
+	 */
+	private boolean computeSignalActive() {
+		// ① 发：此刻真的有电平 > 0 的链接（"曾经发过、现在归 0"不算）
+		if (getArmLinkLevel() > 0)
+			return true;
+		// ② 收：被相邻红石点亮
+		if (redstoneLocked)
+			return true;
+		// ③ 收：正停在"等红石 / 等信号"这类条目上
+		if (runtime.state != ProgramRuntime.EntryState.WAITING)
+			return false;
+		ArmProgramTask task = program.task(runtime.taskIndex);
+		if (task == null || runtime.entryIndex < 0 || runtime.entryIndex >= task.entries.size())
+			return false;
+		ArmProgramEntry entry = task.entries.get(runtime.entryIndex);
+		if (entry.op == OperationType.WAIT_REDSTONE)
+			return true;
+		return entry.op == OperationType.SIGNAL && entry.isSignalReceive();
+	}
+
+	/**
+	 * 重算口径并记到 {@link #signalActive}。
+	 *
+	 * <p><b>为什么"翻转才推包"由调用方决定</b>：这个值只影响"画哪个底座"，每 tick 都 {@code sendData()}
+	 * 会把同步包刷成每 tick 一个；而它变化的每一种原因（电平改、脉冲到点、红石锁变、条目推进到等待）
+	 * 都已经在各自的路径上发过包，这里只补"口径真的翻了、但上面那些包没带上"的那一次。
+	 *
+	 * @return 口径是否翻转（{@code true} = 调用方该推一次同步包）
+	 */
+	private boolean refreshSignalActive() {
+		boolean active = computeSignalActive();
+		if (active == signalActive)
+			return false;
+		signalActive = active;
+		return true;
 	}
 
 	// ————————————————————————— 收发信号（§7.16e 持久变量 / 多路并存） —————————————————————————
@@ -1795,6 +1884,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	protected void write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
 		super.write(tag, registries, clientPacket);
 		tag.putBoolean("Powered", redstoneLocked);
+		// 「信号活动」（底座模型切换，见 isSignalActive）：派生值，但客户端算不出来（没有程序本体与链接网络表），
+		// 所以服务端算好后**跟着既有同步包**一起发；不另造网络包。翻转时由 refreshSignalActive 触发 sendData。
+		tag.putBoolean("SignalActive", signalActive);
 		tag.putBoolean("Goggles", goggles);
 		tag.putInt("Phase2", phase.ordinal());
 		tag.put("Offset", net.minecraft.nbt.NbtUtils.writeBlockPos(movingOffset));
@@ -1863,6 +1955,8 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		int oldMoveSeq = moveSeq;
 
 		redstoneLocked = tag.getBoolean("Powered");
+		// 客户端只读这一份（服务端下一 tick 会按真实状态重算，存档里那个值只是顺带写的）
+		signalActive = tag.getBoolean("SignalActive");
 		goggles = tag.getBoolean("Goggles");
 		phase = Phase.values()[Mth.clamp(tag.getInt("Phase2"), 0, Phase.values().length - 1)];
 		movingOffset = NBTHelper.readBlockPos(tag, "Offset");

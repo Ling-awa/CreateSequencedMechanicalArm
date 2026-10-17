@@ -3,7 +3,7 @@
 	"credit": "Made with Blockbench",
 	"parent": "minecraft:item/generated",
 	"textures": {
-		"0": "create_sequenced_mechanical_arm:item/operation_table",
-		"particle": "create_sequenced_mechanical_arm:item/operation_table"
-	}
+		"layer0": "create_sequenced_mechanical_arm:item/operation_table"
+	},
+	"display": {}
 }

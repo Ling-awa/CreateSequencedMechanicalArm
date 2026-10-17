@@ -119,7 +119,11 @@ public class SequencedArmRenderer extends KineticBlockEntityRenderer<SequencedAr
 			msr.rotateXDegrees(180);
 
 		ArmRenderer.transformBase(msr, base);
-		CachedBuffers.partial(ModPartialModels.ARM_BASE.model, state)
+		// 底座：**信号活动时换成 base_powered**（用户要求：臂发出 / 接收信号时用这个模型，否则用 base）。
+		// 两个模型是同一个底座（只有红石天线换成点亮的贴图）⇒ 这里只挑模型，变换、姿态、渲染类型一概不动。
+		// 判据来自 be.isSignalActive()（服务端算好、随既有同步包下发的字段，客户端不重算）。
+		CachedBuffers.partial(
+			(be.isSignalActive() ? ModPartialModels.ARM_BASE_POWERED : ModPartialModels.ARM_BASE).model, state)
 			.light(light)
 			.transform(local)
 			.renderInto(ms, vb);
