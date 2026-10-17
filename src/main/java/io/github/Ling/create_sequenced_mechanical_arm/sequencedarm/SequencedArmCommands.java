@@ -176,10 +176,13 @@ public class SequencedArmCommands {
 	/**
 	 * 脚本目录：{@code run/sequenced_arm/scripts/}（用户口径，**不再是** {@code config/…/scripts}）。
 	 *
-	 * <p>★ 路径与名字规则都只有一处 —— {@link ScriptFiles}。操作记录表的上传（{@code ArmScriptExport}）
-	 * 与将来启动时的脚本自动解析都从那里取同一个常量；各写一份就会出现"导出的文件 import 不回来"
+	 * <p>★ 文件属于**玩家本机**（{@link ScriptFiles}）：玩家链路（记录表导出、导入桌、打开文件夹）
+	 * 全在客户端读写那一份；这里解析的是**服务端自己的**那份，只供 {@code /sma code …}
+	 * 这条管理员 / 控制台后门使用 —— 所以"服务端不存玩家数据"与"这里能读写文件"并不冲突。
+	 *
+	 * <p>路径与名字规则都只有一处 —— {@link ScriptFiles}，各写一份就会出现"导出的文件 import 不回来"
 	 * 这种不报错的分叉。包可见（不是 private）是给启动自检读的：
-	 * {@code SequencedArmSelfTest.checkOperationRecordExport} 的 ⑤ 就断言两边**真的**是同一个目录。
+	 * {@code SequencedArmSelfTest.checkOperationRecordExport} 的 ⑥ 就断言两边**真的**是同一个常量。
 	 */
 	static Path scriptDir() {
 		return ScriptFiles.directory();

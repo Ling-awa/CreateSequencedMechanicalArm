@@ -6418,30 +6418,31 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 「操作记录表 → 上传」这条路（用户口径：记录表**不携带任何数据**，只用来确定"上传的是哪条臂"；
-	 * 上传 = 把手边那条臂的程序**直接导出成文件**，流程与蓝图与笔一致）。
+	 * 「操作记录表 → 上传」这条路（用户口径：记录表**不携带任何数据**，只用来确定"上传的是哪条臂"）。
 	 *
-	 * <p>为什么这条必须在这里：整条路的错误都是**静默**的 —— 文件名拼错一个字符、目录换了却没换全、
-	 * 同名时把别人的脚本覆盖掉，游戏里都只会看到一句"已导出"。断言全部走真实入口
-	 * （{@link ArmScriptExport#write} 与真的臂方块实体），不碰任何常量。
-	 *
-	 * <p>字段与"改哪一行会让它变红"：
+	 * <p>★ **用户改口径（照 Create 那套）**：脚本文件住在**玩家本机**，服务端不存玩家脚本。
+	 * 于是这条路被劈成两半，断言也按两半分开：
 	 * <ol>
-	 *   <li>{@code 落盘成功}：把 {@link ArmScriptExport#write} 里
-	 *       {@code Files.createDirectories} / {@code writeString} 两句删掉 ⇒ 变 false；</li>
-	 *   <li>{@code 内容一致}：把 {@code writeString} 的 {@code text} 改成 {@code ""}（或写成
-	 *       {@code program.toString()}）⇒ 变 false（文件内容必须与臂的程序文本逐字相同）；</li>
-	 *   <li>{@code 空程序被拒}：删掉 {@code write} 开头那条 {@code tasks.isEmpty()} 判断
+	 *   <li>{@code 服务端不写盘}：{@link ArmScriptExport#prepare} 只返回文本，**磁盘上不多任何文件**。
+	 *       把 {@code prepare} 改成顺手调 {@code writeFile} ⇒ 变 false（那正是被推翻的旧口径：
+	 *       旧实现 {@code write} 在服务端直接落盘）；</li>
+	 *   <li>{@code 回传文本一致}：{@code prepare} 的文本必须与臂里程序的反编译结果逐字相同
+	 *       （否则玩家会存下一份"另一份脚本"）；</li>
+	 *   <li>{@code 落盘成功} / {@code 内容一致}：客户端那一半 {@link ArmScriptExport#writeFile}
+	 *       写进 {@link ScriptFiles#directory()}，内容逐字相同。把 {@code writeString} 的 {@code text}
+	 *       改成 {@code ""}、或删掉 {@code createDirectories} ⇒ 变 false；</li>
+	 *   <li>{@code 空程序被拒}：删掉 {@code prepare} 开头那条 {@code tasks.isEmpty()} 判断
 	 *       ⇒ 变 false（空程序会被写成一个空文件）；</li>
 	 *   <li>{@code 非法名被拒}：把 {@link ScriptFiles#isValidName} 改成 {@code return true}
 	 *       ⇒ 变 false（{@code ../escape} 会真的写到脚本目录**外面**）；</li>
-	 *   <li>{@code 同名被拒}：把 {@code CREATE_NEW} 换成 {@code CREATE} / {@code TRUNCATE_EXISTING}
-	 *       → 变 false；</li>
-	 *   <li>{@code 原文件未被覆盖}：同上（第二份程序与第一份不同，覆盖了就会读出差值）；</li>
-	 *   <li>{@code 目录统一}：把 {@link io.github.Ling.create_sequenced_mechanical_arm.program.ScriptFiles#directory()}
-	 *       里的 {@code sequenced_arm} 改回 {@code config/create_sequenced_mechanical_arm}、
-	 *       或让命令那边另写一份 {@code resolve} ⇒ 变 false。</li>
+	 *   <li>{@code 同名被拒} / {@code 原文件未被覆盖}：把 {@code CREATE_NEW} 换成 {@code CREATE} /
+	 *       {@code TRUNCATE_EXISTING} ⇒ 变 false；</li>
+	 *   <li>{@code 目录统一}：本机目录、管理员后门 {@code /sma code …} 与 {@code file(name)} 必须算出同一串路径。</li>
 	 * </ol>
+	 *
+	 * <p>为什么这一段能跑在服务端自检里：两个半段都是**纯 {@code java.nio}**（不碰任何客户端类），
+	 * "文件属于玩家本机"是**调用方**的语义而不是这段代码的语义 —— 自检进程里
+	 * {@link ScriptFiles#directory()} 解析出的就是它自己的游戏目录。
 	 *
 	 * <p>⚠️ 这条**不**覆盖 {@code network/ExportScriptPacket} 里的"主手物品 / 方块与 BE 类型 / 距离"
 	 * 三道守卫 —— 它们要一个 {@code IPayloadContext}（玩家、连接），无头环境拿不到；
@@ -6455,19 +6456,24 @@ public class SequencedArmSelfTest {
 		String name = "selftest_record_export";
 		Path file = dir.resolve(name + ScriptFiles.EXTENSION);
 
-		// 先清掉上一轮可能留下的同名文件：不清的话 ①（能写成）与 ④（同名被拒）会互相污染，
+		// 先清掉上一轮可能留下的同名文件：不清的话 ②（能写成）与 ⑤（同名被拒）会互相污染，
 		// 于是"上一轮失败留下的残骸"会让这一轮的红/绿看起来完全无缘无故。
+		Path emptyFile = dir.resolve("selftest_record_empty" + ScriptFiles.EXTENSION);
 		try {
 			Files.deleteIfExists(file);
+			Files.deleteIfExists(emptyFile);
 		} catch (IOException failed) {
 			problems.add("清不掉上一轮留下的 " + file + "（" + failed + "）");
 		}
 
 		ArmProgram program = DevPresets.mainWithSubTasks();
 
-		// ① 导出成功：文件真出现在**新目录**里，内容 = 这条臂的程序文本
+		// ① 服务端那一半：只准备文本，**磁盘上不许出现任何文件**（这是被推翻的旧口径的替代断言）
+		// ② 客户端那一半：拿回传文本写本机文件，内容与臂里程序反编译结果逐字相同
 		BlockPos armPos = new BlockPos(0, 200, 4);
 		BlockState oldState = level.getBlockState(armPos);
+		boolean serverWroteNothing = false;
+		boolean textRoundTrips = false;
 		boolean exported = false;
 		boolean contentMatches = false;
 		String expectedText = null;
@@ -6478,14 +6484,25 @@ public class SequencedArmSelfTest {
 			} else {
 				arm.setProgram(program);
 				expectedText = ProgramText.toText(arm.getProgram(), registries);
-				ArmScriptExport.Outcome first = ArmScriptExport.write(name, arm.getProgram(), registries);
-				exported = first.ok() && Files.isRegularFile(file);
-				if (!exported)
-					problems.add("导出没有成功：problem=" + first.problem() + " file=" + first.file());
-				else if (expectedText == null)
-					problems.add("前提不成立：臂里的程序反编译成了 null（导出却成功了，文案对不上）");
-				else
-					contentMatches = expectedText.equals(Files.readString(file, StandardCharsets.UTF_8));
+				ArmScriptExport.Prepared prepared = ArmScriptExport.prepare(name, arm.getProgram(), registries);
+				serverWroteNothing = prepared.ok() && prepared.text() != null && !Files.exists(file);
+				if (!prepared.ok()) {
+					problems.add("服务端那一半拒绝了这次导出：problem=" + prepared.problem());
+				} else if (expectedText == null) {
+					problems.add("前提不成立：臂里的程序反编译成了 null（prepare 却成功了，文案对不上）");
+				} else {
+					textRoundTrips = expectedText.equals(prepared.text());
+					if (!textRoundTrips)
+						problems.add("服务端回传的文本与臂里的程序文本不一致（玩家会存下另一份脚本）");
+					ArmScriptExport.Outcome written = ArmScriptExport.writeFile(name, prepared.text());
+					exported = written.ok() && Files.isRegularFile(file);
+					if (!exported)
+						problems.add("写本机文件没有成功：problem=" + written.problem() + " file=" + written.file());
+					else
+						contentMatches = expectedText.equals(Files.readString(file, StandardCharsets.UTF_8));
+				}
+				if (!serverWroteNothing)
+					problems.add("服务端那一半动了磁盘（prepare 只该返回文本，文件却出现了）");
 			}
 		} catch (IOException failed) {
 			problems.add("读回导出的文件失败：" + failed);
@@ -6493,29 +6510,36 @@ public class SequencedArmSelfTest {
 			level.setBlockAndUpdate(armPos, oldState);
 		}
 
-		// ② 空程序被拒：而且**一个文件都不许留下**（写成空文件比拒绝更糟：它看起来像一份能用的脚本）
-		ArmScriptExport.Outcome emptyOutcome = ArmScriptExport.write("selftest_record_empty", new ArmProgram(),
+		// ③ 空程序被拒：两半各拒一次，而且**一个文件都不许留下**
+		// （写成空文件比拒绝更糟：它看起来像一份能用的脚本）
+		ArmScriptExport.Prepared emptyPrepared = ArmScriptExport.prepare("selftest_record_empty", new ArmProgram(),
 			registries);
-		boolean emptyRejected = emptyOutcome.problem() == ArmScriptExport.Problem.EMPTY_PROGRAM
-			&& !Files.exists(dir.resolve("selftest_record_empty" + ScriptFiles.EXTENSION));
+		ArmScriptExport.Outcome emptyWrite = ArmScriptExport.writeFile("selftest_record_empty", "");
+		boolean emptyRejected = emptyPrepared.problem() == ArmScriptExport.Problem.EMPTY_PROGRAM
+			&& emptyWrite.problem() == ArmScriptExport.Problem.EMPTY_PROGRAM
+			&& !Files.exists(emptyFile);
 		if (!emptyRejected)
-			problems.add("空程序没有被拒（problem=" + emptyOutcome.problem() + "）");
+			problems.add("空程序没有被拒（prepare=" + emptyPrepared.problem() + " writeFile=" + emptyWrite.problem() + "）");
 
-		// ③ 非法文件名被拒（每个输入各是一条独立的反证：`.`/`/`/`..`/超长/空/空白/null）
+		// ④ 非法文件名被拒（两半各判一次；每个输入各是一条独立的反证：`.`/`/`/`..`/超长/空/空白/null）
 		String[] badNames = { "", " ", "../escape", "a/b", "a.b", "x".repeat(ScriptFiles.MAX_NAME + 1), null };
 		boolean badNamesRejected = true;
 		String badNameAccepted = null;
 		for (String bad : badNames) {
-			if (ArmScriptExport.write(bad, program, registries).problem() == ArmScriptExport.Problem.BAD_NAME)
+			boolean serverRejects = ArmScriptExport.prepare(bad, program, registries)
+				.problem() == ArmScriptExport.Problem.BAD_NAME;
+			boolean clientRejects = ArmScriptExport.writeFile(bad, "selftest")
+				.problem() == ArmScriptExport.Problem.BAD_NAME;
+			if (serverRejects && clientRejects)
 				continue;
 			badNamesRejected = false;
 			if (badNameAccepted == null)
-				badNameAccepted = String.valueOf(bad);
+				badNameAccepted = String.valueOf(bad) + "（服务端拒=" + serverRejects + " 客户端拒=" + clientRejects + "）";
 		}
 		if (!badNamesRejected)
 			problems.add("这个文件名被接受了（应当拒绝）：[" + badNameAccepted + "]");
 
-		// ④ 同名被拒：第二份程序与第一份**不同**，所以"被覆盖"能被读出来
+		// ⑤ 同名被拒：第二份程序与第一份**不同**，所以"被覆盖"能被读出来
 		ArmProgram other = new ArmProgram();
 		ArmProgramTask otherTask = new ArmProgramTask();
 		otherTask.name = "other";
@@ -6538,8 +6562,8 @@ public class SequencedArmSelfTest {
 		if (!firstKept)
 			problems.add("同名那次导出把第一份文件覆盖掉了");
 
-		// ⑤ 目录统一：命令那条路与导出这条路**必须**算出同一个目录（PLAIN-ASCII 尾段也钉一下，
-		//    免得有人把目录常量改成 config 下却忘了改文案）
+		// ⑥ 目录统一：本机目录、管理员后门 {@code /sma code …} 与 {@code file(name)} **必须**算出同一串路径
+		//    （PLAIN-ASCII 尾段也钉一下，免得有人把目录常量改成 config 下却忘了改文案）
 		boolean dirUnified = dir.equals(SequencedArmCommands.scriptDir())
 			&& dir.endsWith(ScriptFiles.DIRECTORY)
 			&& file.getParent()
@@ -6548,15 +6572,16 @@ public class SequencedArmSelfTest {
 		if (!dirUnified)
 			problems.add("脚本目录不统一：导出=" + dir + " 命令=" + SequencedArmCommands.scriptDir());
 
-		LOGGER.info("[selftest] 记录表导出: 落盘成功={} 内容一致={} 空程序被拒={} 非法名被拒={} 同名被拒={} 原文件未被覆盖={} "
-			+ "目录统一={} （目录={}）", exported, contentMatches, emptyRejected, badNamesRejected, sameNameRejected,
-			firstKept, dirUnified, dir);
+		LOGGER.info("[selftest] 记录表导出: 服务端不写盘={} 回传文本一致={} 落盘成功={} 内容一致={} 空程序被拒={} 非法名被拒={} "
+			+ "同名被拒={} 原文件未被覆盖={} 目录统一={} （本机目录={}）", serverWroteNothing, textRoundTrips, exported,
+			contentMatches, emptyRejected, badNamesRejected, sameNameRejected, firstKept, dirUnified, dir);
 		for (String problem : problems)
 			LOGGER.error("[selftest] 记录表导出：{}", problem);
 
 		// 收尾：把自检写进去的文件删掉（这是**真实目录**，跑完自检不该在里面留东西）
 		try {
 			Files.deleteIfExists(file);
+			Files.deleteIfExists(emptyFile);
 		} catch (IOException failed) {
 			LOGGER.warn("[selftest] 记录表导出：删不掉自检产生的 {}（{}），手动删一下", file, failed.toString());
 		}

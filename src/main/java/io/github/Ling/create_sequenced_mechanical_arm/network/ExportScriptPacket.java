@@ -1,9 +1,5 @@
 package io.github.Ling.create_sequenced_mechanical_arm.network;
 
-import java.nio.file.Path;
-
-import org.jetbrains.annotations.Nullable;
-
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationRecordItem;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.ArmScriptExport;
@@ -23,14 +19,26 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 /**
  * 「操作记录表 → 上传」的 C2S 意图包：**名字 + 哪条臂**（用户口径）。
  *
  * <p>只传意图、不传程序：客户端不读臂里的程序（那是方块实体数据，客户端根本没同步过整份），
- * 服务端收到后才把<b>自己那条臂</b>的程序导出成文件。这样"上传的是哪条臂"由服务端现场确认，
+ * 服务端收到后才把<b>自己那条臂</b>的程序读出来。这样"上传的是哪条臂"由服务端现场确认，
  * 客户端说破天也只能提供一个坐标 —— 而坐标要过下面四条校验。
+ *
+ * <h2>★ 服务端不再写文件（用户改口径：照 Create 那套，文件在玩家本机）</h2>
+ * 这个包只做"**判定**"：主手是记录表、目标是臂、程序非空、反编译得出来、不超
+ * {@code ProgramText.MAX_BYTES}、名字合法。通过之后它把文本**回传给这个玩家**
+ * （{@link ExportScriptResultPacket}），由客户端写进<b>玩家本机</b>的
+ * {@code run/sequenced_arm/scripts/}。服务端从头到尾不碰任何脚本文件 ——
+ * 这与 {@code ServerSchematicLoader} 只负责收片、{@code SchematicAndQuillHandler} 才写本地
+ * 是同一条分工（上游 {@code SchematicAndQuillHandler:207-233}）。
+ *
+ * <p>⚠️ 已知且被接受的取舍：程序文本会经网络发给<b>这个玩家自己</b>。它本来就在他自己的臂里
+ * （下面四条校验把这件事钉死了），所以这不是泄露，只是把钱路走对。
  *
  * <p><b>校验顺序就是这张单子的顺序</b>（每一步失败都明确回一条 actionbar，绝不静默）：
  * <ol>
@@ -39,9 +47,9 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  *       —— 两条都查，因为"方块对但 BE 类型不对"只可能是存档坏了或被别的模组顶掉；</li>
  *   <li>距离合理：与 {@code /sma info} 那些命令的口径一致，取 Create 自己的臂范围
  *       {@link ArmBlockEntity#getRange()}（{@code mechanicalArmRange}，默认 5 格）——
- *       比原版玩家的 4.5 格交互距离宽一点，不会挡住正常手势，但挡住"隔着一百格点一下就把文件导出去"；</li>
- *   <li>程序相关（空 / 转不成文本 / 超上限）与文件名（非法 / 同名）——这些都交给
- *       {@link ArmScriptExport#write}，那边是唯一实现，自检也走它。</li>
+ *       比原版玩家的 4.5 格交互距离宽一点，不会挡住正常手势，但挡住"隔着一百格点一下就把程序取走"；</li>
+ *   <li>程序相关（空 / 转不成文本 / 超上限）与文件名（非法）——这些都交给
+ *       {@link ArmScriptExport#prepare}，那边是唯一实现，自检也走它。</li>
  * </ol>
  */
 public record ExportScriptPacket(String name, BlockPos pos) implements CustomPacketPayload {
@@ -102,37 +110,22 @@ public record ExportScriptPacket(String name, BlockPos pos) implements CustomPac
 				return;
 			}
 
-			// ④ 程序与文件名 → 落盘（唯一实现）
-			ArmScriptExport.Outcome outcome = ArmScriptExport.write(packet.name(), arm.getProgram(),
+			// ④ 程序与文件名 → **只校验、只准备文本**（服务端不写任何脚本文件，见类注释）
+			ArmScriptExport.Prepared prepared = ArmScriptExport.prepare(packet.name(), arm.getProgram(),
 				level.registryAccess());
-			switch (outcome.problem()) {
-				case OK -> feedback(player, "record.written", ChatFormatting.GREEN, fileName(outcome.file()));
+			switch (prepared.problem()) {
+				// ★ 通过 ⇒ 文本回传给这个玩家，由**客户端**落到玩家本机的脚本目录
+				case OK -> PacketDistributor.sendToPlayer(player,
+					new ExportScriptResultPacket(packet.name(), prepared.text() == null ? "" : prepared.text()));
 				case EMPTY_PROGRAM -> feedback(player, "record.empty_program", ChatFormatting.RED);
 				case NOT_ENCODABLE -> feedback(player, "record.not_encodable", ChatFormatting.RED);
-				case TOO_LARGE -> feedback(player, "record.too_large", ChatFormatting.RED, outcome.args());
+				case TOO_LARGE -> feedback(player, "record.too_large", ChatFormatting.RED, prepared.args());
 				case BAD_NAME -> feedback(player, "record.bad_name", ChatFormatting.RED);
-				case NAME_TAKEN -> feedback(player, "record.exists", ChatFormatting.RED, fileName(outcome.file()));
-				case WRITE_FAILED -> feedback(player, "record.write_failed", ChatFormatting.RED, outcome.args());
+				// 下面三种属于"客户端写盘那一半"的结局（同名 / 写失败），服务端这一半不会出现
+				case NAME_TAKEN, WRITE_FAILED -> feedback(player, "record.write_failed", ChatFormatting.RED,
+					String.valueOf(prepared.problem()));
 			}
 		});
-	}
-
-	/**
-	 * 回执里显示的那串字：**只有文件名**（含 {@code .sma} 后缀），与 Create 存蓝图后那条提示完全同口径
-	 * —— {@code SchematicAndQuillHandler.java:220} 传的就是 {@code file.getFileName().toString()}。
-	 *
-	 * <p><b>为什么绝对不能把 {@link Path} 直接塞进 {@code %s}（"导出成功但屏幕上什么都没有"的真凶）</b>：
-	 * {@code TranslatableContents} 的构造器在**非生产环境**逐个校验参数，只接受
-	 * {@code Component / Number / Boolean / String}，别的当场抛 {@link IllegalArgumentException}
-	 * （反编译源码 {@code TranslatableContents.java:87-93}）。开发环境（{@code run/}）恰好就是"非生产"
-	 * ⇒ 整个 {@code enqueueWork} 任务炸掉，快捷栏上一条消息都没有 —— 用户反馈的"没有提示"就是它。
-	 * 生产环境不抛，但会把 {@code Path.toString()} 打成**绝对路径**（又长又跟机器有关，糊在快捷栏上没法看）。
-	 *
-	 * <p>"同名不覆盖"那一条原来同样传的是 {@link Path}，一并修掉。
-	 */
-	private static String fileName(@Nullable Path file) {
-		return file == null ? "?" : file.getFileName()
-			.toString();
 	}
 
 	/**
@@ -144,7 +137,12 @@ public record ExportScriptPacket(String name, BlockPos pos) implements CustomPac
 	 * {@code player.displayClientMessage(component(), true)}（catnip {@code LangBuilder.java:161-163}）。
 	 * 所以这里不需要任何 Create 专属 API：{@code true} 那个参数就是 actionbar。
 	 *
-	 * <p>⚠️ 参数只能传 {@code Component / Number / Boolean / String}（见 {@link #fileName(Path)} 的注释）。
+	 * <p>这里只发**失败**（成功那条由客户端在真正写盘之后自己发，见 {@link ExportScriptResultPacket}）：
+	 * 文件写在玩家本机，服务端连"写成了没有"都不知道，抢先报"另存为"就会说谎。
+	 *
+	 * <p>⚠️ 参数只能传 {@code Component / Number / Boolean / String}：{@code TranslatableContents} 的构造器
+	 * 在非生产环境逐个校验参数类型，塞 {@code Path} 之类会当场抛 {@link IllegalArgumentException}
+	 * （症状是"导出失败但屏幕上什么都没有"）。
 	 */
 	private static void feedback(ServerPlayer player, String key, ChatFormatting color, Object... args) {
 		player.displayClientMessage(

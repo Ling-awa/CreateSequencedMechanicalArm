@@ -10,16 +10,26 @@ import net.neoforged.fml.loading.FMLPaths;
 /**
  * 脚本文本文件的**目录与名字规则**（唯一来源）。
  *
- * <p><b>为什么必须只有一处</b>：同一个 {@code <名字>.sma} 会被三条路摸到 ——
- * 命令 {@code /sma code export|import|check}、操作记录表的"上传"（导出成文件）、
- * 以及将来启动时的脚本自动解析。三处各写一份 {@code resolve(...)} 的后果是本项目栽过的
+ * <p><b>为什么必须只有一处</b>：同一个 {@code <名字>.sma} 会被几条路摸到 ——
+ * 记录表的"上传"（导出成文件）、操作导入桌列/读文件、打开脚本文件夹，以及管理员后门
+ * {@code /sma code import|export|check}。各写一份 {@code resolve(...)} 的后果是本项目栽过的
  * 那种"导出的文件读不回来"：文件真的写下去了，只是写在另一个目录里，不报任何错。
  * 所以目录常量、名字判据、扩展名全在这里，其它地方只许调 {@link #directory()} / {@link #file(String)}。
  *
+ * <p><b>★ 文件属于「玩家本机」（用户口径，照 Create 的蓝图那套）</b>：脚本是玩家自己的资产，
+ * 和 Create 的 {@code schematics/} 一样落在**运行这份客户端的那台机器**上
+ * （{@code CreatePaths.GAME_DIR = FMLPaths.GAMEDIR.get()}，见上游 {@code CreatePaths:9-13}）。
+ * {@link #directory()} 解析的是"**当前这一侧**的游戏目录"：客户端上就是玩家本机，
+ * 多人游戏里服务端那一份与玩家无关。因此**玩家链路（导出 / 导入桌的列表与内容 / 打开文件夹）全部在客户端执行**，
+ * 服务端既不存玩家脚本、也不再写任何脚本文件 —— 数据是玩家经网络包**上传**进物品里的
+ * （与 {@code ClientSchematicLoader} 逐片发、{@code ServerSchematicLoader} 拼装落盘同一条分工）。
+ *
+ * <p>服务端这一份目录只剩一个用途：{@code /sma code …} 这条**管理员 / 控制台后门**
+ * （读服务端自己的 {@code run/sequenced_arm/scripts/}），与"玩家数据不落服务端磁盘"不冲突。
+ *
  * <p><b>目录为什么搬出 {@code config/}</b>（用户口径）：脚本文本是**世界数据**（属于这个存档的臂），
  * 不是配置 —— 放在 {@code config/create_sequenced_mechanical_arm/scripts/} 里既会被"改配置"的直觉误导，
- * 也不随存档走。新位置是**游戏根目录**下的 {@code run/sequenced_arm/scripts/}（专用服务器上是服务端根目录），
- * 由服务端自己的 game dir 推导 —— 客户端路径一概不参与（多人游戏里客户端根本没有那个目录）。
+ * 也不随存档走。位置是**游戏根目录**下的 {@code run/sequenced_arm/scripts/}。
  */
 public final class ScriptFiles {
 
@@ -44,7 +54,7 @@ public final class ScriptFiles {
 	 * <p>为什么**白名单**而不是"过滤掉 {@code ../}"：这个字符串会被直接拼进路径，
 	 * 黑名单永远漏（{@code ..\}、{@code .../}、{@code a\\b}、NTFS 的交替数据流 {@code a:b}…）。
 	 * 白名单里连点号都没有 ⇒ 不可能出现 {@code ..}、也不可能跑出脚本目录。
-	 * 中文放行是用户口径（"文件名可以用中文"）；命令那条路也吃同一份规则，
+	 * 中文放行是用户口径（"文件名可以用中文"）；管理员后门 {@code /sma code …} 也吃同一份规则，
 	 * 否则记录表导出 {@code 炒菜.sma} 之后 {@code /sma code import 炒菜} 会说不认识这个名字。
 	 */
 	private static final Pattern NAME = Pattern.compile("[A-Za-z0-9_\\-\\u4e00-\\u9fa5]{1," + MAX_NAME + "}");
@@ -53,10 +63,14 @@ public final class ScriptFiles {
 	}
 
 	/**
-	 * 脚本目录：服务端游戏根目录（{@code run/}）下的 {@code sequenced_arm/scripts}。
+	 * 脚本目录：**当前这一侧**游戏根目录（{@code run/}）下的 {@code sequenced_arm/scripts}。
 	 *
-	 * <p>{@code FMLPaths.GAMEDIR} 而不是 {@code CONFIGDIR}：见类注释（文本是存档数据，不是配置）。
-	 * 只在**服务端**问这个路径（命令、导出、自动解析）；客户端不该有、也没有这个目录。
+	 * <p>{@code FMLPaths.GAMEDIR} 而不是 {@code CONFIGDIR}：见类注释（文本是世界数据，不是配置）。
+	 *
+	 * <p>★ 同一句代码在两端解析出的是**两处磁盘**：客户端上是玩家本机（玩家链路全在这里），
+	 * 专用服务器上是服端根目录（只给 {@code /sma code …} 后门用）。所以"谁调它"就是语义的一部分：
+	 * 玩家数据的读写**只许**在客户端调（记录表导出、导入桌、打开文件夹）；
+	 * 服务端调它只允许出现在那条管理员后门里。
 	 */
 	public static Path directory() {
 		return FMLPaths.GAMEDIR.get()

@@ -56,12 +56,11 @@ import org.slf4j.Logger;
  *       {@link ProgramImportRequestPacket}，服务端回 {@code ProgramImportListPacket}（只有名字），
  *       到达时由 {@link #acceptList} 重建列表控件。所以这里**没有** {@code CreateClient.SCHEMATIC_SENDER}；
  *       "刷新"那颗按钮就是再发一次请求。</li>
- *   <li><b>"打开文件夹"按钮回来了，但它只能管本机</b>（上游 {@code I_OPEN_FOLDER}，
- *       {@code SchematicTableScreen:98-102}）：脚本目录是<b>服务端</b>的数据，而
- *       {@code Util.getPlatform().openFile(...)} 只能在客户端打开玩家自己这台机器上的文件夹。
- *       所以只有<b>单人存档</b>（集成服务器与客户端共用同一个游戏目录）才真的去开；多人游戏里
- *       打开的是客户端自己的 {@code sequenced_arm/scripts}，和服务端那份毫不相干，于是只给一条
- *       actionbar 提示、不弹窗口也不崩 —— 见 {@link #openScriptFolder()}。</li>
+ *   <li><b>"打开文件夹"按钮只能管本机，而脚本文件现在就在本机</b>（上游 {@code I_OPEN_FOLDER}，
+ *       {@code SchematicTableScreen:98-102}）：{@code Util.getPlatform().openFile(...)} 在客户端打开
+ *       **玩家自己这台机器**上的文件夹 —— 脚本目录从"服务端的世界数据"改成"玩家的本地文件"之后
+ *       （见 {@code ScriptFiles}），这里**永远**打开本机那一份，不再区分单人 / 多人，
+ *       见 {@link #openScriptFolder()}。</li>
  *   <li><b>标题三态换成我们的文案、进度标签带剩余秒数</b>：用户要的"要时间 + 进度条"——
  *       进度条照上游画（四行逐字照抄），旁边再写一句"还有几秒"，因为 5 秒的固定时长
  *       （{@link ProgramImportTableBlockEntity#IMPORT_TICKS}）玩家应该看得见。</li>
@@ -142,8 +141,6 @@ public class ProgramImportScreen extends AbstractSimiContainerScreen<ProgramImpo
 	private final Component finished = Component.translatable("create_sequenced_mechanical_arm.gui.import.finished");
 	private final Component refresh = Component.translatable("create_sequenced_mechanical_arm.gui.import.refresh");
 	private final Component openFolder = Component.translatable("create_sequenced_mechanical_arm.gui.import.open_folder");
-	private final Component openFolderRemote =
-		Component.translatable("create_sequenced_mechanical_arm.gui.import.open_folder.remote");
 	private final Component noScripts = Component.translatable("create_sequenced_mechanical_arm.gui.import.no_scripts");
 	private final Component availableTitle =
 		Component.translatable("create_sequenced_mechanical_arm.gui.import.available");
@@ -285,28 +282,17 @@ public class ProgramImportScreen extends AbstractSimiContainerScreen<ProgramImpo
 	 * 因此这里先 {@code Files.createDirectories(dir)} 把目录造出来（与"导出脚本时顺手建目录"
 	 * 是同一个结果，不会产生任何多余状态），再交给 {@code openFile}。
 	 *
-	 * <p><b>只在单人存档真的去开</b>：脚本目录是**服务端**的数据（{@link ScriptFiles} 用
-	 * {@code FMLPaths.GAMEDIR} 推导，专用服务器上是服务端根目录）。多人游戏里客户端算出来的
-	 * 那份是自己机器上的 {@code <客户端目录>/sequenced_arm/scripts}，与服务端那份毫无关系 ——
-	 * 打开它等于把玩家送进一个空目录，比"只给一句提示"更误导。所以远程连接下只发一条
-	 * actionbar 说明（{@code .open_folder.remote}），不弹窗口、不崩。单人存档里集成服务器与客户端
-	 * 共用同一个游戏目录（{@code run/}），所以那条路径就是服务端真正写文件的地方。
-	 *
-	 * <p>⚠️ 这里确实在**客户端**读了 {@link ScriptFiles#directory()} —— 那个类的注释写着
-	 * "只在服务端问这个路径"，这里是有意例外的：要让"打开目录"和"服务端写文件"用的是**同一串路径**
-	 * （唯一常量，绝不在本文件里另写一份），单人存档下两者本来就指向同一个目录。
+	 * <p><b>★ 永远开本机，不再区分单人 / 多人</b>（用户改口径）：脚本文件本来就住在**玩家本机**
+	 * （见 {@link ScriptFiles}：照 Create 蓝图那套，文件在客户端、服务端不存玩家脚本），
+	 * 所以多人游戏里打开的就是"这台机器上的、待会儿要被上传的那份目录"—— 正是玩家想看的那个。
+	 * 从前那句"多人游戏里打开的是客户端自己的目录，与服务端那份无关，所以只给一句提示"
+	 * 的前提已经不成立（服务端那份只留给管理员后门），于是那两个分支连同
+	 * {@code .open_folder.remote} 那条文案一起删掉了。
 	 *
 	 * <p>任何一步失败都只给提示、不抛出去 —— GUI 里抛异常会直接崩客户端。
 	 */
 	private void openScriptFolder() {
 		LocalPlayer player = minecraft == null ? null : minecraft.player;
-		if (minecraft == null || !minecraft.hasSingleplayerServer()) {
-			// 远程服务器 / 还没进世界：本机那份目录不是这台机器的脚本目录，只说明、不打开
-			if (player != null)
-				player.displayClientMessage(openFolderRemote, true);
-			return;
-		}
-
 		Path dir = ScriptFiles.directory();
 		try {
 			Files.createDirectories(dir); // 没导出过脚本时目录还不存在，先造出来（见方法注释）

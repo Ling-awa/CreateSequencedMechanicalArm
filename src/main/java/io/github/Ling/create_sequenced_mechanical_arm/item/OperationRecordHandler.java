@@ -26,7 +26,8 @@ import net.neoforged.neoforge.client.event.InputEvent;
  *   <li><b>蓝色线框</b>：手持记录表、射线指着一条可编程动力臂 ⇒ 把那一格画成蓝色线框，
  *       眼睛能立刻确认"上传的就是这条"；</li>
  *   <li><b>潜行右键臂 ⇒ 弹"输入文件名"界面</b>（{@link ExportScriptScreen}），确认后发
- *       {@code network/ExportScriptPacket}，由服务端校验并落盘。</li>
+ *       {@code network/ExportScriptPacket}：服务端**只校验**（主手物品 / 方块与 BE / 距离 / 程序），
+ *       校验通过再把文本回传，由客户端写进**玩家本机**的脚本目录（服务端不存玩家脚本）。</li>
  * </ol>
  *
  * <h2>线框：颜色/线宽/每 tick 重发，全部照 Create 的蓝图与笔</h2>
