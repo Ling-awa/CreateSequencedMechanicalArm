@@ -17,7 +17,7 @@ import net.minecraft.network.chat.Component;
  *
  * <p>为什么单独一个客户端类、而不是写在网络包里：这里要摸 {@code Minecraft.getInstance().player}
  * 与"给玩家看的一句话"，两件都是客户端专属的事。放进包类的 {@code handle} 体里虽然也能跑
- * （本仓 {@code ProgramImportListPacket → ProgramImportScreen.acceptList} 就是这个写法），
+ * （本仓 {@code ExportScriptResultPacket.handle → ExportScriptFeedback.finish} 就是这个写法），
  * 但"写盘 + 提示"本身与网络无关，单独放一处才便于对照 {@link ArmScriptExport} 的两半。
  *
  * <h2>三种失败各有自己的话，绝不静默</h2>

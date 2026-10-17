@@ -1,6 +1,9 @@
 package io.github.Ling.create_sequenced_mechanical_arm.importtable;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.UUID;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -12,6 +15,9 @@ import com.simibubi.create.foundation.utility.IInteractionChecker;
 
 import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ScriptFiles;
+import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmRegistration;
 
 import net.minecraft.core.BlockPos;
@@ -19,6 +25,7 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.Clearable;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.entity.player.Inventory;
@@ -31,74 +38,113 @@ import net.neoforged.neoforge.items.ItemStackHandler;
 
 /**
  * 「操作导入桌」的方块实体：**一格输入（空白操作表）+ 一格输出（导入好的操作表）**，
- * 中间是一段带进度条的"读取脚本"过程。
+ * 中间是一段"收脚本字节"的过程。
  *
  * <p>骨架照 Create 的蓝图桌 {@code SchematicTableBlockEntity}（{@code SmartBlockEntity} 家族、
  * 2 格 {@link ItemStackHandler}、{@code clientPacket} 分支同步进度、{@code sendUpdate} 推包、
- * {@code canPlayerUse} 64 格），**只有一处刻意不同**：
+ * {@code canPlayerUse} 64 格），**状态机的两端刻意与它相反**（见下）。
  *
- * <h2>★ 进度由<b>服务端自己</b>按 tick 推进（不抄上游那条"客户端发包驱动"的链）</h2>
- * 上游的蓝图上传是<b>客户端</b>在读文件、分片上传，进度自然由客户端算：服务端只是收片、
- * 把 {@code uploadingProgress} 记下来，客户端每 10 tick 问一次（{@code ClientSchematicLoader}），
- * 界面一关就不再有进度。我们这条路恰好相反 —— 文件在<b>服务端</b>的磁盘上、文本在服务端一次读完，
- * 客户端全程只是"请求列表 / 请求导入"两句话。若照上游那条链，就会出现"玩家关掉界面 ⇒ 导入停在半路"
- * 以及"客户端说自己导完了"这种根本没法验证的状态（数据在服务端，凭什么听客户端的）。
- * 所以进度是服务端的 {@link #tick()} 里 {@code progress += 1f / IMPORT_TICKS}，
- * 客户端只读同步下来的值（{@code read(..., clientPacket = true)}），一帧都不自己推进。
- *
- * <p><b>为什么是固定 {@link #IMPORT_TICKS} 而不是"按文件字节数"</b>：按字节数意味着同一张脚本
- * 在小文件上"一瞬间完成"、在大文件上要等十几秒 —— 玩家无法预期，而且"快慢"会把磁盘速度
- * 泄漏成游戏节奏（在慢盘上抽风）。5 秒是个**固定的仪式感**：它只表达"这台机器在干活"，
- * 不承诺"越大的脚本越慢"。真要按数据量算，第一个该按的是<b>条目数</b>而不是字节数（注释与空行不该收费）。
- *
- * <h2>状态机的边界</h2>
+ * <h2>★ 用户改口径（第二步）：服务端**彻底不碰脚本文件**</h2>
+ * "我觉得没必要动服务端文件" —— 所以这条路现在是<b>客户端读本机文件、分片上传</b>
+ * （照上游 {@code ClientSchematicLoader → ServerSchematicLoader} 的分工）。服务端这边
+ * <b>不列目录、不读文件、不写文件</b>，只做三件事：<b>收片</b>、<b>裁决</b>、<b>写卡</b>。
  * <ul>
- *   <li>{@link #startImport}：**服务端**的判定与动作（校验槽位 → 校验文件 → 消耗输入 → 置 {@code isImporting}）。
- *       客户端只说"我想导入《某某》"，不参与任何判定；</li>
- *   <li>{@link #tick()}：推进进度，到 {@link #PROGRESS_DONE}（= 1 − 半步，**不是** {@code >= 1f}，
- *       理由见该常量）时调 {@link #finishImport()} 把文本写进输出槽；</li>
- *   <li>输入槽在**开始**时就被消耗（与上游 {@code startUpload} 清空输入槽同一个取舍）：否则玩家能在
- *       5 秒里把那张表抽走，产出却照样落进输出槽 —— 白得一张卡。</li>
+ *   <li><b>列表</b>：客户端自己扫本机 {@code sequenced_arm/scripts/}（{@link ProgramImportFiles#list()}），
+ *       不再有"请求列表 / 下发列表"这一对包；</li>
+ *   <li><b>传输</b>：{@code network/ProgramImportUploadStartPacket}（一句"我要传《某某》，共 N 字节"）
+ *       + {@code network/ProgramImportChunkPacket}（每片 {@link #CHUNK_BYTES}、每
+ *       {@link #CHUNK_INTERVAL_TICKS} tick 一片，最多 {@link #MAX_CHUNKS} 片 ≈ 4 秒）；</li>
+ *   <li><b>裁决仍在服务端</b>：总量上限、片序、乱序/超量/超时、能不能编译、写不写卡 —— 客户端说破天
+ *       也只提供了一串字节。这是"数据在谁的磁盘上"与"谁说了算"两件事的分界。</li>
  * </ul>
  *
- * <p>⚠️ 已知取舍（照上游）：导入过程中的状态**不写存档**（{@code clientPacket} 分支才写/读进度），
- * 所以这 5 秒里若区块被卸载，那张已消耗的输入表就没了（输出槽里也不会有东西）。没有补做，
- * 是因为"还原一份可能已经被改过的文件"比丢掉一张空白操作表更糟；真要持久化，得连文件内容一起存。
+ * <h2>★ 进度条改成"已收字节 / 总字节"（不再有固定 100 tick）</h2>
+ * 第一步的进度是服务端自己 {@code progress += 1f / IMPORT_TICKS} 走 100 tick，理由是"文件在服务端、
+ * 数据量不该变成游戏节奏"。**那条理由随口径一起作废**：现在数据是客户端一片片送来的，
+ * 服务端唯一诚实可说的事就是"收到了多少字节"。
+ * <ul>
+ *   <li>固定 tick 在这条链上是<b>错的</b>：60 KiB 与 18 字节的脚本都走 100 tick，玩家看到的是
+ *       "明明传完了进度条还在爬"；反过来说，进度条该动的时候它不动（片还没来）；</li>
+ *   <li>字节驱动是<b>可验证</b>的：{@code uploadReceived / uploadTotal} 两个整数同步给客户端，
+ *       进度条与"已收 x / 共 y 字节"那行字用的是同一对数；</li>
+ *   <li>顺带删掉了第一步那个"到点判定要用 {@code 1 − 半步} 而不是 {@code >= 1f}"的 float 坑
+ *       —— 现在只有"收满"这一个条件（{@code received == total}），没有累加。</li>
+ * </ul>
+ *
+ * <h2>会话的生命周期（一桌一会话）</h2>
+ * <ul>
+ *   <li>{@link #startUpload}：**服务端**的全部前置判定 + 消耗输入 + 开会话（{@link StartResult}）；</li>
+ *   <li>{@link #acceptChunk}：片序 / 总量 / 溢出三处校验，任何一处不对 ⇒ **立刻中止会话**并回一个
+ *       {@link ChunkResult} 让包那一侧说话；</li>
+ *   <li>{@link #tick()}：只做清理 —— ① 上传者已经不是"开着这台机器的玩家"（关界面 / 走远 / 下线）
+ *       ⇒ 丢弃；② 静默超过 {@link #UPLOAD_TIMEOUT_TICKS} ⇒ 丢弃。</li>
+ * </ul>
+ *
+ * <p><b>为什么关界面靠 tick 清、而不是靠一个"界面关了"的包</b>：上游那条链的缺陷正是"界面一关就
+ * 不再有进度"，服务端手里留着一份半成品；但反过来加一个 S2C/C2S 的"我关界面了"也不可靠
+ * （客户端崩了、被杀了就不会发）。服务端每 tick 自己问一句"他还在看这台机器吗"是**唯一不依赖
+ * 客户端自觉**的判据，超时是它的兜底（客户端每 {@link #CHUNK_INTERVAL_TICKS} tick 一片，
+ * 所以 {@link #UPLOAD_TIMEOUT_TICKS} 是片间隔的 6 倍 —— 一次卡顿不会杀掉健康的上传）。
+ *
+ * <p>⚠️ 已知取舍（与第一步相同、照上游）：会话状态**不写存档**（只在 {@code clientPacket}
+ * 那一份里写），所以这 4 秒里若区块被卸载，那张已消耗的输入表就没了（输出槽里也不会有东西）。
+ * 没有补做，是因为"还原一份可能已经被改过的文本"比丢掉一张空白操作表更糟。
  */
 public class ProgramImportTableBlockEntity extends SmartBlockEntity implements MenuProvider, IInteractionChecker, Clearable {
 
 	private static final Logger LOGGER = LogUtils.getLogger();
 
-	/** 一次导入的固定时长（tick）。100 tick = 5 秒，理由见类注释。 */
-	public static final int IMPORT_TICKS = 100;
-
-	/** 每 tick 推进的进度量。抽成常量：{@link #tick()} 里的加法与"到点"判定必须用同一个数。 */
-	private static final float PROGRESS_STEP = 1f / IMPORT_TICKS;
+	/**
+	 * 一片的字节数：**8 KiB**。
+	 *
+	 * <p>为什么是这个量级：60 KiB / 8 KiB ⇒ 最多 8 片。片越小则包越多（每片一个包 = 8 个包 ≈ 4 秒），
+	 * 片越大则单包越大、一次丢包的代价越高。8 KiB 与上游 {@code SchematicUploadPacket} 的
+	 * 分片思路同量级，而 8 片恰好让"最多 4 秒"这句承诺成立。
+	 */
+	public static final int CHUNK_BYTES = 8 * 1024;
 
 	/**
-	 * "进度已经到 1"的判定门限 = {@code 1 − 半步}。
+	 * 两片之间的间隔（tick）：**10**，照上游 {@code ClientSchematicLoader.PACKET_DELAY = 10}。
 	 *
-	 * <p><b>为什么不直接判 {@code importProgress >= 1f}</b>：{@code 1f / 100} 在 float 里是
-	 * {@code 0.0099999997…}，逐 tick 累加 100 次得到的是 {@code ≈0.999999}（**不是 1.0**）——
-	 * 于是"正好 {@link #IMPORT_TICKS} tick 完成"这件事**永远不会发生**：进度条永久停在 99%、
-	 * 输出槽永远空、{@code isImporting} 永远为真。自检曾因此一路红 7 项，而且后面三条"拒绝类"
-	 * 断言拿到的其实是 {@code ALREADY_IMPORTING}（看起来像"判定漏了"，实则是上一次导入没结束）。
-	 *
-	 * <p>为什么是**半步**而不是随手一个 {@code 1e-6}：100 次 float 累加的最坏误差约 {@code 1e-5}
-	 * 量级，半步（0.005）比它大两个数量级 ⇒ 不会漏判；而进位只发生在最后一次加法之后 ⇒ 也不会让
-	 * 完成提前一 tick（第 99 tick 的进度约 0.99，仍低于 0.995）。
+	 * <p>为什么要有间隔而不是一口气全发完：一口气发 8 个包会在一 tick 内占满连接、并且让
+	 * "进度条"变成"闪一下就好了"，玩家完全看不出机器在干活；10 tick 一片（0.5 秒）是上游
+	 * 验证过的节奏，也让服务端有机会在**每片之间**发现"人不在了"。
 	 */
-	private static final float PROGRESS_DONE = 1f - PROGRESS_STEP / 2f;
+	public static final int CHUNK_INTERVAL_TICKS = 10;
+
+	/** 最多几片：{@code ceil(60 KiB / 8 KiB) = 8}（向上取整，最后一片可能不满）。 */
+	public static final int MAX_CHUNKS = (ProgramText.MAX_BYTES + CHUNK_BYTES - 1) / CHUNK_BYTES;
+
+	/**
+	 * 静默多久就丢弃这次上传（tick）：{@link #CHUNK_INTERVAL_TICKS} 的 6 倍 = 60 tick = 3 秒。
+	 *
+	 * <p>片间隔 10 tick，所以"健康的会话"最多 10 tick 就会有一片；给到 6 倍是为了容忍一次卡顿 /
+	 * 一次 GC / 一次重传。同时它保证"玩家关掉界面之后，这台桌子在 3 秒内一定回到干净状态"，
+	 * 下一位玩家不会撞上一个永远不结束的会话。
+	 */
+	public static final int UPLOAD_TIMEOUT_TICKS = 6 * CHUNK_INTERVAL_TICKS;
+
+	/**
+	 * 一次完整上传最多占多少 tick：{@code MAX_CHUNKS × CHUNK_INTERVAL_TICKS = 80 tick = 4 秒}。
+	 *
+	 * <p>只是**给别人看的推算值**（界面文案、注释、文档都念它），代码里不拿它做判定 ——
+	 * 判定按"收满 / 超时"两件事，不按总时长（慢客户端的第 8 片不该被自己的总时长掐掉）。
+	 */
+	public static final int UPLOAD_TICKS = MAX_CHUNKS * CHUNK_INTERVAL_TICKS;
 
 	/** 输入槽（空白操作表）与输出槽（导入结果）的下标 —— 菜单里的槽位顺序必须与它一致。 */
 	public static final int SLOT_INPUT = 0;
 	public static final int SLOT_OUTPUT = 1;
 
-	/** 存档键。与上游同名（{@code Inventory}），其余三个只出现在 {@code clientPacket} 那一份里。 */
+	/** 空字节数组（会话被清掉之后 {@link #completeUpload} 的兜底输入；**不要**每次 new 一个）。 */
+	private static final byte[] EMPTY_BYTES = new byte[0];
+
+	/** 存档键。与上游同名（{@code Inventory}），其余几个只出现在 {@code clientPacket} 那一份里。 */
 	private static final String KEY_INVENTORY = "Inventory";
 	private static final String KEY_IMPORTING = "Importing";
 	private static final String KEY_FILE = "File";
-	private static final String KEY_PROGRESS = "Progress";
+	private static final String KEY_RECEIVED = "Received";
+	private static final String KEY_TOTAL = "Total";
 
 	/**
 	 * 2 格库存。
@@ -120,31 +166,44 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 
 	public final ProgramImportInventory inventory = new ProgramImportInventory();
 
-	/** 是否正在导入（**服务端是权威**，客户端这份是同步下来的只读副本）。 */
+	/** 是否正在收一次上传（**服务端是权威**，客户端这份是同步下来的只读副本）。 */
 	public boolean isImporting;
-	/** 0..1 的进度（服务端每 tick 推，客户端只读）。 */
-	public float importProgress;
+	/** 已收字节（服务端权威；客户端只读）。进度条与"已收 x / 共 y"那行字都用它。 */
+	public int uploadReceived;
+	/** 客户端声明的总字节（服务端权威；客户端只读）。 */
+	public int uploadTotal;
 	/** 这一 tick 结束后要不要把方块实体刷给客户端（上游同名字段的同一用法）。 */
 	public boolean sendUpdate;
-	/** 正在导入的文件名 —— **只用于界面显示**，不参与任何判定。 */
+	/** 正在传的文件名 —— **只用于界面显示**，不参与任何判定。 */
 	@Nullable
 	public String importingFile;
 
+	/** 谁在传（{@code null} = 无主会话，只有启动自检会这样开；它因此跳过"人还在吗"那道检查）。 */
+	@Nullable
+	private UUID uploader;
+	/** 本会话声明的总字节（与 {@link #uploadTotal} 恒等，分开是因为后者是对客户端的字段）。 */
+	private int expectedTotal;
+	/** 已收字节（与 {@link #uploadReceived} 恒等，同上）。 */
+	private int receivedBytes;
+	/** 下一片应该是第几片（0 起）。乱序判据就是 {@code seq != nextSeq}。 */
+	private int nextSeq;
+	/** 距上一片过了多少 tick（超时判据）。 */
+	private int idleTicks;
 	/**
-	 * 已经校验通过、等着写进输出槽的脚本文本。
+	 * 分片拼装缓冲。
 	 *
-	 * <p>为什么在<b>开始</b>时读、而不是完成时再读：完成那一刻再读一次，等于赌"这 5 秒里文件没被改" ——
-	 * 被改过就是一半校验（开始）一半新内容（完成）。读一次、把校验过的那份攥在手里，
-	 * 整个导入就是一个原子动作：进卡的永远是**通过校验的那份文本**。
+	 * <p>为什么在<b>开始</b>时就开好、并且只按 {@link #expectedTotal} 收：容量上界在开会话那一刻
+	 * 就被钉死了，于是"客户端谎报总量再猛灌"这条路不存在 —— 每次追加都要先过
+	 * {@code receivedBytes + data.length <= expectedTotal}。
 	 */
 	@Nullable
-	private String pendingText;
+	private ByteArrayOutputStream buffer;
 
-	/** {@link #startImport} 的结局；{@code STARTED} 之外都由调用方翻成一句回执。 */
+	/** {@link #startUpload} 的结局；{@code STARTED} 之外都由调用方翻成一句回执。 */
 	public enum StartResult {
 		STARTED,
-		/** 已经有一次导入在跑（界面在跑的时候还按了确认）。 */
-		ALREADY_IMPORTING,
+		/** 已经有一次上传在跑（同一张桌子同时只允许一个上传者）。 */
+		ALREADY_UPLOADING,
 		/** 输入槽里没有操作表。 */
 		NO_INPUT,
 		/** 输入槽里那张操作表**已经有程序**（导入只接受空白表）。 */
@@ -153,14 +212,28 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 		OUTPUT_BUSY,
 		/** 文件名不合法。 */
 		BAD_NAME,
-		/** 文件不存在。 */
-		NOT_FOUND,
-		/** 文件读不出来。 */
-		UNREADABLE,
-		/** 超过脚本文本上限。 */
+		/** 声明的总量是 0（空脚本）：永远收不满，只能在开始时就拒。 */
+		EMPTY_FILE,
+		/** 声明的总量超过 {@link ProgramText#MAX_BYTES}。 */
+		TOO_LARGE
+	}
+
+	/** {@link #acceptChunk} 的结局。{@code ACCEPTED} / {@code COMPLETED} 之外都由调用方翻成一句回执。 */
+	public enum ChunkResult {
+		/** 收下了，还没收满。 */
+		ACCEPTED,
+		/** 收满了，并且**已经写进输出槽**。 */
+		COMPLETED,
+		/** 没有会话（上一个片之后会话被超时/离开清掉了，或这个客户端根本没开过会话）——**不重复报错**。 */
+		NO_UPLOAD,
+		/** 片序不对 / 总量与开会话时声明的不一致 / 片子大小非法 ⇒ 会话已中止。 */
+		BAD_SEQUENCE,
+		/** 收到的字节会超过声明的总量（或拼出来的文本超过上限）⇒ 会话已中止。 */
 		TOO_LARGE,
-		/** 编译不过。 */
-		DOES_NOT_COMPILE
+		/** 收满了但编译不过：**一个字都不写**（会话已中止）。 */
+		DOES_NOT_COMPILE,
+		/** 收满了、编译也过了，但卡写不进去（理论上不可达，见 {@link #completeUpload}）。 */
+		WRITE_FAILED
 	}
 
 	public ProgramImportTableBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
@@ -173,6 +246,13 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 
 	// ————————————————————————— tick —————————————————————————
 
+	/**
+	 * 服务端每个 tick 只做**清理**（进度不再由 tick 推进，见类注释）。
+	 *
+	 * <p>两条清理各有分工：① **人在不在**是主判据（关界面 / 走远 / 下线都能覆盖，不依赖客户端
+	 * 自觉发一个"我关了"）；② **超时**是兜底（客户端被杀了、包丢了、或者它压根不再发包）。
+	 * 两条都走 {@link #abortUpload}，因此"丢弃"只有一个出口。
+	 */
 	@Override
 	public void tick() {
 		super.tick();
@@ -183,37 +263,52 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 				level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 6);
 		}
 		if (!isImporting || level == null || level.isClientSide)
-			return; // 客户端**不推进**进度（它没有 pendingText，也不能写输出槽），理由见类注释
-		if (importProgress >= PROGRESS_DONE) {
-			finishImport();
-			return;
+			return; // 客户端**不清理**（它没有会话，也不能写输出槽），理由见类注释
+
+		// ② 上传者还开着这台机器的界面吗？（无主会话 —— 只有启动自检 —— 跳过这一条）
+		if (uploader != null) {
+			ServerPlayer player = level.getServer() == null ? null
+				: level.getServer()
+					.getPlayerList()
+					.getPlayer(uploader);
+			if (player == null
+				|| !(player.containerMenu instanceof ProgramImportTableMenu menu)
+				|| menu.contentHolder != this
+				|| !canPlayerUse(player)) {
+				abortUpload("上传者已离开 / 关掉了界面");
+				return;
+			}
 		}
-		importProgress = Math.min(1f, importProgress + PROGRESS_STEP);
-		sendUpdate = true;
-		if (importProgress >= PROGRESS_DONE)
-			finishImport();
+
+		// ③ 静默超时：片间隔 10 tick，60 tick 还没有新片 ⇒ 这次上传已经不可能诚实地完成
+		if (++idleTicks > UPLOAD_TIMEOUT_TICKS) {
+			abortUpload("静默超过 " + UPLOAD_TIMEOUT_TICKS + " tick（片间隔 " + CHUNK_INTERVAL_TICKS + "）");
+		}
 	}
 
-	// ————————————————————————— 开始 / 完成 —————————————————————————
+	// ————————————————————————— 开始 / 收片 / 完成 —————————————————————————
 
 	/**
-	 * 开始一次导入：**全部校验 + 消耗输入 + 置状态**都在这里（唯一实现，自检也走它）。
+	 * 开始一次上传：**全部前置校验 + 消耗输入 + 开会话**都在这里（唯一实现，自检也走它）。
 	 *
 	 * <p>校验顺序（每一步对应一条回执，绝不静默）：
 	 * <ol>
-	 *   <li>没有正在跑的导入；</li>
+	 *   <li>没有正在跑的上传（一桌一会话）；</li>
 	 *   <li>输入槽里是**空白**操作表（{@link OperationTableItem} 且 {@link CardProgramStorage#hasProgram} 为假）
 	 *       —— 这里要再判一次，因为槽位过滤只是玩家那一侧的方便，别的入口（漏斗 / 别的模组的管道）
 	 *       不经过 {@code mayPlace}；</li>
-	 *   <li>输出槽是空的（{@code canWrite()} 的另一半：产出没有地方放就等于白消耗一张表）；</li>
-	 *   <li>文件存在、读得出、不超上限、**编译得过**（{@link ProgramImportFiles#read}）。</li>
+	 *   <li>输出槽是空的（产出没有地方放就等于白消耗一张表）；</li>
+	 *   <li>名字合法、声明的总量在 {@code (0, MAX_BYTES]} 之间。</li>
 	 * </ol>
 	 * 全部通过之后才消耗输入槽 —— 中途任何一条不过，输入那张表都还在原位
 	 * （"点错了文件"不该花掉一张卡）。
+	 *
+	 * <p>@param uploader 上传者；{@code null} 表示无主会话（只有启动自检这样开，
+	 *                  也因此跳过 {@link #tick()} 里"人还在不在"那道检查）
 	 */
-	public StartResult startImport(@Nullable String name, HolderLookup.Provider registries) {
+	public StartResult startUpload(@Nullable UUID uploader, @Nullable String name, int totalBytes) {
 		if (isImporting)
-			return StartResult.ALREADY_IMPORTING;
+			return StartResult.ALREADY_UPLOADING;
 
 		ItemStack input = inventory.getStackInSlot(SLOT_INPUT);
 		if (input.isEmpty() || !OperationTableItem.isTable(input))
@@ -223,80 +318,175 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 		if (!inventory.getStackInSlot(SLOT_OUTPUT)
 			.isEmpty())
 			return StartResult.OUTPUT_BUSY;
+		if (!ScriptFiles.isValidName(name))
+			return StartResult.BAD_NAME;
+		if (totalBytes <= 0)
+			return StartResult.EMPTY_FILE;
+		if (totalBytes > ProgramText.MAX_BYTES)
+			return StartResult.TOO_LARGE;
 
-		ProgramImportFiles.Outcome file = ProgramImportFiles.read(name, registries);
-		switch (file.problem()) {
-			case BAD_NAME:
-				return StartResult.BAD_NAME;
-			case NOT_FOUND:
-				return StartResult.NOT_FOUND;
-			case UNREADABLE:
-				return StartResult.UNREADABLE;
-			case TOO_LARGE:
-				return StartResult.TOO_LARGE;
-			case DOES_NOT_COMPILE:
-				return StartResult.DOES_NOT_COMPILE;
-			case OK:
-				break;
-		}
-
-		// ★ 消耗输入：与上游 startUpload 里的 `inventory.setStackInSlot(0, EMPTY)` 同一处语义
+		// ★ 消耗输入：与上游 startUpload 里的 `inventory.setStackInSlot(0, EMPTY)` 同一处语义。
+		//   往后的中止（乱序 / 超量 / 超时 / 编译不过）**都不归还**这张表 —— 与第一步一致：
+		//   会话一旦开始，"这张空白表被这次导入花掉了"就是既成事实，归还等于给了一条刷卡的缝。
 		inventory.setStackInSlot(SLOT_INPUT, ItemStack.EMPTY);
-		beginImport(name == null ? "" : name.trim(), file.text() == null ? "" : file.text());
+
+		this.uploader = uploader;
+		this.expectedTotal = totalBytes;
+		this.receivedBytes = 0;
+		this.nextSeq = 0;
+		this.idleTicks = 0;
+		this.buffer = new ByteArrayOutputStream(Math.min(totalBytes, CHUNK_BYTES * 2));
+		this.importingFile = name == null ? "" : name.trim();
+		this.uploadReceived = 0;
+		this.uploadTotal = totalBytes;
+		this.isImporting = true;
+		this.sendUpdate = true;
+		setChanged();
 		return StartResult.STARTED;
 	}
 
 	/**
-	 * 用一段**已经校验过**的文本进入导入状态（不碰槽位、不再读盘）。
+	 * 收一片。**每一片都要过三道门**，任何一道不过就立刻中止会话：
+	 * <ol>
+	 *   <li>总量与开会话时声明的一致（否则这就是另一次上传的片子，或者一个改过的包）；</li>
+	 *   <li>片序正好是下一片（**乱序 = 中止**，不缓存、不等待 —— 缓存乱序片等于把"重组"这件
+	 *       比它复杂得多的事搬进方块实体）；</li>
+	 *   <li>追加之后不超过声明的总量（超量 = 中止，而不是"截断到上限"：截出来的文本会是一份
+	 *       玩家没写过的半截脚本）。</li>
+	 * </ol>
 	 *
-	 * <p>为什么把它与 {@link #startImport} 分开：这是"导入"这件事的最小状态开关 ——
-	 * 启动自检要验"完成时写失败就一个字都不写"（⑤），而那条路在真机上**不可达**
-	 * （文本在开始时已经过了同一道 {@code ProgramText.withinLimit}），只能由自检从这道门喂进去。
-	 * 校验本身仍然只在 {@link #startImport} / {@link ProgramImportFiles} 里，这里不做任何判定。
+	 * <p>片大小另外卡一道 {@link #CHUNK_BYTES}：解码器已经卡过（{@code readByteArray}），
+	 * 这里再判一次是因为这个方法也能被服务端自己的代码调（自检就是）；空片一律当非法
+	 * —— 空片说明客户端的状态机坏了，继续收只会让"收了几片"变得没有意义。
 	 */
-	public void beginImport(String file, String text) {
-		pendingText = text;
-		importingFile = file;
-		importProgress = 0f;
-		isImporting = true;
+	public ChunkResult acceptChunk(int seq, int totalBytes, byte[] data) {
+		if (!isImporting || buffer == null)
+			return ChunkResult.NO_UPLOAD;
+		if (totalBytes != expectedTotal) {
+			abortUpload("片里的总量（" + totalBytes + "）与开会话时声明的不一致（" + expectedTotal + "）");
+			return ChunkResult.BAD_SEQUENCE;
+		}
+		if (seq != nextSeq) {
+			abortUpload("片序不对：收到第 " + seq + " 片，应为第 " + nextSeq + " 片");
+			return ChunkResult.BAD_SEQUENCE;
+		}
+		if (data.length <= 0 || data.length > CHUNK_BYTES) {
+			abortUpload("片子大小非法：" + data.length + " 字节（一片 1.." + CHUNK_BYTES + "）");
+			return ChunkResult.BAD_SEQUENCE;
+		}
+		if (receivedBytes + data.length > expectedTotal) {
+			abortUpload("收到的字节会超过声明的总量：" + receivedBytes + " + " + data.length + " > " + expectedTotal);
+			return ChunkResult.TOO_LARGE;
+		}
+
+		buffer.write(data, 0, data.length);
+		receivedBytes += data.length;
+		nextSeq++;
+		idleTicks = 0;
+		uploadReceived = receivedBytes;
 		sendUpdate = true;
 		setChanged();
+
+		if (receivedBytes >= expectedTotal)
+			return completeUpload();
+		return ChunkResult.ACCEPTED;
 	}
 
 	/**
-	 * 进度到 1：把校验过的文本写进**一张新卡**，放进输出槽。
+	 * 收满了：解码 → **编译过了才写卡** → 放进输出槽。
 	 *
-	 * <p><b>为什么是一张新卡，而不是把刚消耗的那张空白表还回去改</b>：空白表可能还带着
-	 * 编辑状态键（模式 / 任务下标 / 录制原点，见 {@code CardProgramStorage}）—— 那是"上一张卡
-	 * 怎么被用过"的痕迹，不该跟着导入结果走进新卡。新卡只有程序文本，干净、可预期。
+	 * <p>为什么"编译不过就一个字都不写"：产出是一张卡，卡上只存文本，存一份编译器不认的文本
+	 * 等于给玩家一张"插进臂里也不生效"的废卡（而且是花了那张空白换来的）。
+	 * 判据就是 {@code ScriptCompiler.compile(text).hasErrors()} —— 与编辑器 / 命令同一条。
 	 *
-	 * <p><b>写失败就不写</b>（{@code StoreResult != OK}）：一张"空白的操作表"落进输出槽比什么都没有更糟 ——
-	 * 玩家会以为导入成功，然后把一张废卡插进臂里。失败时输出槽保持空、{@code isImporting} 归位，
-	 * 并留一条 ERROR（这张输入表已经消耗了，只能在日志里解释为什么什么都没产出）。
+	 * <p>三次拒绝都**先清会话再返回**（{@link #resetSession}），所以调用方拿到的结局与方块实体
+	 * 现在的状态永远一致（{@code isImporting} 已经假、输出槽仍然是空的）。
 	 */
-	private void finishImport() {
-		String text = pendingText;
-		String file = importingFile;
-		isImporting = false;
-		importingFile = null;
-		pendingText = null;
-		importProgress = 0f;
-		sendUpdate = true;
-		setChanged();
+	private ChunkResult completeUpload() {
+		byte[] all = buffer == null ? EMPTY_BYTES : buffer.toByteArray();
+		String file = importingFile == null ? "" : importingFile;
+		// 先抓住"还需要的"，再清会话（清完之后 expectedTotal / buffer 都是 0 / null）
+		resetSession();
 
-		if (text == null) {
-			LOGGER.error("{} 的导入没有待写入的文本（状态机不该走到这里），输出槽保持空", worldPosition);
-			return;
+		String text = stripBom(new String(all, StandardCharsets.UTF_8));
+		// ★ 再判一次字节上限：这一份是**重新编码**之后的串，一个坏字节解码成 U+FFFD 再编码是 3 字节，
+		//   所以"收到的字节没超"并不代表"要写进卡的文本没超"。上限只有一条（ProgramText.MAX_BYTES）。
+		if (!ProgramText.withinLimit(text)) {
+			LOGGER.error("{} 的导入结果超过文本上限（{} 字节 > {}），输出槽保持空 —— 输入那张空白表已经消耗",
+				worldPosition, ProgramText.utf8Length(text), ProgramText.MAX_BYTES);
+			return ChunkResult.TOO_LARGE;
 		}
+		HolderLookup.Provider registries = level == null ? null : level.registryAccess();
+		if (registries == null) {
+			LOGGER.error("{} 的导入结果没有 registry（方块实体不在世界里？），输出槽保持空", worldPosition);
+			return ChunkResult.WRITE_FAILED;
+		}
+		var compiled = ScriptCompiler.compile(text, registries);
+		if (compiled.hasErrors()) {
+			List<String> lines = ScriptCompiler.errorLines(compiled.errors());
+			LOGGER.warn("脚本《{}》编译不过（{} 处），拒绝写卡：{}", file, lines.size(),
+				lines.isEmpty() ? "?" : lines.get(0));
+			return ChunkResult.DOES_NOT_COMPILE;
+		}
+
 		ItemStack out = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.StoreResult stored = CardProgramStorage.writeText(out, text);
 		if (stored != CardProgramStorage.StoreResult.OK) {
 			LOGGER.error("{} 的导入结果无法写入操作表（{}，{} 字节），输出槽保持空 —— 输入那张空白表已经消耗",
 				worldPosition, stored, text.length());
-			return;
+			return ChunkResult.WRITE_FAILED;
 		}
 		inventory.setStackInSlot(SLOT_OUTPUT, out);
 		LOGGER.info("{} 完成导入《{}》（{} 字节）", worldPosition, file, text.length());
+		return ChunkResult.COMPLETED;
+	}
+
+	/**
+	 * 丢弃当前会话并**留一条日志**（超时 / 人走了 / 乱序 / 超量 / 调用方主动取消走这里）。
+	 */
+	public void abortUpload(String reason) {
+		if (isImporting)
+			LOGGER.info("{} 的上传被中止：{}（已收 {}/{} 字节）", worldPosition, reason, receivedBytes, expectedTotal);
+		resetSession();
+	}
+
+	/**
+	 * 把会话状态清干净（**幂等**：收满那条路进来第一件事就是它，而包那一侧在它之后还会再读状态
+	 * 决定怎么说 —— 重复调用不该产生第二条日志或第二次标脏）。
+	 *
+	 * <p>与 {@link #abortUpload} 分开只为了一件事：**成功的收尾不该在日志里写"被中止"**。
+	 * 进度归零是刻意的：界面那边"完成"的判据是输出槽里有东西，不是进度到 1
+	 * （进度留着 1 会让下一张空表的进度条从满格开始）。
+	 */
+	private void resetSession() {
+		isImporting = false;
+		importingFile = null;
+		uploader = null;
+		expectedTotal = 0;
+		receivedBytes = 0;
+		nextSeq = 0;
+		idleTicks = 0;
+		buffer = null;
+		uploadReceived = 0;
+		uploadTotal = 0;
+		sendUpdate = true;
+		setChanged();
+	}
+
+	/**
+	 * 进度（0..1）= **已收字节 / 总字节**（用户口径：进度条改成字节驱动）。
+	 *
+	 * <p>抽成一个方法而不是让界面自己算：界面里那个平滑追赶的动画与这行字必须用同一个数，
+	 * 两处各算一遍就会出现"字已经 60/60 了、进度条还在 80%"这种自相矛盾的画面。
+	 * {@code total <= 0} 一律回 0（没有会话 / 会话已清）。
+	 */
+	public float uploadProgress() {
+		return uploadTotal <= 0 ? 0f : Mth.clamp(uploadReceived / (float) uploadTotal, 0f, 1f);
+	}
+
+	/** 吃掉 UTF-8 BOM。服务端也要做：**过网的字节不能假定客户端已经清理过**（改过的客户端可以直接发）。 */
+	private static String stripBom(String text) {
+		return !text.isEmpty() && text.charAt(0) == '\uFEFF' ? text.substring(1) : text;
 	}
 
 	// ————————————————————————— 存 / 读 —————————————————————————
@@ -306,11 +496,12 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 		tag.put(KEY_INVENTORY, inventory.serializeNBT(registries));
 		super.write(tag, registries, clientPacket);
 		// ★ 只在**同步包**那一份里写进度（照上游）：存档里毫无意义（读回来一定已经过期），
-		//   而且服务端每次 tick 都要发这一份 ⇒ 它是包体，不是数据。同理客户端看不到 pendingText。
+		//   而且它是包体、不是数据。同理客户端看不到分片缓冲。
 		if (clientPacket && isImporting) {
 			tag.putBoolean(KEY_IMPORTING, true);
 			tag.putString(KEY_FILE, importingFile == null ? "" : importingFile);
-			tag.putFloat(KEY_PROGRESS, importProgress);
+			tag.putInt(KEY_RECEIVED, uploadReceived);
+			tag.putInt(KEY_TOTAL, uploadTotal);
 		}
 	}
 
@@ -320,11 +511,12 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 		super.read(tag, registries, clientPacket);
 		if (!clientPacket)
 			return;
-		// 缺键 = 没在导入（服务端就是按"不写"来表达这件事的），所以这里判 contains 而不是读一个假值
+		// 缺键 = 没在上传（服务端就是按"不写"来表达这件事的），所以这里判 getBoolean 而不是读一个假值
 		boolean importing = tag.getBoolean(KEY_IMPORTING);
 		isImporting = importing;
 		importingFile = importing ? tag.getString(KEY_FILE) : null;
-		importProgress = importing ? tag.getFloat(KEY_PROGRESS) : 0f;
+		uploadReceived = importing ? tag.getInt(KEY_RECEIVED) : 0;
+		uploadTotal = importing ? tag.getInt(KEY_TOTAL) : 0;
 	}
 
 	/**
@@ -357,7 +549,8 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 	 *
 	 * <p>64.0D 与上游 {@code SchematicTableBlockEntity.canPlayerUse} 逐字相同（= 8 格）：
 	 * 服务端权威的"别隔着一片大陆开界面"。{@code SmartBlockEntity} 的默认实现算的是同一件事，
-	 * 这里仍然显式写一遍 —— 它是菜单是否继续有效的判据，值得在类里看得见。
+	 * 这里仍然显式写一遍 —— 它是菜单是否继续有效的判据，值得在类里看得见；{@link #tick()} 里
+	 * "上传者还在不在"那条检查也复用它。
 	 */
 	@Override
 	public boolean canPlayerUse(Player player) {
@@ -368,7 +561,7 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 	}
 
 	/**
-	 * 从"玩家当前打开的菜单"反查这台机器 —— 三个网络包共用的**唯一**权威入口。
+	 * 从"玩家当前打开的菜单"反查这台机器 —— 两个 C2S 包（开上传 / 收片）共用的**唯一**权威入口。
 	 *
 	 * <p>为什么不收客户端发来的坐标：坐标是客户端给的，直接 {@code getBlockEntity} 会顺手加载远处区块，
 	 * 而且"打开的是不是我这台机器"还得再验一遍。菜单是服务端自己开的，它的 {@code contentHolder}

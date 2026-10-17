@@ -1,25 +1,16 @@
 package io.github.Ling.create_sequenced_mechanical_arm.sequencedarm;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Supplier;
 
 import org.jetbrains.annotations.Nullable;
 
-import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ScriptFiles;
-import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
-import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptResult;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -46,10 +37,16 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
  *   /sma preset &lt;名字&gt;      装载预设（depot_ab / loop3 / wait / take_or / unload / deploy / mine / attack / use / use_sneak / subtasks / freq / hold）
  *   /sma card &lt;名字&gt;        把预设写进一张操作表发给自己
  *   /sma export            把臂内现有的操作表写进主手的操作表
- *   /sma code export [名字] 把主手卡上的程序导出成脚本文本（给了名字就同时落成文件）
- *   /sma code check &lt;名字&gt;  只编译那个脚本文件并回报（含行号的错误），不写卡
- *   /sma code import &lt;名字&gt; 读那个脚本文件，编译并写进主手卡（走同一套规模校验）
  * </pre>
+ *
+ * <h2>★ 这里已经没有 {@code /sma code …} 了（用户口径："没必要动服务端文件"）</h2>
+ * 那三条命令（脚本文件的 {@code export / check / import}）原本是"管理员后门"：跑在服务端、
+ * 读写**服端**的 {@code run/sequenced_arm/scripts/}。用户把脚本文件整体归给玩家本机之后，
+ * 服务端这条路就不该存在了 —— 它现在是**客户端**命令（{@link SequencedArmClientCommands}：
+ * 需要权限、只动本机文件与手上的操作表，正好是"方便测试 / 创造玩家快速导入导出"的用途）。
+ * 所以这个类里 {@code scriptDir() / scriptFile()} 与那一整组方法（含 {@code Files} / {@code Path}
+ * 的用法）一并删除：**服务端不再有任何碰脚本文件的代码**。留在服务端这里的都是"只能由服务端做"
+ * 的事（方块实体、方块库存、给玩家发卡）。
  *
  * <p>条目的坐标一律<b>相对执行这条程序的那条臂</b>（§19.7）：臂跑 {@code 臂位置 + 偏移}，
  * 插卡<b>不做任何平移</b>。录制原点（用户第四十轮起它作为**卡级**属性存在，见
@@ -87,30 +84,7 @@ public class SequencedArmCommands {
 				.then(Commands.literal("export")
 					.executes(ctx -> export(ctx.getSource())))
 				.then(preset)
-				.then(card)
-				.then(codeCommand()));
-	}
-
-	/**
-	 * {@code /sma code …} —— 脚本文本（PLAN.md §12 的 P1）的三个入口。
-	 *
-	 * <p>权限跟着 {@code /sma} 走（{@code hasPermission(2)}，见上面的注册）：
-	 * 这一组命令会**写文件**与**写卡**，不该给非 OP 用。
-	 */
-	private static LiteralArgumentBuilder<CommandSourceStack> codeCommand() {
-		return Commands.literal("code")
-			// 不给名字：只打印到聊天（看/复制用）；给了名字：同时落到 run/sequenced_arm/scripts/<名字>.sma
-			//（目录见 ScriptFiles：用户口径已从 config/…/scripts 搬到这里）
-			.then(Commands.literal("export")
-				.executes(ctx -> codeExport(ctx.getSource(), null))
-				.then(Commands.argument("名字", StringArgumentType.word())
-					.executes(ctx -> codeExport(ctx.getSource(), StringArgumentType.getString(ctx, "名字")))))
-			.then(Commands.literal("check")
-				.then(Commands.argument("名字", StringArgumentType.word())
-					.executes(ctx -> codeCheck(ctx.getSource(), StringArgumentType.getString(ctx, "名字")))))
-			.then(Commands.literal("import")
-				.then(Commands.argument("名字", StringArgumentType.word())
-					.executes(ctx -> codeImport(ctx.getSource(), StringArgumentType.getString(ctx, "名字")))));
+				.then(card));
 	}
 
 	/** 把预设写进一张操作表物品并发给执行者（P1 起只有一种操作表，§19）。 */
@@ -141,6 +115,9 @@ public class SequencedArmCommands {
 	 * （§19.7）：导到另一条臂上时臂会照着<b>自己的位置</b>跑同一份相对坐标 ——
 	 * "搬一份程序到另一条臂"因此天然成立，不需要任何平移（曾经那步 {@code rebaseTo} 已删除）。
 	 * 卡上的录制原点（用户第四十轮的卡级属性）**不跟着这份文本走**，导出也不动它。
+	 *
+	 * <p>⚠️ 别把这条与"客户端命令 {@code /sma code export}"搞混：那是**手上的卡 → 本机文件**
+	 * （客户端、需权限、不经过服务端）；这一条是**臂里的程序 → 手上的卡**（服务端，得站在臂旁）。
 	 */
 	private static int export(CommandSourceStack source) {
 		ServerPlayer player = source.getPlayer();
@@ -163,203 +140,13 @@ public class SequencedArmCommands {
 			source.sendFailure(Component.literal("主手请拿一张操作表"));
 			return 0;
 		}
-		if (CardProgramStorage.write(held, arm.getProgram(), source.registryAccess()) != CardProgramStorage.StoreResult.OK) {
+		if (CardProgramStorage.write(held, arm.getProgram(),
+			source.registryAccess()) != CardProgramStorage.StoreResult.OK) {
 			source.sendFailure(Component.literal("臂内程序转成脚本文本失败，没有写入卡片"));
 			return 0;
 		}
 		source.sendSuccess(() -> Component.literal("已把臂内操作表写入手中卡片"), false);
 		return 1;
-	}
-
-	// ————————————————————————— 脚本（§12 的 P1） —————————————————————————
-
-	/**
-	 * 脚本目录：{@code run/sequenced_arm/scripts/}（用户口径，**不再是** {@code config/…/scripts}）。
-	 *
-	 * <p>★ 文件属于**玩家本机**（{@link ScriptFiles}）：玩家链路（记录表导出、导入桌、打开文件夹）
-	 * 全在客户端读写那一份；这里解析的是**服务端自己的**那份，只供 {@code /sma code …}
-	 * 这条管理员 / 控制台后门使用 —— 所以"服务端不存玩家数据"与"这里能读写文件"并不冲突。
-	 *
-	 * <p>路径与名字规则都只有一处 —— {@link ScriptFiles}，各写一份就会出现"导出的文件 import 不回来"
-	 * 这种不报错的分叉。包可见（不是 private）是给启动自检读的：
-	 * {@code SequencedArmSelfTest.checkOperationRecordExport} 的 ⑥ 就断言两边**真的**是同一个常量。
-	 */
-	static Path scriptDir() {
-		return ScriptFiles.directory();
-	}
-
-	/**
-	 * 脚本文件名；名字不合法时 {@code null}（不替调用方兜底）。
-	 *
-	 * <p>规则搬去了 {@link ScriptFiles#file}，与记录表导出**完全一致**（含允许中文）——
-	 * 否则导出 {@code 炒菜.sma} 之后 {@code /sma code import 炒菜} 会说不认识这个名字。
-	 */
-	@Nullable
-	static Path scriptFile(String name) {
-		return ScriptFiles.file(name);
-	}
-
-	/**
-	 * {@code /sma code export [名字]}：主手卡上的程序 → 脚本文本。
-	 *
-	 * <p>不给名字就只打印到聊天（"看着改"用）；给了名字同时落成文件
-	 * —— 那正是作者工作流：导出 → 用 IDEA 改 → 放回数据包（§12.3c）。
-	 *
-	 * <p>反馈走语言文件（{@code code.*} 前缀）：这一段是玩家可见的**可操作指引**，
-	 * 而现有 {@code /sma} 的反馈都是 {@code Component.literal}（开发期临时入口）。
-	 */
-	private static int codeExport(CommandSourceStack source, @Nullable String name) {
-		ServerPlayer player = source.getPlayer();
-		if (player == null) {
-			source.sendFailure(tr("code.need_player"));
-			return 0;
-		}
-		if (!OperationTableItem.isTable(player.getMainHandItem())) {
-			source.sendFailure(tr("code.export_need_card"));
-			return 0;
-		}
-		ArmProgram program = CardProgramStorage.read(player.getMainHandItem(), source.registryAccess());
-		if (program.tasks.isEmpty()) {
-			source.sendFailure(tr("code.export_empty"));
-			return 0;
-		}
-		// 导出的是**卡上原文**（§17.6）：`/sma code import` 存进去的排版与注释原样还给作者；
-		// 只有 GUI 保存过的卡（文本由反编译生成）才会是规范形式 —— 两条路都对得上"盘上是什么，导出就是什么"。
-		// 兜底：文本缺失（理论上只在旧格式卡上出现）时才现反编译一份，不让导出功能整个失效。
-		String storedText = CardProgramStorage.readText(player.getMainHandItem());
-		String text = storedText != null ? storedText : ScriptCompiler.decompile(program, source.registryAccess());
-		source.sendSuccess(() -> tr("code.export_header", ScriptCompiler.summarize(program)), false);
-		// 一整份脚本一行一行发：聊天栏会自己折行，玩家能整段选中复制
-		text.lines()
-			.forEach(line -> source.sendSuccess(() -> Component.literal(line), false));
-
-		if (name != null) {
-			Path file = scriptFile(name);
-			if (file == null) {
-				source.sendFailure(tr("code.bad_name"));
-				return 0;
-			}
-			try {
-				// UTF-8 **无 BOM**（§12.3c）：Files.writeString 不带 BOM，正是要的
-				Files.createDirectories(file.getParent());
-				Files.writeString(file, text, StandardCharsets.UTF_8);
-			} catch (IOException failed) {
-				source.sendFailure(tr("code.export_failed", String.valueOf(failed.getMessage())));
-				return 0;
-			}
-			source.sendSuccess(() -> tr("code.export_written", file.toString()), false);
-		}
-		return 1;
-	}
-
-	/** {@code /sma code check <名字>}：只编译并回报（**带行号**的错误一次性列全），不写卡。 */
-	private static int codeCheck(CommandSourceStack source, String name) {
-		Path file = scriptFile(name);
-		if (file == null) {
-			source.sendFailure(tr("code.bad_name"));
-			return 0;
-		}
-		String text;
-		try {
-			text = readScript(file);
-		} catch (IOException failed) {
-			source.sendFailure(tr("code.read_failed", file.toString(), String.valueOf(failed.getMessage())));
-			return 0;
-		}
-		ScriptResult<ArmProgram> compiled = ScriptCompiler.compile(text, source.registryAccess());
-		if (compiled.hasErrors()) {
-			reportErrors(source, compiled);
-			return 0;
-		}
-		source.sendSuccess(() -> tr("code.check_ok", ScriptCompiler.summarize(compiled.value())), false);
-		compiled.warnings()
-			.forEach(warning -> source.sendSuccess(() -> tr("code.warning", warning), false));
-		return 1;
-	}
-
-	/**
-	 * {@code /sma code import <名字>}：脚本文件 → 主手卡。
-	 *
-	 * <p><b>走的是同一套服务端校验</b>（§12.3c 明说"代码这条路不能绕过限制"）：
-	 * {@link ArmProgram#isWithinLimits()} 与文本上限
-	 * （{@link ProgramText#MAX_BYTES}，依据见 §17.4 —— 以前这里判的是编译后 NBT 的 128KB，
-	 * 那个口径随存储形式一起换掉了，**判据仍只有一处**：{@link CardProgramStorage#writeText}）。
-	 *
-	 * <p>存进去的是**文件原文**（不是反编译结果）：作者的排版与注释要原样保住（§17.6）。
-	 */
-	private static int codeImport(CommandSourceStack source, String name) {
-		ServerPlayer player = source.getPlayer();
-		if (player == null) {
-			source.sendFailure(tr("code.need_player"));
-			return 0;
-		}
-		ItemStack held = player.getMainHandItem();
-		if (!OperationTableItem.isTable(held)) {
-			source.sendFailure(tr("code.import_need_card"));
-			return 0;
-		}
-		Path file = scriptFile(name);
-		if (file == null) {
-			source.sendFailure(tr("code.bad_name"));
-			return 0;
-		}
-		String text;
-		try {
-			text = readScript(file);
-		} catch (IOException failed) {
-			source.sendFailure(tr("code.read_failed", file.toString(), String.valueOf(failed.getMessage())));
-			return 0;
-		}
-		ScriptResult<ArmProgram> compiled = ScriptCompiler.compile(text, source.registryAccess());
-		if (compiled.hasErrors()) {
-			reportErrors(source, compiled);
-			return 0;
-		}
-		ArmProgram program = compiled.value();
-		// P1「坐标模型统一」（§19）删掉了"脚本形态必须与手持卡形态一致"那道硬错：卡上没有形态了。
-		// 用户第四十轮起脚本里连 `@origin` 都没有（原点住在卡上，解析到它直接报错）⇒
-		// 导入一份脚本**不会**改掉这张卡原有的录制原点 —— 这正是"原点不该跟着文本走"的意义。
-		if (!program.isWithinLimits()) {
-			source.sendFailure(tr("code.import_over_limit", ScriptCompiler.summarize(program)));
-			return 0;
-		}
-		// 落盘判据只有一处（`writeText` 里的 `ProgramText.withinLimit`）——
-		// 这里只负责把失败**说清楚**：多少字节、上限多少。
-		if (CardProgramStorage.writeText(held, text) != CardProgramStorage.StoreResult.OK) {
-			source.sendFailure(tr("code.import_too_large", ProgramText.utf8Length(text), ProgramText.MAX_BYTES));
-			return 0;
-		}
-		player.inventoryMenu.broadcastChanges();
-		source.sendSuccess(() -> tr("code.import_ok", ScriptCompiler.summarize(program)), false);
-		compiled.warnings()
-			.forEach(warning -> source.sendSuccess(() -> tr("code.warning", warning), false));
-		return 1;
-	}
-
-	/** 编译错误：**一次性列全**，每条自带行号（§12.3 的用户明确要求）。 */
-	private static void reportErrors(CommandSourceStack source, ScriptResult<ArmProgram> compiled) {
-		source.sendFailure(tr("code.check_failed", compiled.errors()
-			.size()));
-		ScriptCompiler.errorLines(compiled.errors())
-			.forEach(line -> source.sendFailure(Component.literal("  " + line)));
-	}
-
-	/** 脚本命令的反馈（{@code create_sequenced_mechanical_arm.code.*}）。 */
-	private static Component tr(String key, Object... args) {
-		return Component.translatable("create_sequenced_mechanical_arm." + key, args);
-	}
-
-	/**
-	 * 读一份脚本：**UTF-8**，LF / CRLF 都吃（§12.3c 明说文件是纯文本）。
-	 *
-	 * <p>项目在 PowerShell 写出的 UTF-8 BOM 上栽过一次：BOM 会变成文件第一个字符、
-	 * 让第一行解析不出来，所以这里显式吃掉它。
-	 */
-	private static String readScript(Path file) throws IOException {
-		String text = Files.readString(file, StandardCharsets.UTF_8);
-		if (!text.isEmpty() && text.charAt(0) == '\uFEFF')
-			text = text.substring(1);
-		return text;
 	}
 
 	private static int info(CommandSourceStack source) {
@@ -474,7 +261,8 @@ public class SequencedArmCommands {
 	}
 
 	@Nullable
-	private static SequencedArmBlockEntity findArm(CommandSourceStack source) {		ServerLevel level = source.getLevel();
+	private static SequencedArmBlockEntity findArm(CommandSourceStack source) {
+		ServerLevel level = source.getLevel();
 		BlockPos origin = BlockPos.containing(source.getPosition());
 		SequencedArmBlockEntity best = null;
 		double bestDistance = Double.MAX_VALUE;

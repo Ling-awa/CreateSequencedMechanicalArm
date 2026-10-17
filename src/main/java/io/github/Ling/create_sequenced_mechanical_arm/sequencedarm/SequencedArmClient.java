@@ -26,7 +26,8 @@ public class SequencedArmClient {
 	@SubscribeEvent
 	public static void registerScreens(RegisterMenuScreensEvent event) {
 		event.register(SequencedArmRegistration.ARM_PROGRAM_MENU.get(), ArmProgramScreen::new);
-		// 操作导入桌：界面与贴图复用蓝图桌那套（用户口径），只把文件列表换成服务端发来的脚本名
+		// 操作导入桌：界面与贴图复用蓝图桌那套（用户口径）；列表来自**玩家本机**的
+		// sequenced_arm/scripts/（客户端自己扫，服务端不碰文件），内容则由客户端分片上传
 		event.register(SequencedArmRegistration.PROGRAM_IMPORT_MENU.get(), ProgramImportScreen::new);
 	}
 

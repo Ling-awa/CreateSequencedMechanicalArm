@@ -13,49 +13,52 @@ import org.slf4j.Logger;
 
 import com.mojang.logging.LogUtils;
 
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ScriptFiles;
-import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptCompiler;
-import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptResult;
-
-import net.minecraft.core.HolderLookup;
 
 /**
- * 「操作导入桌」要读的那份脚本目录：**列名字** + **读出并校验一段可用文本**（唯一实现）。
+ * 脚本目录的**本机读取**：列名字 + 读出原始字节与文本（唯一实现）。
  *
- * <p><b>为什么单独一个类、而且只跑在服务端</b>（这是整个功能与蓝图桌最大的区别）：
- * Create 的蓝图桌是客户端读 {@code schematics/} 目录再把内容分片上传（{@code ClientSchematicLoader}），
- * 所以在多人游戏里"列表"来自客户端自己的硬盘。我们的脚本目录 {@link ScriptFiles#directory()} 是
- * <b>服务端</b>的世界数据（{@code run/sequenced_arm/scripts/}，专用服务器上就是服端根目录）——
- * 客户端根本没有那个目录。所以列表与文本都只能由服务端读、再经网络包下发/裁决
- * （{@code network/ProgramImportRequestPacket} / {@code ProgramImportListPacket} / {@code ProgramImportStartPacket}）。
+ * <p><b>★ 这个类只在客户端跑，服务端一次都不碰文件</b>（用户口径："没必要动服务端文件"）：
+ * 脚本是玩家自己的资产，和 Create 的 {@code schematics/} 一样落在**运行这份客户端的那台机器**上
+ * （{@link ScriptFiles#directory()}）。所以"有哪些脚本""这个脚本写了什么"两件事只有客户端知道，
+ * 服务端也不该知道 —— 它只在玩家按下确认之后**收下**那串字节（分片上传，见
+ * {@link ProgramImportTableBlockEntity}）并做最后的裁决（上限 / 编译 / 写卡）。
  *
- * <p><b>校验顺序就是语义</b>（每一步失败都带一个可翻译的原因，绝不静默）：
- * 名字合法 → 文件存在 → 读得出来 → 不超过 {@link ProgramText#MAX_BYTES} → <b>编译得过</b>。
- * 大小检查放在编译之前：超限的文本编译出来也写不进卡（{@code CardProgramStorage.writeText} 会拒），
- * 白花一次解析；而"编译不过"必须在**开始导入之前**挡掉 —— 导入的产物是一张卡，
- * 卡上只能存文本，存一份编译器不认的文本等于给玩家一张"插进臂里也不生效"的废卡。
+ * <p>这与上游的分工完全一致：{@code ClientSchematicLoader} 在客户端读 {@code schematics/}、
+ * 一片片发给 {@code ServerSchematicLoader}，服务端只负责拼装与落盘（那边落的是世界数据，
+ * 我们这边落的是玩家手上的卡）。
  *
- * <p>名字规则与命令 {@code /sma code import}、导出那条路<b>共用</b> {@link ScriptFiles}：
- * 同一个 {@code <名字>.sma} 会在三条路上被摸到，各写一份判据的后果是"导出的文件读不回来"。
+ * <p><b>这里只做"文件层"的三件事</b>：名字合法 → 存在且读得出 → 不超过
+ * {@link ProgramText#MAX_BYTES}。**不在这里编译**：编译需要 {@code HolderLookup.Provider}，
+ * 而"这份脚本能不能进卡"是服务端的裁决（导入桌）与命令自己的本地预检（{@code /sma code import}）
+ * 各管一段，混进这个类只会让两条路的判据各说各话。
+ *
+ * <p>名字规则与导出那条路（{@link io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.ArmScriptExport}）
+ * **共用** {@link ScriptFiles}：同一个 {@code <名字>.sma} 会被"导出 / 列表 / 读取 / 导入"四条路摸到，
+ * 各写一份判据的后果是"导出的文件读不回来"。
+ *
+ * <p>⚠️ 这里**没有任何客户端专属类型**（纯 {@code java.nio}），所以启动自检（服务端进程）也能直接调它来
+ * 断言"真文件 → 原样字节"这一段；"只在客户端跑"讲的是**谁该调它**，不是类的可见性或运行环境。
  */
 public final class ProgramImportFiles {
 
 	private static final Logger LOGGER = LogUtils.getLogger();
 
 	/**
-	 * 一次下发的列表上限。
+	 * 一次列表的上限。
 	 *
-	 * <p>不是随手取的：这个数同时是 ① 包体上界（约 256 × 33 字节 ≈ 8 KiB，远小于
-	 * {@code ProgramText.MAX_BYTES}，也不会触发 NeoForge 的自动分片）与 ② 界面里
-	 * {@code SelectionScrollInput} 的规模上限（再多人也翻不过来）。**超出的部分不显示**，
+	 * <p>不是随手取的：这个数同时是 ① 界面里 {@code SelectionScrollInput} 的规模上限
+	 * （再多人也翻不过来）与 ② "扫一次目录别把界面卡住"的护栏。**超出的部分不显示**，
 	 * 玩家把文件分到子目录里就能都看到 —— 但导入只认顶层目录（名字里不许带 {@code /}，
 	 * 见 {@link ScriptFiles#isValidName}），所以这是刻意的取舍，不是遗漏。
+	 *
+	 * <p>从"服务端下发的列表上限"变成"本地扫描上限"之后这个数的量级不变，
+	 * 只是它不再与任何包体挂钩（列表根本不出本机）。
 	 */
 	public static final int MAX_FILES = 256;
 
-	/** 一次读取请求的结局。{@code OK} 之外都带原因，由调用方翻成一句玩家看得懂的话。 */
+	/** 一次读取的结局。{@code OK} 之外都带原因，由调用方翻成一句玩家看得懂的话。 */
 	public enum Problem {
 		OK,
 		/** 名字不合法（见 {@link ScriptFiles#isValidName}）。 */
@@ -66,32 +69,46 @@ public final class ProgramImportFiles {
 		UNREADABLE,
 		/** 文本超过 {@link ProgramText#MAX_BYTES}：与卡片落盘同一条上限。 */
 		TOO_LARGE,
-		/** {@link ScriptCompiler#compile} 报了错：**这份文本不许进卡**（见类注释）。 */
-		DOES_NOT_COMPILE
+		/**
+		 * 文件读出来了但是**空的**（只有空行 / 只有 BOM）。
+		 *
+		 * <p>为什么要单独一条：空文本能过 {@link ProgramText#withinLimit}，但上传上去的
+		 * {@code totalBytes} 是 0 —— 一个"永远是 0 片"的上传会让桌子一直等到超时，
+		 * 而玩家等 3 秒后只看到"上传被中止"。在**读的这一刻**就说清楚，代价是一条提示。
+		 */
+		EMPTY
 	}
 
 	/**
 	 * 一次读取的结果。
 	 *
-	 * @param text   {@link Problem#OK} 时是被校验过的**原文**（原样写进卡，保住作者的排版与注释）
-	 * @param bytes  这个文件的 UTF-8 字节数（{@link Problem#TOO_LARGE} 时给玩家看"差多少"）
-	 * @param errors 编译错误条数（{@link Problem#DOES_NOT_COMPILE} 时给玩家看"错了几行"）
+	 * @param text  {@link Problem#OK} 时的**原文**（BOM 已去掉，理由见 {@link #read}）
+	 * @param bytes {@link Problem#OK} 时的**原始字节**（同一份 BOM 已去掉的数据），
+	 *              导入桌直接把它分片上传 —— 不做 {@code String → byte[]} 的二次编码，
+	 *              免得"文件里是坏字节、传上去却变了长度"
 	 */
-	public record Outcome(Problem problem, @Nullable String text, int bytes, int errors) {
+	public record Contents(Problem problem, @Nullable String text, byte[] bytes) {
 		public boolean ok() {
 			return problem == Problem.OK;
 		}
 
-		private static Outcome failed(Problem problem) {
-			return new Outcome(problem, null, 0, 0);
+		/** 这份脚本的字节数（{@link Problem#TOO_LARGE} 时给玩家看"超了多少"）。 */
+		public int sizeBytes() {
+			return bytes.length;
+		}
+
+		private static Contents failed(Problem problem) {
+			return new Contents(problem, null, EMPTY_BYTES);
 		}
 	}
+
+	private static final byte[] EMPTY_BYTES = new byte[0];
 
 	private ProgramImportFiles() {
 	}
 
 	/**
-	 * 目录里**可被导入**的脚本名（不含 {@code .sma}），按名字排序。
+	 * 本机脚本目录里**可被导入**的脚本名（不含 {@code .sma}），按名字排序。
 	 *
 	 * <p>三条过滤各有理由：① 只要 {@code .sma}（别的东西不是脚本）；② 名字过一遍
 	 * {@link ScriptFiles#isValidName} —— 不在列表里的名字点了也会被 {@link #read} 拒，
@@ -123,39 +140,50 @@ public final class ProgramImportFiles {
 	}
 
 	/**
-	 * 读出 {@code <名字>.sma} 并做完全部校验。
+	 * 读出 {@code <名字>.sma} 的原始字节 + 文本，并做完文件层的三道校验。
+	 *
+	 * <p><b>BOM 在这里就去掉，而不是各调用方各去一次</b>：项目在 PowerShell 写出的 UTF-8 BOM 上
+	 * 栽过一次（BOM 会变成文件第一个字符，让第一行解析不出来）。这个类是所有"读脚本"的**唯一入口**，
+	 * 所以处理在这一处；服务端拼完分片之后还会再吃一次 BOM —— 那条路上来的字节是过网的，
+	 * 不能假定客户端已经做过（改过的客户端可以直接上传带 BOM 的字节）。
 	 *
 	 * <p>返回的文本是**原文**（不是规范形式）：{@code CardProgramStorage.writeText} 也是原样落盘，
 	 * 所以"文件里怎么写、卡上就怎么存"，玩家的注释与排版不会在这一步被重排
 	 * （重排只在编辑器里点保存时才发生，那是刻意的）。
 	 */
-	public static Outcome read(@Nullable String name, HolderLookup.Provider registries) {
+	public static Contents read(@Nullable String name) {
 		Path file = ScriptFiles.file(name);
 		if (file == null)
-			return Outcome.failed(Problem.BAD_NAME);
-		// isRegularFile 而不是 exists：目录 / 设备文件也叫 exists，而它们的 readString 会抛 IOException，
+			return Contents.failed(Problem.BAD_NAME);
+		// isRegularFile 而不是 exists：目录 / 设备文件也叫 exists，而它们的 readAllBytes 会抛 IOException，
 		// 那会把"玩家点了一个同名文件夹"报成"磁盘读失败"。
 		if (!Files.isRegularFile(file))
-			return Outcome.failed(Problem.NOT_FOUND);
-		String text;
+			return Contents.failed(Problem.NOT_FOUND);
+		byte[] bytes;
 		try {
-			text = Files.readString(file, StandardCharsets.UTF_8);
+			bytes = Files.readAllBytes(file);
 		} catch (IOException failed) {
 			LOGGER.error("读取脚本失败：{}（{}）", file, failed.toString());
-			return Outcome.failed(Problem.UNREADABLE);
+			return Contents.failed(Problem.UNREADABLE);
 		}
-		int bytes = ProgramText.utf8Length(text);
-		if (!ProgramText.withinLimit(text))
-			return new Outcome(Problem.TOO_LARGE, null, bytes, 0);
+		bytes = stripBom(bytes);
+		// 上限判**字节**（盘上存的就是这串字节）：与卡片落盘同一条 ProgramText.MAX_BYTES
+		if (bytes.length > ProgramText.MAX_BYTES)
+			return new Contents(Problem.TOO_LARGE, null, bytes);
+		String text = new String(bytes, StandardCharsets.UTF_8);
+		if (text.isBlank())
+			return new Contents(Problem.EMPTY, text, bytes);
+		return new Contents(Problem.OK, text, bytes);
+	}
 
-		ScriptResult<ArmProgram> compiled = ScriptCompiler.compile(text, registries);
-		if (compiled.hasErrors()) {
-			List<String> lines = ScriptCompiler.errorLines(compiled.errors());
-			// 第一行错误进日志（玩家只看到"错了几行"，运维/作者要看具体哪一行时不用再跑一次命令）
-			LOGGER.warn("脚本《{}》编译不过（{} 处），拒绝导入：{}", name, lines.size(), lines.isEmpty() ? "?" : lines.get(0));
-			return new Outcome(Problem.DOES_NOT_COMPILE, null, bytes, lines.size());
+	/** 吃掉 UTF-8 BOM（EF BB BF）。**认字节**而不是认字符：这一步发生在解码之前。 */
+	private static byte[] stripBom(byte[] bytes) {
+		if (bytes.length >= 3 && (bytes[0] & 0xFF) == 0xEF && (bytes[1] & 0xFF) == 0xBB && (bytes[2] & 0xFF) == 0xBF) {
+			byte[] trimmed = new byte[bytes.length - 3];
+			System.arraycopy(bytes, 3, trimmed, 0, trimmed.length);
+			return trimmed;
 		}
-		return new Outcome(Problem.OK, text, bytes, 0);
+		return bytes;
 	}
 
 }

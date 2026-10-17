@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +40,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanica
 import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
 import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportFiles;
 import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableBlockEntity;
+import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableBlockEntity.ChunkResult;
 import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableBlockEntity.StartResult;
 import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableMenu;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.AnyBlockInteractionPoint;
@@ -6477,6 +6479,8 @@ public class SequencedArmSelfTest {
 		boolean exported = false;
 		boolean contentMatches = false;
 		String expectedText = null;
+		// ⑥ 要用：{@code writeFile} 真的把文件写到了哪儿（而不是"两个常量算出来相等"）
+		Path writtenPath = null;
 		try {
 			SequencedArmBlockEntity arm = freshArm(level, armPos);
 			if (arm == null) {
@@ -6496,6 +6500,7 @@ public class SequencedArmSelfTest {
 						problems.add("服务端回传的文本与臂里的程序文本不一致（玩家会存下另一份脚本）");
 					ArmScriptExport.Outcome written = ArmScriptExport.writeFile(name, prepared.text());
 					exported = written.ok() && Files.isRegularFile(file);
+					writtenPath = written.file();
 					if (!exported)
 						problems.add("写本机文件没有成功：problem=" + written.problem() + " file=" + written.file());
 					else
@@ -6562,15 +6567,19 @@ public class SequencedArmSelfTest {
 		if (!firstKept)
 			problems.add("同名那次导出把第一份文件覆盖掉了");
 
-		// ⑥ 目录统一：本机目录、管理员后门 {@code /sma code …} 与 {@code file(name)} **必须**算出同一串路径
-		//    （PLAIN-ASCII 尾段也钉一下，免得有人把目录常量改成 config 下却忘了改文案）
-		boolean dirUnified = dir.equals(SequencedArmCommands.scriptDir())
+		// ⑥ 目录统一：本机目录、{@code file(name)} 与"导出那条路**真的**写下的路径"必须是同一串
+		//    （PLAIN-ASCII 尾段也钉一下，免得有人把目录常量改成 config 下却忘了改文案）。
+		//    ★ 这条断言的旧口径是"客户端的路径 == 服务端命令 {@code SequencedArmCommands.scriptDir()}"，
+		//    第二步把服务端那条路整组删掉了（服务端不碰脚本文件）⇒ 改成与 {@code writeFile} 的
+		//    实际产物对齐 —— 判据仍然"只有一处"，而且断言的是**真的落在那个目录**，比比较两个常量更强。
+		boolean dirUnified = dir.equals(ScriptFiles.directory())
 			&& dir.endsWith(ScriptFiles.DIRECTORY)
 			&& file.getParent()
 				.equals(dir)
-			&& file.equals(ScriptFiles.file(name));
+			&& file.equals(ScriptFiles.file(name))
+			&& file.equals(writtenPath);
 		if (!dirUnified)
-			problems.add("脚本目录不统一：导出=" + dir + " 命令=" + SequencedArmCommands.scriptDir());
+			problems.add("脚本目录不统一：目录=" + dir + " 期望文件=" + file + " 实际写下的=" + writtenPath);
 
 		LOGGER.info("[selftest] 记录表导出: 服务端不写盘={} 回传文本一致={} 落盘成功={} 内容一致={} 空程序被拒={} 非法名被拒={} "
 			+ "同名被拒={} 原文件未被覆盖={} 目录统一={} （本机目录={}）", serverWroteNothing, textRoundTrips, exported,
@@ -6588,70 +6597,84 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 「操作导入桌」（第 2 片）的自检：把"导入"这条链从**真实入口**驱动一遍
-	 * （真的读磁盘上的 {@code .sma}、真的跑方块实体的 {@code tick()}、真的看输出槽里那张卡）。
+	 * 「操作导入桌」（第二步：**客户端读本机文件 + 分片上传**）的自检：把"上传 → 裁决 → 写卡"整条链
+	 * 从**真实入口**驱动一遍（真的跑 {@code startUpload / acceptChunk / tick()}，真的看输出槽里那张卡）。
 	 *
-	 * <p>为什么非要真文件：这条路的价值全在"文件 → 校验 → 卡"上，而
-	 * ① 校验（名字 / 存在 / 大小 / 能不能编译）与 ② 产出（文本逐字进卡）都是**静默**的
-	 * —— 判据写错只会让玩家拿到一张"插进臂里不生效"的卡或一张空白卡，编译期毫无提示。
+	 * <p>★ <b>这一步推翻了两条旧口径，所以这一节整体重写了</b>（不是"顺手改松"）：
+	 * ① 文件不再由服务端读 —— 于是"文件不存在 / 读不出来"这类断言从服务端搬到了客户端
+	 * （{@link ProgramImportFiles#read}，这里仍然用真文件驱动它，因为它是界面按确认时真正走的那一段）；
+	 * ② 进度不再由 tick 推进（固定 100 tick 已删） —— 于是 {@code 进度推进} 那条断言换成
+	 * "收下第一片之后 {@code uploadReceived} 与 {@code uploadProgress()} 往前走了、但还没到 1"，
+	 * 它钉的是**字节驱动**这件事本身。
 	 *
 	 * <p>字段与"改哪一行会让它变红"：
 	 * <ol>
-	 *   <li>{@code 空输入被拒}：删掉 {@code ProgramImportTableBlockEntity.startImport} 开头那条
-	 *       {@code input.isEmpty() || !isTable(input)} 判断 ⇒ 变 false（会在没有输入的情况下开跑）；</li>
+	 *   <li>{@code 空输入被拒}：删掉 {@code startUpload} 开头那条
+	 *       {@code input.isEmpty() || !isTable(input)} 判断 ⇒ 变 false（会在没有输入的情况下开会话）；</li>
 	 *   <li>{@code 非空白输入被拒}：删掉 {@code if (CardProgramStorage.hasProgram(input)) return NOT_BLANK;}
 	 *       ⇒ 变 false（一张已经有程序的表会被"导入"覆盖成新程序，等于静默丢程序）；</li>
-	 *   <li>{@code 进度推进}：把 {@code tick()} 里 `importProgress += 1f / IMPORT_TICKS` 那一句删掉
-	 *       ⇒ 变 false（进度永远 0，界面上的进度条不动、导入永远不完成）；</li>
-	 *   <li>{@code 产出与文本一致}：把 {@code finishImport} 里的
-	 *       {@code CardProgramStorage.writeText(out, text)} 换成写空文本、或把 {@code text} 换成
-	 *       {@code file}（文件名）⇒ 变 false（卡上没有程序 / 程序与文件不一致）；
-	 *       把 {@code inventory.setStackInSlot(SLOT_OUTPUT, out)} 删掉 ⇒ 变 false（没有产出）；
-	 *       <b>把 {@code tick()} 的完成门限改回 {@code importProgress >= 1f} ⇒ 同样变 false</b>
-	 *       —— {@code 1f / 100} 在 float 里累加 100 次是 {@code ≈0.999999}，"正好 100 tick 完成"
-	 *       永远不发生 ⇒ {@code finishImport} 只在第 101 tick 才跑，这一项与下面
-	 *       {@code 完成后归位}、以及三条"拒绝类"（它们拿到的是 {@code ALREADY_IMPORTING}）一起变红；</li>
-	 *   <li>{@code 输入被消耗}：把 {@code startImport} 里那句
+	 *   <li>{@code 一桌一会话}：删掉 {@code startUpload} 第一行 {@code if (isImporting) return ALREADY_UPLOADING;}
+	 *       ⇒ 变 false（同一张桌子会被两个上传同时灌进一个缓冲）；</li>
+	 *   <li>{@code 前多半片} / {@code 字节进度}：把 {@code acceptChunk} 里
+	 *       {@code uploadReceived = receivedBytes;} 那一句删掉 ⇒ 变 false（进度永远 0，
+	 *       界面上的进度条不动）；把 {@code uploadProgress()} 改成固定值 ⇒ 同样变 false；</li>
+	 *   <li>{@code 产出与文本一致}：把 {@code completeUpload} 里的
+	 *       {@code CardProgramStorage.writeText(out, text)} 换成写空文本、或把 {@code text} 换成文件名
+	 *       ⇒ 变 false；把 {@code inventory.setStackInSlot(SLOT_OUTPUT, out)} 删掉 ⇒ 变 false；</li>
+	 *   <li>{@code 乱序被拒}：删掉 {@code acceptChunk} 里 {@code seq != nextSeq} 那道 ⇒ 变 false
+	 *       （乱序片会被静默拼进文本，产出是一份玩家没写过的脚本）；</li>
+	 *   <li>{@code 片里总量不一致被拒}：删掉 {@code totalBytes != expectedTotal} 那道 ⇒ 变 false
+	 *       （另一次上传的片能被拼进这次会话）；</li>
+	 *   <li>{@code 超量被拒}：删掉 {@code receivedBytes + data.length > expectedTotal} 那道 ⇒ 变 false
+	 *       （会话能以超过被接受的总量继续吃字节）；</li>
+	 *   <li>{@code 开始就超上限被拒} / {@code 空文件被拒}：删掉 {@code totalBytes > MAX_BYTES} /
+	 *       {@code totalBytes <= 0} 那两道 ⇒ 变 false（一个"永远收不满"的会话会挂到超时）；
+	 *       而且这两条与下面 {@code 拒收不消耗} 一起钉住"**拒绝发生在消耗输入之前**"；</li>
+	 *   <li>{@code 输入被消耗}：把 {@code startUpload} 里那句
 	 *       {@code inventory.setStackInSlot(SLOT_INPUT, ItemStack.EMPTY)} 删掉 ⇒ 变 false
 	 *       （输入表还在 + 输出又出来一张 ⇒ 白得一张卡）；</li>
-	 *   <li>{@code 文件不存在被拒} / {@code 编译不过被拒}：把 {@link ProgramImportFiles#read} 里的
-	 *       {@code isRegularFile} 或 {@code compiled.hasErrors()} 判断删掉 ⇒ 对应那项变 false
-	 *       （不存在/编译不过的文本会真的开跑，最后给玩家一张编译器不认的卡）；</li>
-	 *   <li>{@code 拒收不消耗}：在 {@code startImport} 里把"消耗输入"提到文件校验**之前**
-	 *       ⇒ 变 false（点错文件也会花掉一张空白表）；</li>
+	 *   <li>{@code 编译不过被拒}：把 {@code completeUpload} 里的 {@code compiled.hasErrors()} 判断删掉
+	 *       ⇒ 变 false（会给玩家一张编译器不认的卡）；</li>
+	 *   <li>{@code 超时丢弃}：把 {@code tick()} 里那条静默超时删掉 ⇒ 变 false
+	 *       （关掉界面之后这张桌子会永远卡在"正在导入"）；</li>
 	 *   <li>{@code 输出槽占用被拒}：删掉 {@code if (!getStackInSlot(SLOT_OUTPUT).isEmpty()) return OUTPUT_BUSY;}
 	 *       ⇒ 变 false（产出会顶掉玩家放在输出槽里的东西）；</li>
-	 *   <li>{@code 写失败不写}：删掉 {@code finishImport} 里
-	 *       {@code if (stored != StoreResult.OK) {...return;}} 那段 ⇒ 变 false
+	 *   <li>{@code 收满但写不下就不写}：把 {@code completeUpload} 里
+	 *       {@code if (!ProgramText.withinLimit(text)) ... return TOO_LARGE;} 删掉 ⇒ 变 false
 	 *       （一张**没有程序**的空操作表会落进输出槽，玩家会以为导入成功）；</li>
 	 *   <li>{@code 输入槽过滤}：把 {@link ProgramImportTableMenu#isAcceptedInput} 里的
 	 *       {@code !CardProgramStorage.hasProgram(stack)} 删掉 ⇒ 变 false；</li>
-	 *   <li>{@code 列表里有它}：把 {@link ProgramImportFiles#list} 里的 {@code .sma} 过滤或
-	 *       {@code isValidName} 过滤删掉 ⇒ 变 false（列表里会出现导不进来的名字）。</li>
+	 *   <li>{@code 列表里有它} / {@code 本机读得出}：把 {@link ProgramImportFiles#list} 里的
+	 *       {@code .sma} 过滤或 {@code isValidName} 过滤删掉、或把 {@code read} 里的
+	 *       {@code isRegularFile} 删掉 ⇒ 对应那项变 false（列表里会出现导不进来的名字）。</li>
 	 * </ol>
 	 *
-	 * <p>⚠️ 这条**不**覆盖三个网络包里的三道守卫（"玩家开着的菜单是不是这台机器"、
-	 * 旁观者、名字长度解码上限）—— 它们要一个 {@code IPayloadContext}（真实连接），无头环境拿不到；
-	 * 那三条属于「待游戏内验证」。界面本身（进度条、标题三态）同理。
+	 * <p>⚠️ 这条**不**覆盖两个网络包里的三道守卫（"玩家开着的菜单是不是这台机器"、
+	 * 旁观者、片大小解码上限）—— 它们要一个 {@code IPayloadContext}（真实连接），无头环境拿不到；
+	 * 那三条属于「待游戏内验证」。界面本身（进度条、标题三态）、以及"上传者关界面后由
+	 * {@code tick()} 丢弃"那条（它要一个真 ServerPlayer），同理。
 	 */
 	private static void checkProgramImportTable(MinecraftServer server) {
 		ServerLevel level = server.overworld();
-		HolderLookup.Provider registries = server.registryAccess();
 		List<String> problems = new ArrayList<>();
 
 		Path dir = ScriptFiles.directory();
 		String goodName = "selftest_import_ok";
 		String badName = "selftest_import_bad";
-		String missingName = "selftest_import_missing";
 		String goodText = "task main\n  wait 1s\n  break\n";
 		String badText = "task main\n  take 0 0 0\n  this_is_not_an_operation\n";
 		Path goodFile = dir.resolve(goodName + ScriptFiles.EXTENSION);
-		Path badFile = dir.resolve(badName + ScriptFiles.EXTENSION);
+		// 分片夹具：把这一段字节**劈成两片**发。协议允许最后一片不满、也允许片小于 8 KiB
+		// （CHUNK_BYTES 是上限而不是定长），这样"收了半片 / 收满"两个状态都能在真实入口上观察到。
+		byte[] goodBytes = goodText.getBytes(StandardCharsets.UTF_8);
+		int half = goodBytes.length / 2;
+		byte[] firstChunk = Arrays.copyOfRange(goodBytes, 0, half);
+		byte[] secondChunk = Arrays.copyOfRange(goodBytes, half, goodBytes.length);
+		byte[] badBytes = badText.getBytes(StandardCharsets.UTF_8);
 
 		try {
 			Files.createDirectories(dir);
 			Files.writeString(goodFile, goodText, StandardCharsets.UTF_8);
-			Files.writeString(badFile, badText, StandardCharsets.UTF_8);
 		} catch (IOException failed) {
 			LOGGER.error("[selftest] 操作导入桌：写不出夹具脚本（{}），这一批测不到", failed.toString());
 			return;
@@ -6662,26 +6685,33 @@ public class SequencedArmSelfTest {
 
 		boolean emptyInputRejected = false;
 		boolean notBlankRejected = false;
-		boolean progressMoved = false;
+		boolean oneSessionAtATime = false;
+		boolean listed = false;
+		boolean localReadable = false;
+		boolean halfChunkAccepted = false;
+		boolean byteProgress = false;
 		boolean producedWithProgram = false;
 		boolean textMatchesFile = false;
 		boolean inputConsumed = false;
 		boolean importStopped = false;
-		boolean missingRejected = false;
-		boolean compileRejected = false;
+		boolean outOfOrderRejected = false;
+		boolean totalMismatchRejected = false;
+		boolean overflowRejected = false;
+		boolean tooLargeAtStartRejected = false;
+		boolean emptyFileRejected = false;
 		boolean rejectedKeepsInput = false;
+		boolean compileRejected = false;
+		boolean compileKeepsOutputEmpty = false;
+		boolean timeoutDrops = false;
+		boolean noSessionIsSilent = false;
 		boolean outputBusyRejected = false;
-		boolean failedWriteLeavesEmpty = false;
+		boolean noCardWhenUnwritable = false;
 		boolean filterOk = false;
-		boolean listed = false;
-		// 诊断用：这三条"拒绝类"以前红过，而错误文案只说"没有拒绝"——实测拿到的是
-		// ALREADY_IMPORTING（上一次导入根本没结束），照文案去查 startImport 的判定会白查一轮。
-		StartResult missingResult = null;
-		StartResult compileResult = null;
+		// 诊断用：这些"拒绝类"以前红过，而错误文案只说"没有拒绝"——
+		// 实测那时拿到的是 ALREADY_UPLOADING（上一次会话根本没结束），照文案去查判定会白查一轮。
 		StartResult busyResult = null;
-		// ② 里 tick 跑完之后的状态：仍然是 true / 进度没归 0 ⇒ 卡在"没完成"，而不是"写了但没写进去"
-		boolean stillImporting = false;
-		float progressAfterTicks = -1f;
+		StartResult tooLargeResult = null;
+		ChunkResult lastChunkResult = null;
 
 		try {
 			level.setBlockAndUpdate(tablePos, Blocks.AIR.defaultBlockState());
@@ -6692,15 +6722,15 @@ public class SequencedArmSelfTest {
 			if (table == null) {
 				problems.add("放不出测试用的导入桌（" + tablePos.toShortString() + "），导入这条路测不到");
 			} else {
-				// ① 空输入：连一张表都没有，不能开始
-				emptyInputRejected = table.startImport(goodName, registries) == StartResult.NO_INPUT
+				// ① 空输入：连一张表都没有，不能开会话
+				emptyInputRejected = table.startUpload(null, goodName, goodBytes.length) == StartResult.NO_INPUT
 					&& !table.isImporting;
 
 				// ①b 非空白输入：一张**已经有程序**的表也不能当输入（输入槽过滤与服务端判定两处都要拦）
 				ItemStack used = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 				CardProgramStorage.writeText(used, goodText);
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT, used);
-				notBlankRejected = table.startImport(goodName, registries) == StartResult.NOT_BLANK
+				notBlankRejected = table.startUpload(null, goodName, goodBytes.length) == StartResult.NOT_BLANK
 					&& CardProgramStorage.hasProgram(table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT))
 					&& !table.isImporting;
 				filterOk = !ProgramImportTableMenu.isAcceptedInput(used)
@@ -6708,23 +6738,32 @@ public class SequencedArmSelfTest {
 						SequencedArmRegistration.OPERATION_TABLE.get()));
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT, ItemStack.EMPTY);
 
-				// ② 成功路径：进度从 0 推进 → IMPORT_TICKS 之后输出槽出现一张**带程序**的表，文本与文件逐字相同
+				// ② 列表与读取都走**本机磁盘**（界面按确认时真正走的两个入口）
 				listed = ProgramImportFiles.list()
 					.contains(goodName);
+				ProgramImportFiles.Contents contents = ProgramImportFiles.read(goodName);
+				localReadable = contents.ok() && goodText.equals(contents.text())
+					&& Arrays.equals(goodBytes, contents.bytes());
+
+				// ③ 成功路径：开会话 → 半片 → 收满，输出槽出现一张**带程序**的表，文本与文件逐字相同
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
 					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
-				boolean started = table.startImport(goodName, registries) == StartResult.STARTED;
-				boolean fromZero = table.isImporting && table.importProgress == 0f;
-				table.tick();
-				progressMoved = started && fromZero && table.importProgress > 0f && table.importProgress < 1f
-					&& table.isImporting;
-				for (int tick = 1; tick < ProgramImportTableBlockEntity.IMPORT_TICKS; tick++)
-					table.tick();
-				stillImporting = table.isImporting;
-				progressAfterTicks = table.importProgress;
+				boolean started = table.startUpload(null, goodName, goodBytes.length) == StartResult.STARTED;
+				// 一桌一会话：已经有一个在跑时再来一个必须被拒（否则两个上传会灌进同一个缓冲）
+				oneSessionAtATime = table.startUpload(null, goodName, goodBytes.length)
+					== StartResult.ALREADY_UPLOADING;
+				boolean fromZero = table.isImporting && table.uploadReceived == 0 && table.uploadProgress() == 0f;
+				ChunkResult first = table.acceptChunk(0, goodBytes.length, firstChunk);
+				halfChunkAccepted = first == ChunkResult.ACCEPTED && table.isImporting;
+				// ★ 进度是**字节驱动**的：收下半片之后就是 received/total，
+				//   不是"某个固定 tick 走到的百分比"（固定 100 tick 已随旧口径删除）
+				byteProgress = table.uploadReceived == half && table.uploadTotal == goodBytes.length
+					&& table.uploadProgress() > 0f && table.uploadProgress() < 1f;
+				lastChunkResult = table.acceptChunk(1, goodBytes.length, secondChunk);
 				ItemStack produced = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT);
-				producedWithProgram = produced.getItem() == SequencedArmRegistration.OPERATION_TABLE.get()
-					.asItem() && CardProgramStorage.hasProgram(produced);
+				producedWithProgram = lastChunkResult == ChunkResult.COMPLETED
+					&& produced.getItem() == SequencedArmRegistration.OPERATION_TABLE.get()
+						.asItem() && CardProgramStorage.hasProgram(produced);
 				String fromFile = null;
 				try {
 					fromFile = Files.readString(goodFile, StandardCharsets.UTF_8);
@@ -6734,24 +6773,71 @@ public class SequencedArmSelfTest {
 				textMatchesFile = fromFile != null && fromFile.equals(CardProgramStorage.readText(produced));
 				inputConsumed = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT)
 					.isEmpty();
-				importStopped = !table.isImporting && table.importProgress == 0f;
+				importStopped = started && fromZero && !table.isImporting && table.uploadReceived == 0
+					&& table.uploadTotal == 0;
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT, ItemStack.EMPTY);
 
-				// ③ 文件不存在 / 编译不过：拒绝，而且**输入槽里那张空白表还在**
+				// ④ 乱序：第 1 片先到 ⇒ 中止（不缓存乱序片、不等待重排）
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
 					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
-				missingRejected = (missingResult = table.startImport(missingName, registries)) == StartResult.NOT_FOUND;
-				compileResult = table.startImport(badName, registries);
-				compileRejected = compileResult == StartResult.DOES_NOT_COMPILE
+				table.startUpload(null, goodName, goodBytes.length);
+				outOfOrderRejected = table.acceptChunk(1, goodBytes.length, secondChunk) == ChunkResult.BAD_SEQUENCE
+					&& !table.isImporting;
+				table.abortUpload("自检收尾");
+
+				// ⑤ 片里的总字节与开会话时声明的不一致 ⇒ 中止（另一次上传的片不能拼进来）
+				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
+				table.startUpload(null, goodName, goodBytes.length);
+				totalMismatchRejected = table.acceptChunk(0, goodBytes.length + 1, firstChunk)
+					== ChunkResult.BAD_SEQUENCE && !table.isImporting;
+
+				// ⑥ 超量：声明的总量比这一片还小 ⇒ 中止（不"截断到上限"，那会拼出半截脚本）
+				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
+				table.startUpload(null, goodName, half);
+				overflowRejected = table.acceptChunk(0, half, goodBytes) == ChunkResult.TOO_LARGE
+					&& !table.isImporting;
+
+				// ⑦ 开始就超上限 / 空文件：**拒绝发生在消耗输入之前** ⇒ 输入槽里那张空白表还在
+				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
+				tooLargeResult = table.startUpload(null, goodName, ProgramText.MAX_BYTES + 1);
+				tooLargeAtStartRejected = tooLargeResult == StartResult.TOO_LARGE && !table.isImporting;
+				emptyFileRejected = table.startUpload(null, goodName, 0) == StartResult.EMPTY_FILE
 					&& !table.isImporting;
 				ItemStack kept = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT);
 				rejectedKeepsInput = !kept.isEmpty() && !CardProgramStorage.hasProgram(kept);
-				if (missingRejected && compileRejected && !rejectedKeepsInput)
-					problems.add("文件被拒之后输入槽里那张空白表被消耗掉了（点错文件不该花掉一张卡）");
+				if (tooLargeAtStartRejected && !rejectedKeepsInput)
+					problems.add("开会话被拒之后输入槽里那张空白表被消耗掉了（被拒不该花掉一张卡）");
 
-				// ④ 输出槽有物品：不能开始（也不能把输入表吃掉）
+				// ⑧ 编译不过：收满了也**一个字都不写**（输出槽保持空）
+				table.startUpload(null, badName, badBytes.length);
+				compileRejected = table.acceptChunk(0, badBytes.length, badBytes)
+					== ChunkResult.DOES_NOT_COMPILE
+					&& table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT)
+						.isEmpty();
+				compileKeepsOutputEmpty = compileRejected && !table.isImporting;
+
+				// ⑨ 超时：开会话之后一片都不来 ⇒ tick() 的静默超时把会话丢掉
+				//    （"玩家关掉界面"那条路就靠它兜底 —— 人手不在时没有别的信号）
+				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
+				table.startUpload(null, goodName, goodBytes.length);
+				for (int tick = 0; tick <= ProgramImportTableBlockEntity.UPLOAD_TIMEOUT_TICKS; tick++)
+					table.tick();
+				timeoutDrops = !table.isImporting
+					&& table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT)
+						.isEmpty();
+
+				// ⑩ 没有会话时的片：**静默丢弃**（NO_UPLOAD），不报错、不重建会话
+				noSessionIsSilent = table.acceptChunk(0, goodBytes.length, firstChunk) == ChunkResult.NO_UPLOAD;
+
+				// ⑪ 输出槽有物品：不能开会话（也不能把输入表吃掉）
+				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT, new ItemStack(Items.STONE));
-				busyResult = table.startImport(goodName, registries);
+				busyResult = table.startUpload(null, goodName, goodBytes.length);
 				outputBusyRejected = busyResult == StartResult.OUTPUT_BUSY
 					&& !table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT)
 						.isEmpty()
@@ -6759,62 +6845,92 @@ public class SequencedArmSelfTest {
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT, ItemStack.EMPTY);
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT, ItemStack.EMPTY);
 
-				// ⑤ 写入失败就不写：这条在真机上**不可达**（文本在开始时已过同一道上限），只能从
-				//    beginImport 这道门把"超限文本"喂进去 —— 验的是 finishImport 里对 StoreResult 的判断。
-				table.beginImport("selftest_import_huge", "x".repeat(ProgramText.MAX_BYTES + 1));
-				for (int tick = 0; tick < ProgramImportTableBlockEntity.IMPORT_TICKS; tick++)
-					table.tick();
-				failedWriteLeavesEmpty = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT)
-					.isEmpty() && !table.isImporting;
+				// ⑫ 收满但**写不下**就不写：8 片全是非法 UTF-8 单字节（0x80）⇒ 解码成 U+FFFD 之后
+				//    重新编码是 3 倍长度，于是"收到的字节没超"而"要写进卡的文本超了"。
+				//    这是 completeUpload 里那道 withinLimit 的**唯一真实触发路径**（没有测试专用门）。
+				int total = ProgramText.MAX_BYTES;
+				int per = total / ProgramImportTableBlockEntity.MAX_CHUNKS;
+				byte[] garbage = new byte[per];
+				Arrays.fill(garbage, (byte) 0x80);
+				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
+				table.startUpload(null, "selftest_import_garbage", total);
+				ChunkResult garbageResult = ChunkResult.ACCEPTED;
+				for (int seq = 0; seq < ProgramImportTableBlockEntity.MAX_CHUNKS; seq++)
+					garbageResult = table.acceptChunk(seq, total, garbage);
+				noCardWhenUnwritable = garbageResult == ChunkResult.TOO_LARGE
+					&& table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT)
+						.isEmpty()
+					&& !table.isImporting;
 			}
 		} finally {
 			level.setBlockAndUpdate(tablePos, oldState);
 			try {
 				Files.deleteIfExists(goodFile);
-				Files.deleteIfExists(badFile);
 			} catch (IOException failed) {
 				LOGGER.warn("[selftest] 操作导入桌：删不掉自检产生的脚本（{}），手动删一下", failed.toString());
 			}
 		}
 
 		if (!emptyInputRejected)
-			problems.add("没有输入操作表时也开始了导入（应当拒绝）");
+			problems.add("没有输入操作表时也开始了上传（应当拒绝）");
 		if (!notBlankRejected)
-			problems.add("输入槽那张表里已经有程序，却还是开始了导入（应当拒绝）");
-		if (!progressMoved)
-			problems.add("进度没有从 0 往前推进（tick 里那一句加法或 isImporting 的判定有问题）");
+			problems.add("输入槽那张表里已经有程序，却还是开始了上传（应当拒绝）");
+		if (!oneSessionAtATime)
+			problems.add("同一张桌子开了两个上传会话（一桌一会话这条被破坏了）");
+		if (!listed)
+			problems.add("脚本列表里找不到刚写下去的脚本（list() 的过滤/排序有问题）");
+		if (!localReadable)
+			problems.add("本机读取没有把文件原样交出来（read 的 BOM / 字节 / 文本有问题）");
+		if (!halfChunkAccepted)
+			problems.add("第一片没有被接收（acceptChunk 的片序 / 总量 / 大小判定有问题）");
+		if (!byteProgress)
+			problems.add("进度不是「已收字节 / 总字节」：收了半片之后 uploadReceived / uploadProgress 不对");
 		if (!producedWithProgram)
-			problems.add("IMPORT_TICKS 之后输出槽里没有一张带程序的操作表（tick 跑完：isImporting=" + stillImporting
-				+ " 进度=" + progressAfterTicks + "；进度仍 < 1 = 没走完，不是写失败）");
+			problems.add("收满之后输出槽里没有一张带程序的操作表（最后一片的结局=" + lastChunkResult + "）");
 		if (!textMatchesFile)
 			problems.add("输出那张操作表里的文本与文件内容不一致");
 		if (!inputConsumed)
-			problems.add("开始导入之后输入槽没有清空（输入会被导入两次）");
+			problems.add("开会话之后输入槽没有清空（输入会被导入两次）");
 		if (!importStopped)
-			problems.add("完成之后 isImporting / 进度没有归位（会一直循环完成）：isImporting=" + stillImporting
-				+ " 进度=" + progressAfterTicks);
-		if (!missingRejected)
-			problems.add("不存在的文件没有被拒（startImport 返回 " + missingResult + "，应为 NOT_FOUND）");
-		if (!compileRejected)
-			problems.add("编译不过的脚本没有被拒（startImport 返回 " + compileResult + "，应为 DOES_NOT_COMPILE）");
+			problems.add("收满之后 isImporting / 已收字节没有归位（会一直循环完成）");
+		if (!outOfOrderRejected)
+			problems.add("乱序片没有被拒（应当中止会话，而不是把它拼进文本）");
+		if (!totalMismatchRejected)
+			problems.add("片里的总字节与开会话时声明的不一致却没有被拒（另一次上传的片能拼进来）");
+		if (!overflowRejected)
+			problems.add("超过声明总量的片没有被拒（会话会一直吃字节）");
+		if (!tooLargeAtStartRejected)
+			problems.add("声明总量超过上限却没有被拒（startUpload 返回 " + tooLargeResult
+				+ "）：一个永远收不满的会话会挂到超时");
+		if (!emptyFileRejected)
+			problems.add("空脚本（声明总量 0）没有被拒：它一片都不会来，只会等到超时");
 		if (!rejectedKeepsInput)
 			problems.add("被拒之后输入槽里的空白操作表被消耗掉了");
+		if (!compileKeepsOutputEmpty)
+			problems.add("编译不过的脚本还是产生了输出（最后一片应当 DOES_NOT_COMPILE 且输出槽为空）");
+		if (!timeoutDrops)
+			problems.add("开会话之后一片都不来，静默超时却没有把会话丢掉（桌子会永远卡在「正在导入」）");
+		if (!noSessionIsSilent)
+			problems.add("没有会话时的片没有返回 NO_UPLOAD（包那一侧会把同一件事重复报好几遍）");
 		if (!outputBusyRejected)
-			problems.add("输出槽有物品时还是开始了导入（startImport 返回 " + busyResult
+			problems.add("输出槽有物品时还是开了会话（startUpload 返回 " + busyResult
 				+ "，应为 OUTPUT_BUSY —— 产出会顶掉玩家的东西）");
-		if (!failedWriteLeavesEmpty)
-			problems.add("写入失败（StoreResult != OK）之后输出槽里仍然出现了东西 —— 一张空卡比什么都没有更糟");
+		if (!noCardWhenUnwritable)
+			problems.add("拼出来的文本超过上限之后输出槽里仍然出现了东西 —— 一张空卡比什么都没有更糟");
 		if (!filterOk)
 			problems.add("输入槽过滤没有拒绝「已经有程序的操作表」");
-		if (!listed)
-			problems.add("脚本列表里找不到刚写下去的脚本（list() 的过滤/排序有问题）");
 
-		LOGGER.info("[selftest] 操作导入桌: 空输入被拒={} 非空白输入被拒={} 输入槽过滤={} 进度推进={} "
-			+ "产出带程序={} 文本与文件一致={} 输入被消耗={} 完成后归位={} 文件不存在被拒={} 编译不过被拒={} "
-			+ "拒收不消耗={} 输出槽占用被拒={} 写失败不写={} 列表里有它={} 时长={}tick （目录={}）", emptyInputRejected,
-			notBlankRejected, filterOk, progressMoved, producedWithProgram, textMatchesFile, inputConsumed, importStopped,
-			missingRejected, compileRejected, rejectedKeepsInput, outputBusyRejected, failedWriteLeavesEmpty, listed,
-			ProgramImportTableBlockEntity.IMPORT_TICKS, dir);
+		LOGGER.info("[selftest] 操作导入桌: 空输入被拒={} 非空白输入被拒={} 一桌一会话={} 列表里有它={} 本机读得出={} "
+			+ "前多半片={} 字节进度={} 产出带程序={} 文本与文件一致={} 输入被消耗={} 完成后归位={} 乱序被拒={} "
+			+ "片里总量不一致被拒={} 超量被拒={} 开始就超上限被拒={} 空文件被拒={} 拒收不消耗={} 编译不过被拒={} "
+			+ "超时丢弃={} 无会话静默={} 输出槽占用被拒={} 收满但写不下就不写={} （片上限={} 字节，最多 {} 片，"
+			+ "静默超时={} tick，目录={}）", emptyInputRejected, notBlankRejected, oneSessionAtATime, listed,
+			localReadable, halfChunkAccepted, byteProgress, producedWithProgram, textMatchesFile, inputConsumed,
+			importStopped, outOfOrderRejected, totalMismatchRejected, overflowRejected, tooLargeAtStartRejected,
+			emptyFileRejected, rejectedKeepsInput, compileKeepsOutputEmpty, timeoutDrops, noSessionIsSilent,
+			outputBusyRejected, noCardWhenUnwritable, ProgramImportTableBlockEntity.CHUNK_BYTES,
+			ProgramImportTableBlockEntity.MAX_CHUNKS, ProgramImportTableBlockEntity.UPLOAD_TIMEOUT_TICKS, dir);
 		for (String problem : problems)
 			LOGGER.error("[selftest] 操作导入桌：{}", problem);
 	}

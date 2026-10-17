@@ -25,10 +25,10 @@ import net.neoforged.neoforge.items.SlotItemHandler;
  * {@code menu.getSlot(1).hasItem()} 判"导入完成"（与上游 {@code SchematicTableScreen:148} 同一个判据），
  * 所以 1 号槽必须是输出槽，插槽顺序不能调。
  *
- * <p><b>输入槽只收空白表</b>：这张桌子产出的是**一张新卡**（{@code ProgramImportTableBlockEntity.finishImport}），
+ * <p><b>输入槽只收空白表</b>：这张桌子产出的是**一张新卡**（{@code ProgramImportTableBlockEntity.completeUpload}），
  * 如果把玩家用过的卡也能塞进去，导入就变成了"静默覆盖你原来的程序" —— 那不是这个方块该干的事
  * （要清空有别的入口）。注意这条过滤只是<b>玩家那一侧</b>的方便：服务端在
- * {@code startImport} 里会再判一次，因为漏斗/管道不走 {@code mayPlace}。
+ * {@code startUpload} 里会再判一次，因为漏斗/管道不走 {@code mayPlace}。
  */
 public class ProgramImportTableMenu extends MenuBase<ProgramImportTableBlockEntity> {
 
@@ -66,7 +66,7 @@ public class ProgramImportTableMenu extends MenuBase<ProgramImportTableBlockEnti
 	/**
 	 * 上游同款：输入有东西 + 输出空格。
 	 *
-	 * <p>界面用它只是"按钮亮不亮"的参考 —— **真正的裁决在服务端**（{@code startImport}）。
+	 * <p>界面用它只是"按钮亮不亮"的参考 —— **真正的裁决在服务端**（{@code startUpload}）。
 	 * 客户端不拿它拦请求：拦下来的话玩家点了没反应、也不知道为什么（回执比灰按钮有用）。
 	 */
 	public boolean canWrite() {

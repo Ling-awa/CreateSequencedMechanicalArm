@@ -54,7 +54,8 @@ public record ExportScriptResultPacket(String name, String text) implements Cust
 	 *
 	 * <p>⚠️ 与其它 {@code playToClient} 处理器一样**不能加 `@OnlyIn(Dist.CLIENT)`**
 	 * （{@code RuntimeDistCleaner} 会把这个方法摘掉，而注册是双端的 ⇒ 专用服务端
-	 * {@code NoSuchMethodError}，见 {@code ProgramImportListPacket.handle} 的注释）。
+	 * {@code NoSuchMethodError}；2026-10 实测踩过，那条教训现在写在
+	 * {@code network/SequencedArmNetwork} 的类注释里 —— 那三个旧包已经删了）。
 	 * 方法体里引用客户端类是安全的：它只会在客户端被调用。
 	 */
 	public static void handle(ExportScriptResultPacket packet, IPayloadContext context) {
