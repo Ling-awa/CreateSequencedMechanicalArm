@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "group": "create_sequenced_mechanical_arm_operation_table",
+  "ingredients": [
+    {
+      "item": "create_sequenced_mechanical_arm:operation_table_relative"
+    },
+    {
+      "item": "create_sequenced_mechanical_arm:operation_table_relative"
+    }
+  ],
+  "result": {
+    "id": "create_sequenced_mechanical_arm:operation_table_relative",
+    "count": 1
+  }
+}
