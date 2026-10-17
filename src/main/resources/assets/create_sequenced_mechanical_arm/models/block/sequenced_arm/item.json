@@ -1,5 +1,4 @@
 {
-	"format_version": "26.3",
 	"credit": "Made with Blockbench",
 	"parent": "block/block",
 	"textures": {
@@ -8,7 +7,6 @@
 		"6": "create_sequenced_mechanical_arm:block/sequenced_arm_pulley",
 		"7": "create_sequenced_mechanical_arm:block/sequenced_arm_brass",
 		"8": "create_sequenced_mechanical_arm:block/sequenced_arm_casing",
-		"9": "create_sequenced_mechanical_arm:block/redstone_antenna",
 		"particle": "create_sequenced_mechanical_arm:block/sequenced_arm_casing"
 	},
 	"elements": [
@@ -30,6 +28,7 @@
 			"name": "Gear6",
 			"from": [6.5, -10, -1],
 			"to": [9.5, -6, 17],
+			"neoforge_data": {"calculate_normals": true},
 			"rotation": {"angle": 45, "axis": "y", "origin": [8, -8, 8]},
 			"faces": {
 				"north": {"uv": [13, 5.5, 15, 7], "rotation": 90, "texture": "#4"},
@@ -58,6 +57,7 @@
 			"name": "Gear8",
 			"from": [-1, -10, 6.5],
 			"to": [17, -6, 9.5],
+			"neoforge_data": {"calculate_normals": true},
 			"rotation": {"angle": 45, "axis": "y", "origin": [8, -8, 8]},
 			"faces": {
 				"north": {"uv": [13, 7, 15, 16], "rotation": 90, "texture": "#4"},
@@ -125,6 +125,7 @@
 			"name": "Arm 1",
 			"from": [6.5, -3, 5.5],
 			"to": [9.5, 13, 10.5],
+			"neoforge_data": {"calculate_normals": true},
 			"rotation": {"angle": 45, "axis": "x", "origin": [8, -2, 8]},
 			"faces": {
 				"north": {"uv": [0, 0, 1.5, 8], "texture": "#5"},
@@ -225,29 +226,6 @@
 				"up": {"uv": [7, 8, 9.5, 5.5], "texture": "#5"},
 				"down": {"uv": [7, 3, 9.5, 5.5], "texture": "#5"}
 			}
-		},
-		{
-			"name": "Dish",
-			"from": [0, 1, 8],
-			"to": [5, 1, 13],
-			"rotation": {"angle": 0, "axis": "y", "origin": [1, -6, 6]},
-			"faces": {
-				"up": {"uv": [4, 0, 9, 5], "texture": "#9"},
-				"down": {"uv": [4, 0, 9, 5], "texture": "#9"}
-			}
-		},
-		{
-			"from": [2, -5, 10],
-			"to": [3, 4, 11],
-			"rotation": {"angle": 0, "axis": "y", "origin": [2, -4, 10]},
-			"faces": {
-				"north": {"uv": [1, 1, 2, 10], "texture": "#9"},
-				"east": {"uv": [1, 1, 2, 10], "texture": "#9"},
-				"south": {"uv": [1, 1, 2, 10], "texture": "#9"},
-				"west": {"uv": [1, 1, 2, 10], "texture": "#9"},
-				"up": {"uv": [1, 1, 2, 2], "texture": "#9"},
-				"down": {"uv": [1, 9, 2, 10], "texture": "#9"}
-			}
 		}
 	],
 	"display": {
@@ -294,20 +272,17 @@
 		{
 			"name": "Base",
 			"origin": [8, 8, 8],
-			"scope": 0,
 			"color": 0,
 			"children": [
 				{
 					"name": "cogwheel",
 					"origin": [8, 8, 8],
-					"scope": 0,
 					"color": 0,
 					"children": [0, 1, 2, 3, 4]
 				},
 				{
 					"name": "Base Pivot",
 					"origin": [8, 2, 5],
-					"scope": 0,
 					"color": 0,
 					"children": [5, 6]
 				},
@@ -317,14 +292,12 @@
 		{
 			"name": "Arm 1",
 			"origin": [8, 8, 8],
-			"scope": 0,
 			"color": 0,
 			"children": [
 				8,
 				{
 					"name": "Arm 2",
 					"origin": [8, 8, 8],
-					"scope": 0,
 					"color": 0,
 					"children": [
 						9,
@@ -332,15 +305,12 @@
 						{
 							"name": "Hand",
 							"origin": [8, 8, 8],
-							"scope": 0,
 							"color": 0,
 							"children": [11, 12, 13, 14, 15]
 						}
 					]
 				}
 			]
-		},
-		16,
-		17
+		}
 	]
 }

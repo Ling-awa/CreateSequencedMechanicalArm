@@ -3,7 +3,12 @@ package io.github.Ling.create_sequenced_mechanical_arm.client;
 import dev.engine_room.flywheel.lib.model.baked.PartialModel;
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 
+import net.minecraft.client.resources.model.ModelResourceLocation;
 import net.minecraft.resources.ResourceLocation;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.ModelEvent;
 
 /**
  * 本模组**自己的**动态渲染部件（partial models）—— 只有臂的渲染真的用到的那 8 个
@@ -40,11 +45,30 @@ import net.minecraft.resources.ResourceLocation;
  *   <li>{@code ArmIcons} 的物品图标不属于渲染部件，不在本类范围。</li>
  * </ul>
  *
+ * <h2>⚠ 必须自己注册，否则<b>全部部件都会变成"缺失模型"</b></h2>
+ * 这 8 个 json 不被任何 {@code blockstates/*.json} 或物品模型引用，而 1.21.1 的
+ * {@code ModelBakery} <b>只烘焙"顶层模型"</b>：方块状态模型 + 物品模型 + 通过
+ * {@code ModelEvent.RegisterAdditional} 显式登记的模型（见 {@code ModelBakery} 构造器
+ * {@code ClientHooks.onRegisterAdditionalModels} 那一支 + {@code bakeModels} 只遍历
+ * {@code topLevelModels}）。没登记的 json <b>能解析但永远不会被烘焙</b>，
+ * 于是 {@code ModelManager.getModel(standalone(...))} 静默返回 {@code missingModel}：
+ * 臂的每一节都画成一整块"紫黑缺失贴图"，而且<b>日志里一个字都不会有</b>。
+ *
+ * <p>所以本枚举用 {@link #registerAdditional} 把这 8 个
+ * {@link ModelResourceLocation#standalone} 登记进 {@code RegisterAdditional}。
+ * 直接照 {@code create:block/mechanical_arm/*} 写而不登记是不行的 —— 上游那 8 个不是靠
+ * {@code blockstates} 进烘焙的：Create 自己一个 {@code RegisterAdditional} 监听都没有，
+ * 它们只由 Flywheel 的 {@code PartialModel} 体系登记（间接证据：{@code CreateClient} 的
+ * {@code clientInit} 里那句 {@code AllPartialModels.init()}，注释就是"init static fields"，
+ * 目的就是先把类初始化、让 {@code PartialModel.of(...)} 都跑过一遍，才轮得到烘焙）。
+ * 我们自己登记一份就不必赌那套内部的登记时机。
+ *
  * <p>{@link #location} 由本枚举自己记一份：{@code PartialModel} 的访问器叫什么名字没有从 dump 里核到，
  * 我们自己存着就不用赌那个 API（渲染只需要 {@link #model}）。
  * 模型路径 = {@code <modid>:block/sequenced_arm/<文件名>}，与 {@code blockstates/sequenced_arm.json}
  * 引用的静态模型同目录（{@code block/sequenced_arm/block}），用户一个目录里就能改全套。
  */
+@EventBusSubscriber(modid = Create_sequenced_mechanical_arm.MODID, bus = EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
 public enum ModPartialModels {
 
 	ARM_COG("cog"),
@@ -66,6 +90,23 @@ public enum ModPartialModels {
 		this.location = ResourceLocation.fromNamespaceAndPath(Create_sequenced_mechanical_arm.MODID,
 			"block/sequenced_arm/" + path);
 		this.model = PartialModel.of(location);
+	}
+
+	/**
+	 * 把这 8 个模型登记为"顶层模型"，否则它们不会被烘焙（详见类注释）。
+	 *
+	 * <p>必须用 {@link ModelResourceLocation#standalone}：{@code RegisterAdditional.register}
+	 * 会对 variant 做断言（只接受 {@code "standalone"}），而
+	 * {@code PartialModel.of(ResourceLocation)} / {@code CachedBuffers.partial(...)}
+	 * 查的也正是这个 standalone 键。
+	 *
+	 * <p>顺带解决了初始化时机：{@code values()} 在这里才第一次真正跑 {@code PartialModel.of(...)}，
+	 * 而本事件在 {@code ModelBakery} 构造期间、烘焙之前派发 —— 正好赶在 {@code bakeModels()} 前面。
+	 */
+	@SubscribeEvent
+	public static void registerAdditional(ModelEvent.RegisterAdditional event) {
+		for (ModPartialModels partial : values())
+			event.register(ModelResourceLocation.standalone(partial.location));
 	}
 
 }
