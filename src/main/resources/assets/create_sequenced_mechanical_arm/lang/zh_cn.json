@@ -1,7 +1,7 @@
 {
   "itemGroup.create_sequenced_mechanical_arm": "机械动力：可编程动力臂",
   "block.create_sequenced_mechanical_arm.sequenced_arm": "可编程动力臂",
-  "item.create_sequenced_mechanical_arm.operation_table_relative": "操作表",
+  "item.create_sequenced_mechanical_arm.operation_table": "操作表",
   "item.create_sequenced_mechanical_arm.operation_record": "操作记录表",
   "create_sequenced_mechanical_arm.card.status.record": "录入模式 · 任务 %s「%s」 · 操作：%s",
   "create_sequenced_mechanical_arm.card.status.edit": "编辑模式 · 任务 %s「%s」 · 右键方块打开编辑器 · Alt+滚轮换任务",

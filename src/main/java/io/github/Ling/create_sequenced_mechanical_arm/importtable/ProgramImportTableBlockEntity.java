@@ -288,7 +288,7 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 			LOGGER.error("{} 的导入没有待写入的文本（状态机不该走到这里），输出槽保持空", worldPosition);
 			return;
 		}
-		ItemStack out = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack out = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.StoreResult stored = CardProgramStorage.writeText(out, text);
 		if (stored != CardProgramStorage.StoreResult.OK) {
 			LOGGER.error("{} 的导入结果无法写入操作表（{}，{} 字节），输出槽保持空 —— 输入那张空白表已经消耗",

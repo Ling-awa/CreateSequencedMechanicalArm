@@ -1373,7 +1373,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		task.entries.add(entry);
 		program.tasks.add(task);
 
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, program, registries);
 		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
 		ItemStack.STREAM_CODEC.encode(buffer, card);
@@ -3599,7 +3599,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		two.editorTask = 1;
 		two.editorMode = CardUiPacket.EDIT;
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, two, registries);
 		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
 		ItemStack.STREAM_CODEC.encode(buffer, card);
@@ -3614,7 +3614,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static boolean emptyProgramStartsOnTasks(Inventory inventory, RegistryAccess registries) {
 		ArmProgram empty = new ArmProgram();
 		empty.editorMode = CardUiPacket.EDIT;
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, empty, registries);
 		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
 		ItemStack.STREAM_CODEC.encode(buffer, card);
@@ -3640,7 +3640,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		program.editorTask = 1; // 当前任务是第 2 个
 		program.editorMode = CardUiPacket.EDIT;
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, program, registries);
 		CardProgramStorage.writeView(card, new CardProgramStorage.View(3, CardProgramStorage.PAGE_ENTRIES, 40f, 12f));
 		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
@@ -3709,7 +3709,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			plainTake.note = "放铲子进去然后等 5 秒再把东西取回来（这条是自检用的长备注，用来把备注胶囊顶到最宽）";
 			task.entries.add(0, plainTake);
 
-			ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+			ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 			CardProgramStorage.write(card, program, registries);
 			RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
 			ItemStack.STREAM_CODEC.encode(buffer, card);

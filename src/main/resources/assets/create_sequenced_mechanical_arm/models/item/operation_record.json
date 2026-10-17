@@ -1,6 +1,9 @@
 {
-  "parent": "minecraft:item/generated",
-  "textures": {
-    "layer0": "create_sequenced_mechanical_arm:item/operation_record"
-  }
+	"format_version": "26.3",
+	"credit": "Made with Blockbench",
+	"parent": "minecraft:item/generated",
+	"textures": {
+		"layer0": "create_sequenced_mechanical_arm:item/operation_record"
+	},
+	"display": {}
 }

@@ -42,7 +42,7 @@ public class Create_sequenced_mechanical_arm {
             .icon(() -> SequencedArmRegistration.SEQUENCED_ARM_ITEM.get().getDefaultInstance())
             .displayItems((parameters, output) -> {
                 output.accept(SequencedArmRegistration.SEQUENCED_ARM_ITEM.get());
-                output.accept(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+                output.accept(SequencedArmRegistration.OPERATION_TABLE.get());
                 // 操作记录表（上传用：手持 + 潜行右键一条臂 ⇒ 导出脚本文件）
                 output.accept(SequencedArmRegistration.OPERATION_RECORD.get());
                 // 操作导入桌（反方向：把 run/sequenced_arm/scripts/*.sma 变成一张操作表）

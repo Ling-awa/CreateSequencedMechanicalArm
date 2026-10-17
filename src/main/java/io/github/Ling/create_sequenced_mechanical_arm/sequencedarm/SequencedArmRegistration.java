@@ -59,9 +59,13 @@ public class SequencedArmRegistration {
 	// 没有意义了。
 	// ⚠️ 原来那个 `operation_table_absolute` 的**注册 id 刻意不再保留**：用户已确认不做老数据兼容，
 	//    老存档里的绝对卡会变成"未知物品"（这是 P1 明确接受的一次性代价）。
+	// 注册 id 与常量名里的 relative 后缀已去掉：现在是 `operation_table` / OPERATION_TABLE。
+	// 为什么去掉 relative：现在**只有一种**操作表，名字里的 relative 已无意义（当初它只是为了跟
+	// 已删除的"绝对卡"配对），留着只会让人以为还有另一种表。
+	// 不做老存档兼容：老存档里旧 id 的物品会变成未知物品（与上面 absolute 的处理一致，用户已确认）。
 
-	public static final DeferredItem<OperationTableItem> OPERATION_TABLE_RELATIVE =
-		ITEMS.register("operation_table_relative",
+	public static final DeferredItem<OperationTableItem> OPERATION_TABLE =
+		ITEMS.register("operation_table",
 			() -> new OperationTableItem(new Item.Properties().stacksTo(1)));
 
 	// ——— 操作记录表 ———

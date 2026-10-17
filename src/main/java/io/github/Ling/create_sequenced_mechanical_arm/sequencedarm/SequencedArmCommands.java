@@ -121,7 +121,7 @@ public class SequencedArmCommands {
 			return 0;
 		}
 		ArmProgram program = preset.get();
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, program, source.registryAccess());
 		if (!CardProgramStorage.hasProgram(card)) {
 			source.sendFailure(Component.literal("预设存不进卡片（转成脚本文本失败或超限）"));

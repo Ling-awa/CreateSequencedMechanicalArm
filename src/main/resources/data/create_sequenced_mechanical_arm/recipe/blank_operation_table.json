@@ -4,11 +4,11 @@
   "group": "create_sequenced_mechanical_arm_operation_table",
   "ingredients": [
     {
-      "item": "create_sequenced_mechanical_arm:operation_table_relative"
+      "item": "create_sequenced_mechanical_arm:operation_table"
     }
   ],
   "result": {
-    "id": "create_sequenced_mechanical_arm:operation_table_relative",
+    "id": "create_sequenced_mechanical_arm:operation_table",
     "count": 1
   }
 }

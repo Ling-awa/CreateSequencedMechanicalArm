@@ -1,0 +1,9 @@
+{
+	"format_version": "26.3",
+	"credit": "Made with Blockbench",
+	"parent": "minecraft:item/generated",
+	"textures": {
+		"0": "create_sequenced_mechanical_arm:item/operation_table",
+		"particle": "create_sequenced_mechanical_arm:item/operation_table"
+	}
+}

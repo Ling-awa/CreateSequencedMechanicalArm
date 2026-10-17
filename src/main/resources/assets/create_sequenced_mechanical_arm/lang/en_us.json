@@ -1,7 +1,7 @@
 {
   "itemGroup.create_sequenced_mechanical_arm": "Create: Sequenced Mechanical Arm",
   "block.create_sequenced_mechanical_arm.sequenced_arm": "Sequenced Mechanical Arm",
-  "item.create_sequenced_mechanical_arm.operation_table_relative": "Operation Table",
+  "item.create_sequenced_mechanical_arm.operation_table": "Operation Table",
   "item.create_sequenced_mechanical_arm.operation_record": "Operation Record Table",
   "create_sequenced_mechanical_arm.card.status.record": "Recording - task %s \"%s\" - operation: %s",
   "create_sequenced_mechanical_arm.card.status.edit": "Editing - task %s \"%s\" - use a block to open the editor, Alt+scroll to switch task",

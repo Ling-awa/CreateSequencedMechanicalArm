@@ -478,7 +478,7 @@ public class SequencedArmSelfTest {
 		ArmProgram program = DevPresets.mainWithSubTasks();
 
 		// ① 卡片：盘上是 ArmProgramText（String），没有旧的 ArmProgram（Compound）
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.StoreResult stored = CardProgramStorage.write(card, program, registries);
 		CustomData data = card.get(DataComponents.CUSTOM_DATA);
 		CompoundTag cardRoot = data == null ? new CompoundTag() : data.copyTag();
@@ -495,7 +495,7 @@ public class SequencedArmSelfTest {
 			problems.add("卡片上的文本编译回来与原文不一致");
 
 		// ② 旧格式的卡（编译结果在盘上）：**不许**被当成有程序
-		ItemStack legacyCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack legacyCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CompoundTag legacyRoot = new CompoundTag();
 		legacyRoot.put("ArmProgram", program.save(registries));
 		legacyCard.set(DataComponents.CUSTOM_DATA, CustomData.of(legacyRoot));
@@ -518,7 +518,7 @@ public class SequencedArmSelfTest {
 		ScriptResult<ArmProgram> strict = ScriptCompiler.compile(ScriptCompiler.decompile(dangling, registries),
 			registries);
 		boolean compilerRejectsButKeeps = strict.hasErrors() && strict.value() != null;
-		ItemStack danglingCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack danglingCard = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(danglingCard, dangling, registries);
 		ArmProgram danglingBack = CardProgramStorage.read(danglingCard, registries);
 		boolean danglingKept = danglingBack.tasks.size() == 1
@@ -1708,7 +1708,7 @@ public class SequencedArmSelfTest {
 		session.editorMode = "EDIT";
 		session.editorTask = 2;
 
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, session, registries);
 		ArmProgram back = CardProgramStorage.read(card, registries);
 		boolean modeKept = "EDIT".equals(back.editorMode);
@@ -1726,7 +1726,7 @@ public class SequencedArmSelfTest {
 		//    但"正在编辑的任务"要按**新程序**的任务数夹住（新脚本可能只有一个任务）。
 		//    §17.9 的回归就是死在这里没被测到 —— 这条断言是补上的那一半。
 		session.editorTask = 2;
-		ItemStack imported = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack imported = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(imported, session, registries);
 		ArmProgram shorter = new ArmProgram();
 		ArmProgramTask onlyTask = new ArmProgramTask();
@@ -1764,7 +1764,7 @@ public class SequencedArmSelfTest {
 			&& dirtyBack.scroll() == 0f && dirtyBack.taskScroll() == 0f;
 		// 从没打开过编辑器的新卡 ⇒ 默认值（不是"读出一个空指针"那种惊喜）
 		boolean viewDefault = CardProgramStorage
-			.readView(new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()))
+			.readView(new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()))
 			.equals(CardProgramStorage.View.DEFAULT);
 
 		LOGGER.info("[selftest] 浏览位置（§18）: 存得住={} 不动程序={} 脏数据被过滤={} 新卡取默认={} （指针={} 页={} 滚动={}/{}）",
@@ -3287,7 +3287,7 @@ public class SequencedArmSelfTest {
 		HolderLookup.Provider registries = server.registryAccess();
 
 		ArmProgram source = DevPresets.depotAB();
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		CardProgramStorage.write(card, source, registries);
 		boolean stored = CardProgramStorage.hasProgram(card);
 		ArmProgram readBack = CardProgramStorage.read(card, registries);
@@ -3370,7 +3370,7 @@ public class SequencedArmSelfTest {
 		int compared = 0;
 		String detail = "";
 
-		ItemStack loadable = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack loadable = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		ArmProgram onCard = DevPresets.depotAB();
 		CardProgramStorage.write(loadable, onCard, registries);
 		// 卡上的原点（**卡级**属性，用户第四十轮）故意设成一个**与两条臂都不同**的位置：只要有人
@@ -3624,7 +3624,7 @@ public class SequencedArmSelfTest {
 		edited.tasks.get(0).entries.get(0).delay = 37;
 		edited.tasks.get(0).loopCount = 7;
 		edited.tasks.get(0).loop = ArmProgramTask.LoopType.COUNT;
-		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		// 卡上先设一个**非零**原点：编辑器保存（整份程序 → NBT → 文本）**绝不能**把它顶掉或丢掉
 		// —— 用户第四十轮把原点搬上卡，这条正是那个"搬家"的落点。
 		CardProgramStorage.writeOrigin(card, new BlockPos(30, 66, -12));
@@ -5054,7 +5054,7 @@ public class SequencedArmSelfTest {
 			// 第 3 行故意**预先勾上**：它是"还没轮到"的行，按规则不该被我们碰
 			ItemStack clipboard = clipboardWith(lines, false, 2);
 			ServerPlayer probe = FakePlayerFactory.getMinecraft(level);
-			probe.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()));
+			probe.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
 			probe.setItemInHand(InteractionHand.OFF_HAND, clipboard);
 			ItemStack card = probe.getMainHandItem();
 			// ★ 这张卡的录制基准 = 世界原点（用户第四十轮起原点是**卡级**属性）：**必须显式设**，
@@ -6672,7 +6672,7 @@ public class SequencedArmSelfTest {
 					&& !table.isImporting;
 
 				// ①b 非空白输入：一张**已经有程序**的表也不能当输入（输入槽过滤与服务端判定两处都要拦）
-				ItemStack used = new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
+				ItemStack used = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 				CardProgramStorage.writeText(used, goodText);
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT, used);
 				notBlankRejected = table.startImport(goodName, registries) == StartResult.NOT_BLANK
@@ -6680,14 +6680,14 @@ public class SequencedArmSelfTest {
 					&& !table.isImporting;
 				filterOk = !ProgramImportTableMenu.isAcceptedInput(used)
 					&& ProgramImportTableMenu.isAcceptedInput(new ItemStack(
-						SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()));
+						SequencedArmRegistration.OPERATION_TABLE.get()));
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT, ItemStack.EMPTY);
 
 				// ② 成功路径：进度从 0 推进 → IMPORT_TICKS 之后输出槽出现一张**带程序**的表，文本与文件逐字相同
 				listed = ProgramImportFiles.list()
 					.contains(goodName);
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
-					new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()));
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
 				boolean started = table.startImport(goodName, registries) == StartResult.STARTED;
 				boolean fromZero = table.isImporting && table.importProgress == 0f;
 				table.tick();
@@ -6698,7 +6698,7 @@ public class SequencedArmSelfTest {
 				stillImporting = table.isImporting;
 				progressAfterTicks = table.importProgress;
 				ItemStack produced = table.inventory.getStackInSlot(ProgramImportTableBlockEntity.SLOT_OUTPUT);
-				producedWithProgram = produced.getItem() == SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()
+				producedWithProgram = produced.getItem() == SequencedArmRegistration.OPERATION_TABLE.get()
 					.asItem() && CardProgramStorage.hasProgram(produced);
 				String fromFile = null;
 				try {
@@ -6714,7 +6714,7 @@ public class SequencedArmSelfTest {
 
 				// ③ 文件不存在 / 编译不过：拒绝，而且**输入槽里那张空白表还在**
 				table.inventory.setStackInSlot(ProgramImportTableBlockEntity.SLOT_INPUT,
-					new ItemStack(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get()));
+					new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get()));
 				missingRejected = (missingResult = table.startImport(missingName, registries)) == StartResult.NOT_FOUND;
 				compileResult = table.startImport(badName, registries);
 				compileRejected = compileResult == StartResult.DOES_NOT_COMPILE
