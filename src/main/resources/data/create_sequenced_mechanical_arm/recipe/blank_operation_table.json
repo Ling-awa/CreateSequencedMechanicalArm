@@ -5,9 +5,6 @@
   "ingredients": [
     {
       "item": "create_sequenced_mechanical_arm:operation_table_relative"
-    },
-    {
-      "item": "create_sequenced_mechanical_arm:operation_table_relative"
     }
   ],
   "result": {
