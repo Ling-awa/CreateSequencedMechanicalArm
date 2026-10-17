@@ -260,6 +260,7 @@
   "create_sequenced_mechanical_arm.gui.record.confirm": "保存",
   "create_sequenced_mechanical_arm.gui.record.cancel": "取消",
   "create_sequenced_mechanical_arm.gui.record.name_hint": "文件名：1-32 个中英文、数字、下划线或连字符（同名不覆盖）",
+  "create_sequenced_mechanical_arm.gui.record.name_invalid": "名字不合法 —— 只能用中英文、数字、_ 或 -",
   "create_sequenced_mechanical_arm.record.written": "已导出到 %s",
   "create_sequenced_mechanical_arm.record.need_item": "主手请拿一张操作记录表",
   "create_sequenced_mechanical_arm.record.no_arm": "上传的目标必须是可编程动力臂",
