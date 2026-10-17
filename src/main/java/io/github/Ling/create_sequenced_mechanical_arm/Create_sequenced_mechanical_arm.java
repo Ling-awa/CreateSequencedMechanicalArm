@@ -45,6 +45,8 @@ public class Create_sequenced_mechanical_arm {
                 output.accept(SequencedArmRegistration.OPERATION_TABLE_RELATIVE.get());
                 // 操作记录表（上传用：手持 + 潜行右键一条臂 ⇒ 导出脚本文件）
                 output.accept(SequencedArmRegistration.OPERATION_RECORD.get());
+                // 操作导入桌（反方向：把 run/sequenced_arm/scripts/*.sma 变成一张操作表）
+                output.accept(SequencedArmRegistration.PROGRAM_IMPORT_TABLE_ITEM.get());
             })
             .build());
 

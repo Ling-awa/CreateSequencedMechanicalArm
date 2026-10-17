@@ -1,6 +1,9 @@
 package io.github.Ling.create_sequenced_mechanical_arm.sequencedarm;
 
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
+import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableBlock;
+import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableBlockEntity;
+import io.github.Ling.create_sequenced_mechanical_arm.importtable.ProgramImportTableMenu;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationRecordItem;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.menu.ArmProgramMenu;
@@ -10,6 +13,7 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
@@ -81,6 +85,30 @@ public class SequencedArmRegistration {
 	/** 操作表编辑器菜单（PLAN.md §5.2）。客户端实例靠 extraData 里的卡片物品构造。 */
 	public static final DeferredHolder<MenuType<?>, MenuType<ArmProgramMenu>> ARM_PROGRAM_MENU =
 		MENUS.register("arm_program", () -> IMenuTypeExtension.create(ArmProgramMenu::new));
+
+	// ——— 操作导入桌（第 2 片：把 run/sequenced_arm/scripts/*.sma 导入成一张操作表）———
+	// 方块属性**照抄 Create 的蓝图桌**（AllBlocks.SCHEMATIC_TABLE：initialProperties(LECTERN) +
+	// mapColor(PODZOL) + forceSolidOn），因为界面与形状都是借它那套。
+	public static final DeferredBlock<ProgramImportTableBlock> PROGRAM_IMPORT_TABLE =
+		BLOCKS.register("program_import_table",
+			() -> new ProgramImportTableBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.LECTERN)
+				.mapColor(MapColor.PODZOL)
+				.forceSolidOn()
+				.noOcclusion()));
+
+	public static final DeferredItem<BlockItem> PROGRAM_IMPORT_TABLE_ITEM =
+		ITEMS.registerSimpleBlockItem("program_import_table", PROGRAM_IMPORT_TABLE);
+
+	public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<ProgramImportTableBlockEntity>> PROGRAM_IMPORT_TABLE_BE =
+		BLOCK_ENTITIES.register("program_import_table",
+			() -> BlockEntityType.Builder
+				.of((pos, state) -> new ProgramImportTableBlockEntity(
+					SequencedArmRegistration.PROGRAM_IMPORT_TABLE_BE.get(), pos, state), PROGRAM_IMPORT_TABLE.get())
+				.build(null));
+
+	/** 导入桌菜单：槽位顺序 = 输入 / 输出 / 36 背包 + 9 快捷栏（见 {@link ProgramImportTableMenu}）。 */
+	public static final DeferredHolder<MenuType<?>, MenuType<ProgramImportTableMenu>> PROGRAM_IMPORT_MENU =
+		MENUS.register("program_import_table", () -> IMenuTypeExtension.create(ProgramImportTableMenu::new));
 
 	public static void register(IEventBus modEventBus) {
 		BLOCKS.register(modEventBus);

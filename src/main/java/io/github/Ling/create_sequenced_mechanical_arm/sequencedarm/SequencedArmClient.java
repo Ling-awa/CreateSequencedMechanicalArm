@@ -4,6 +4,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanica
 import io.github.Ling.create_sequenced_mechanical_arm.client.ArmProgramScreen;
 import io.github.Ling.create_sequenced_mechanical_arm.client.ClipboardChecklistOverlay;
 import io.github.Ling.create_sequenced_mechanical_arm.client.OperationSelectionOverlay;
+import io.github.Ling.create_sequenced_mechanical_arm.client.ProgramImportScreen;
 
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
@@ -25,6 +26,8 @@ public class SequencedArmClient {
 	@SubscribeEvent
 	public static void registerScreens(RegisterMenuScreensEvent event) {
 		event.register(SequencedArmRegistration.ARM_PROGRAM_MENU.get(), ArmProgramScreen::new);
+		// 操作导入桌：界面与贴图复用蓝图桌那套（用户口径），只把文件列表换成服务端发来的脚本名
+		event.register(SequencedArmRegistration.PROGRAM_IMPORT_MENU.get(), ProgramImportScreen::new);
 	}
 
 	/**
