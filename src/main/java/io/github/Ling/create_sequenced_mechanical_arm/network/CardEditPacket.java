@@ -138,10 +138,10 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 			return;
 		}
 		// 没有任务就先建一个默认任务：录完就能直接插进臂里跑
+		// （主任务**恒为无限循环**是模型语义，不再需要写任何循环字段）
 		if (program.tasks.isEmpty()) {
 			ArmProgramTask created = new ArmProgramTask();
 			created.name = "主任务";
-			created.loop = ArmProgramTask.LoopType.FOREVER; // 单线程模型下的常驻写法
 			program.tasks.add(created);
 		}
 		// §5.1 v5：录进"正在编辑的那个任务"（不再是永远录到最后一条）——

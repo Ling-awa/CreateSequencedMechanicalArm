@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -15,6 +16,7 @@ import com.simibubi.create.content.kinetics.belt.transport.TransportedItemStack;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.logistics.filter.FilterItemStack;
+import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
 import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.ArmEffects;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.RightClickBridge;
@@ -23,7 +25,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.interaction.TargetInteract
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.SkipAction;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadAmount;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmBlockEntity;
 
 import com.simibubi.create.foundation.recipe.RecipeApplier;
@@ -50,7 +51,9 @@ import net.neoforged.neoforge.items.ItemHandlerHelper;
  *   <li>{@code 跳转}（条目级）：同任务内的 goto，不返回；</li>
  *   <li>{@code 调用}（任务级）：压返回地址、切到子任务；子任务走完（或「退出」）自动回到调用点的下一条；</li>
  *   <li>{@code 退出 / 抛出错误}：立刻结束当前任务 —— 前者算正常返回，后者让**调用方**走「失败后」；</li>
- *   <li>循环仍在任务上（计次 / 一直重复 / 直到成功），「退出」就是 while 循环的 break。</li>
+ *   <li>★ <b>主任务恒为无限循环</b>（任务级循环设置已删除）：走完最后一条就回到第 1 条继续跑；
+ *       要收尾只有「退出」(主任务里 = 收工停机) 与「抛错」(失败停机) 两条路。
+ *       子任务跑完则返回调用方，跑几轮由调用点的 {@code callRepeat} 决定。</li>
  * </ul>
  * 没有调度器、没有优先级、没有"让位"（那套东西连字段一起删掉了，见 PLAN §11 决策 15 / 69）。
  *
@@ -165,8 +168,6 @@ public class ProgramRuntime {
 	public EntryState state = EntryState.IDLE;
 	public int timer;
 	public int waitElapsed;
-	/** 当前任务这一轮已经走完的圈数（循环计次用）。 */
-	public int loopCounter;
 	/** 前置检查未通过后不动手臂的那段时间。 */
 	public int idleCooldown;
 	/**
@@ -259,13 +260,16 @@ public class ProgramRuntime {
 	public final List<Frame> callStack = new ArrayList<>();
 
 	/**
-	 * 一层调用：回到 {@code returnTask} 的 {@code returnEntry}；带上是调用方当时的循环计数。
+	 * 一层调用：回到 {@code returnTask} 的 {@code returnEntry}。
 	 *
 	 * <p>★ {@code entryShift} = <b>进入这个被调任务时生效的**调用偏移**</b>（见
 	 * {@link ArmProgramEntry#callShift}）= 调用方那一刻的生效偏移 + 那条调用卡自己的 Δ。
 	 * 它随帧一起压栈、随帧一起弹掉，所以"返回调用方就恢复"是**结构上**成立的（不需要额外的恢复代码）。
+	 *
+	 * <p>⚠️ 这里**不再有"调用方当时的循环计数"**（任务级循环随用户口径一起删除了）：
+	 * 弹栈后要恢复的只有"回到哪一条"与生效偏移这两件。
 	 */
-	public record Frame(int returnTask, int returnEntry, int callerLoopCounter, int repeatsLeft, BlockPos entryShift) {
+	public record Frame(int returnTask, int returnEntry, int repeatsLeft, BlockPos entryShift) {
 		/** 这个调用点还要让子任务再跑几轮（第 1 轮算在 {@code repeatsLeft} 里）。 */
 		public boolean hasAnotherRound() {
 			// ★ 0 = 无限循环（用户第四十轮）：不能递减、也不返回 —— 要停就靠「中断」/停机，或者子任务里的「退出」
@@ -275,7 +279,7 @@ public class ProgramRuntime {
 		/** 一轮跑完之后的剩余轮次；「无限」永远是「无限」（不许把 0 减成 -1 再当成"还剩 0 轮"）。 */
 		public Frame withOneFewerRepeat() {
 			return repeatsLeft == ArmProgramEntry.CALL_REPEAT_INFINITE ? this
-				: new Frame(returnTask, returnEntry, callerLoopCounter, repeatsLeft - 1, entryShift);
+				: new Frame(returnTask, returnEntry, repeatsLeft - 1, entryShift);
 		}
 	}
 
@@ -283,7 +287,7 @@ public class ProgramRuntime {
 	 * <b>当前生效的调用偏移</b>（相对量，见 {@link ArmProgramEntry#callShift}）——
 	 * 世界目标 = {@code 臂坐标 + 条目 offset + 这个值}，叠加点在 {@link #offsetOf} 一处。
 	 *
-	 * <p><b>为什么"按栈顶读"而不是像 {@code loopCounter} 那样维护一个字段</b>（三选一里选这个）：
+	 * <p><b>为什么"按栈顶读"而不是维护一个"当前偏移"字段</b>（三选一里选这个）：
 	 * <ul>
 	 *   <li><b>没有第二份真相</b>：它是 {@code callStack} 的**纯函数**（栈空 = 主任务 = 0），
 	 *       所以 {@code callStack.clear()}（程序被换 / 任务数变了）、{@code endTask} 弹帧、
@@ -309,8 +313,24 @@ public class ProgramRuntime {
 	@Nullable
 	private String error;
 	private int errorEntryIndex = -1;
-	/** 频率判定的去抖缓存（照抄 Create 时刻表条件的 {@code globalPowerVersion} 手法）。 */
+	/**
+	 * 频率判定的去抖缓存（照抄 Create 时刻表条件的 {@code globalPowerVersion} 手法）。
+	 *
+	 * <p>⚠️ <b>只有 {@code globalPowerVersion} 一个键已经不够了</b>（加了「接收半径」之后）：
+	 * 判定结果现在同时取决于 **本臂的位置** 与 **这一条的半径**，两者任一变化都必须重算 ——
+	 * 否则"同一条程序里两条半径不同的收信号条目"会互相喂对方的缓存（症状是"半径改了却没生效"，
+	 * 只有把条目顺序调一调才复现）。所以缓存的有效性 = {@code (version, 臂位置, 半径)} 三者全相同。
+	 *
+	 * <p>失效方式有两类：① 上面这个三元组不等（世界里的电平变了 / 换了条目 / 换了半径）；
+	 * ② {@code resetToStart} 与 {@code onProgramReplaced} 把 {@code cachedPowerVersion} 置回 -1
+	 * （换卡 / 回到开头 = 另一个故事，那一处原有写法照旧保留，不需要再清别的字段）。
+	 */
 	private int cachedPowerVersion = -1;
+	/** 缓存那次判定时用的臂位置（{@code null} = 还没有缓存）。 */
+	@Nullable
+	private BlockPos cachedSignalPos;
+	/** 缓存那次判定时用的接收半径。 */
+	private int cachedSignalRange = -1;
 	private boolean cachedSignal;
 
 	public boolean isHalted() {
@@ -381,7 +401,6 @@ public class ProgramRuntime {
 	private static String beginText(ArmProgramEntry entry) {
 		return switch (entry.op) {
 			case WAIT -> " 开始等待 " + entry.waitTicks() + "t";
-			case WAIT_REDSTONE -> " 开始等红石" + (entry.waitForPowered ? "通电" : "断电");
 			case SIGNAL -> entry.isSignalReceive() ? " 开始等信号" : " 发信号";
 			default -> entry.op.isWait() ? " 开始等待" : " 开始执行";
 		};
@@ -605,7 +624,7 @@ public class ProgramRuntime {
 			applySkip(arm, caller, entry, entry.onTimeout, lastFailure);
 			return;
 		}
-		callStack.add(new Frame(taskIndex, entryIndex + 1, loopCounter,
+		callStack.add(new Frame(taskIndex, entryIndex + 1,
 			ArmProgramEntry.clampCallRepeat(entry.callRepeat),
 			// ★ 进入子任务时生效的调用偏移 = 调用方此刻的生效偏移 + 这条调用卡的 Δ（嵌套因此自然叠加：
 			//   A→B(Δ1)→C(Δ2) 时 C 的帧里存的就是 Δ1+Δ2）。弹帧即恢复，不需要单独的恢复代码。
@@ -616,7 +635,6 @@ public class ProgramRuntime {
 			arm.logLine(logWhere(caller, entry) + " 调用 → " + callee.name + "#1（栈深 " + callStack.size() + "）");
 		taskIndex = calleeIndex;
 		entryIndex = 0;
-		loopCounter = 0;
 		state = EntryState.IDLE;
 		waitElapsed = 0;
 		resetEntryCounters();
@@ -627,7 +645,12 @@ public class ProgramRuntime {
 	 * 结束当前任务：{@code failed} 为真表示"抛出错误"结束。
 	 *
 	 * <p>在子任务里 = 返回调用方（失败时调用方走「失败后」；成功时调用方走「成功后」——
-	 * 后者以前**没接上**，见 {@link #applySuccessExit}）；在主任务里 = 收工（失败则停机报错）。
+	 * 后者以前**没接上**，见 {@link #applySuccessExit}）。
+	 *
+	 * <p>★ <b>在主任务里 = 停机</b>：这个方法**只在「退出」(BREAK) 与「抛错」(THROW) 时被调到**
+	 * —— 主任务把最后一条走完不算"结束"，那是 {@link #finishTask} 的恒循环那条路（回到第 1 条重来）。
+	 * 所以这里的语义是用户口径的「退出 = 收工停机 / 抛错 = 失败停机」：两者都必须**真的停下**，
+	 * 否则恒循环会把「退出」吞成"从头再来一次"。
 	 */
 	private void endTask(SequencedArmBlockEntity arm, boolean failed, @Nullable String reason) {
 		ArmProgram program = arm.getProgram();
@@ -639,7 +662,6 @@ public class ProgramRuntime {
 			int failedEntry = entryIndex;
 			taskIndex = frame.returnTask();
 			entryIndex = frame.returnEntry();
-			loopCounter = frame.callerLoopCounter();
 			// ★ **调用偏移在这里"恢复"**：它没有单独的字段要写回去 —— 弹掉这一帧之后
 			//   `effectiveCallShift()` 读到的就是栈顶那一帧（父任务）的偏移，主任务则是 0。
 			//   这就是"返回调用方时恢复"与"存读一致"都不用额外代码的原因（见 effectiveCallShift）。
@@ -690,45 +712,96 @@ public class ProgramRuntime {
 			arm.markProgramDirty();
 			return;
 		}
-		// 主任务结束
+		// ——— 主任务：只有「退出」/「抛错」会走到这里（跑完最后一条走 finishTask 的恒循环）———
 		if (failed) {
 			halt(arm, reason == null ? "程序抛出错误" : reason); // 停机那行由 halt 记
 			return;
 		}
-		// ★ 记录点⑧：主任务**正常跑完**（"它为什么不动了？" 的另一半答案：不是卡住，是跑完了）。
+		// ★ 记录点⑧：主任务里的「退出」= **收工停机**（用户口径：「退出」不能因为主任务恒循环而失效）。
 		//   ⚠️ 报**任务名**，不要直接拼 task 对象：ArmProgramTask 没有 toString()，
 		//   拼进去是一个对象哈希（同一个坑见下面 endTask 里那句"被调任务失败（…）"的注释）。
 		if (arm.logEnabled()) {
 			ArmProgramTask done = program.task(taskIndex);
-			arm.logLine("收工 · 主任务 " + (done == null ? "?" : done.name) + " 跑完");
+			arm.logLine("收工 · 主任务 " + (done == null ? "?" : done.name) + "「退出」");
 		}
-		arm.cancelMove(); // 收工：手臂折回待机位，别举在最后一个目标前面（与「等待」同一条理由）
-		// ⚠️ §7.16e 有意的**反转**：主任务正常结束**不再清信号** —— 信号是持久变量，跨循环、跨停机、
-		// 跑完主任务都保持；要断只能靠「中断」或换卡（旧行为 `clearTransmissions()` 已删，见 §7.16c 反证①）。
-		resetEntryCounters();
-		entryIndex = 0;
-		state = EntryState.IDLE;
-		arm.markProgramDirty();
+		// 用 halt 而不是"游标归零"：恒循环之下，归零就等于"从第 1 条重来"，
+		// 「退出」那样就彻底失去意义了。⚠️ §7.16e 的**反转**照旧成立：停机不清信号。
+		halt(arm, reason == null ? "主任务「退出」：收工停机" : reason);
 	}
 
 	/**
-	 * 红石链接频率**当前是不是通电**；{@code globalPowerVersion} 去抖（Create 时刻表同款手法）。
+	 * 红石链接频率**当前是不是（在接收半径内）通电**；{@code globalPowerVersion} 去抖
+	 * （Create 时刻表同款手法，缓存键扩大到三元组，见 {@link #cachedPowerVersion}）。
 	 *
 	 * <p>⚠️ 这里只返回**原始通电状态**，绝不掺"等通电/等断电"的极性 ——
 	 * 极性由调用方（{@code tickWait}）用 {@code powered == entry.waitForPowered} 比一次就够。
 	 * 曾经这里写成 `hasPower != waitForPowered`（自己取反），调用方又比一次，**等于取反两次**：
 	 * 用户实测"无论如何都是取反 —— 收到信号时判定为失败（停住），没信号时反而继续执行"。
-	 * 与 {@code WAIT_REDSTONE} 那条分支（{@code arm.hasNeighborSignal()} 返回原值）保持一致。
+	 * ⚠️ 查询侧（本方法）与判定侧（{@code tickWait}）**都只处理"返回原值、比一次"这一条规矩**；
+	 * 相邻方块的普通红石电（`hasNeighborSignal()`）已经不参与任何等待操作了。
+	 *
+	 * <p>★ <b>为什么不再用 {@code hasAnyLoadedPower(frequency)}</b>（本值的新增部分）：那个方法
+	 * **完全不看位置**（它把所有世界的同频率成员都算进来），于是"附近有没有人通电"变成了全局布尔 ——
+	 * 用户要的「距离」表达不出来。现在走 {@code networksIn(level)} 取**同频率那一组**成员，
+	 * 逐个判三条：{@code isAlive()}（区块卸载 / 方块被拆 / 位置失效的不算）、
+	 * {@code getTransmittedStrength() > 0}（真的在通电）、以及
+	 * <b>方块欧氏距离 {@code dx²+dy²+dz² <= N²}（含边界）</b>。
+	 *
+	 * <p>⚠️ {@code 0} 必须只有"同一格"成立（{@code distSqr == 0 <= 0}）：这就是用户说的
+	 * "只能自己接收发送"（自己发、自己收的自环）。判据里的 {@code <=} <b>不能改成 {@code <}</b>
+	 * —— 改了自检的边界那条（第二臂正好 N 格、range=N ⇒ 成功）立刻变红。
+	 *
+	 * <p>⚠️ <b>发送侧一个字都不读距离</b>（{@code emitSignal} / {@code heldSignals} /
+	 * {@code getArmLinkLevel} 全都不动）：谁收到由**收方**自己的距离决定。把这段距离判定挪到
+	 * 发送侧 ⇒ 自检"发不受距离影响"那条红。
+	 *
+	 * <p>⚠️ {@code networksIn} 在"世界没准备好"时会打一条 WARN 并返回空表，而且它返回的是
+	 * <b>活的</b>表（每 tick 都在变）⇒ 本方法先自己挡掉 {@code level == null / 客户端}，
+	 * 但**不缓存那张表**，只缓存"这一拍算出来的布尔"。
 	 */
-	private boolean isSignalPowered(ArmProgramEntry entry) {
+	private boolean isSignalPowered(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
 		if (entry.frequency == null)
 			return false; // 没设频率 = 永远等不到，交给「失败后 + 时限」处理
+		Level level = arm.getLevel();
+		if (level == null || level.isClientSide)
+			return false;
+		BlockPos armPos = arm.getBlockPos();
 		int version = Create.REDSTONE_LINK_NETWORK_HANDLER.globalPowerVersion.get();
-		if (version != cachedPowerVersion) {
+		// 三元组全相同才复用（见 cachedPowerVersion 的说明：只按 version 会喂错缓存）。
+		if (version != cachedPowerVersion || !armPos.equals(cachedSignalPos)
+			|| entry.signalRange != cachedSignalRange) {
 			cachedPowerVersion = version;
-			cachedSignal = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(entry.frequency);
+			cachedSignalPos = armPos;
+			cachedSignalRange = entry.signalRange;
+			cachedSignal = anyPowerWithin(level, armPos, entry);
 		}
 		return cachedSignal;
+	}
+
+	/**
+	 * 同频率的成员里，有没有<b>一个以上</b>落在接收半径内并且真的在通电（{@link #isSignalPowered} 的本体）。
+	 *
+	 * <p>半径可以是 0（= 只有同一格），所以下面那个 {@code <=} 是<b>契约的一部分</b>，不是排版问题。
+	 * 用 {@code long} 算平方和：{@code 256² = 65536}，而坐标差的分量理论上能到 ±3e7
+	 * （{@code int} 平方会溢出成负数 ⇒ 一个"远得要命"的来源反而被判成"在半径内"）。
+	 */
+	private static boolean anyPowerWithin(Level level, BlockPos armPos, ArmProgramEntry entry) {
+		Set<IRedstoneLinkable> network = Create.REDSTONE_LINK_NETWORK_HANDLER.networksIn(level)
+			.get(entry.frequency);
+		if (network == null || network.isEmpty())
+			return false;
+		long maxSqr = (long) entry.signalRange * entry.signalRange;
+		for (IRedstoneLinkable link : network) {
+			if (!link.isAlive() || link.getTransmittedStrength() <= 0)
+				continue;
+			BlockPos at = link.getLocation();
+			long dx = (long) at.getX() - armPos.getX();
+			long dy = (long) at.getY() - armPos.getY();
+			long dz = (long) at.getZ() - armPos.getZ();
+			if (dx * dx + dy * dy + dz * dz <= maxSqr) // ⚠️ 含边界：改成 < 会让"正好 N 格"收不到
+				return true;
+		}
+		return false;
 	}
 
 
@@ -736,7 +809,7 @@ public class ProgramRuntime {
 	private void beginEntry(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		// ★ 判据是**操作类型**（`movesArm()` = `op.requiresTarget()`），**不是**条目级 `needsTarget()`：
 		//   「过滤」是**控制类操作** —— 一瞬间的判断，臂**不移动、不做任何动作**（用户口径：
-		//   "不需要动力臂伸过去判断"，跟「等红石 / 收信号」一样）。容器模式的坐标只是
+		//   "不需要动力臂伸过去判断"，跟「收发信号」一样）。容器模式的坐标只是
 		//   "读哪个方块"的**数据参数**，不是"伸过去的目标"。
 		//   ⚠️ 上一版这里问的是 `needsTarget()` ⇒ 容器过滤会让臂先飞过去读箱子（这次修的 bug）。
 		//   ⚠️⚠️ 不要把 `needsTarget()` 从"有没有坐标参数"那些站点删掉（GUI 坐标行 / 脚本写出 /
@@ -871,19 +944,45 @@ public class ProgramRuntime {
 				int slot = firstNonEmptySlot(handler);
 				if (slot < 0)
 					return "目标为空";
-				if (!arm.canAccept(handler.extractItem(slot, 1, true)))
+				// ★ 个数模式 = 等于（判据只有 countIsExact() 一处）：**动身之前**就得能凑出恰好 N 个。
+				//   凑不出就**别伸过去** —— 与"臂内已满"同一个道理：不要为一个必然失败的动作空跑一趟。
+				//   而前置检查是**每 tick** 重跑的（PRECHECK_RETRY_TICKS = 0）⇒"等补货"发生在**原位重试**里
+				//   （货一到位下一 tick 就放行），与"失败后默认重试"的语义正好对齐。
+				if (entry.countIsExact()) {
+					int exactSlot = exactTakeSlot(handler, entry.count);
+					if (exactSlot < 0)
+						return "数量不足（需要 " + entry.count + " 个）";
+					if (!arm.canAccept(handler.extractItem(exactSlot, entry.count, true)))
+						return "臂内已满";
+				} else if (!arm.canAccept(handler.extractItem(slot, 1, true))) {
 					return "臂内已满";
+				}
 			}
 			case DEPOSIT -> {
 				ItemStack held = arm.getHeldItem();
 				if (held.isEmpty())
 					return "手上没有物品";
-				// 用 TargetInteraction 而不是裸能力：漏斗没有通用物品能力，走它自己的行为对象
-				TargetInteraction.Insert probe = TargetInteraction.insert(level, target, held.copy(), true);
-				if (probe.blockedReason() != null)
-					return probe.blockedReason();
-				if (!probe.madeProgress(held))
-					return "目标放不下";
+				// ★ 个数模式 = 等于：动身之前"手上够 N 个"与"目标吃得下恰好 N 个"**两条**都要成立。
+				//   报因必须能分辨是哪一条（"手上不足"与"目标放不下"是两种完全不同的补救办法）。
+				//   ATMOST 照旧只看"整摞能不能进去一点"（有多少放多少，不足也不失败）。
+				if (entry.countIsExact()) {
+					if (held.getCount() < entry.count)
+						return "手上不足 " + entry.count + " 个（手上 " + held.getCount() + " 个）";
+					TargetInteraction.Insert exactProbe = TargetInteraction.insert(level, target,
+						held.copyWithCount(entry.count), true);
+					if (exactProbe.blockedReason() != null)
+						return exactProbe.blockedReason();
+					if (!exactProbe.remainder()
+						.isEmpty())
+						return "目标放不下 " + entry.count + " 个";
+				} else {
+					// 用 TargetInteraction 而不是裸能力：漏斗没有通用物品能力，走它自己的行为对象
+					TargetInteraction.Insert probe = TargetInteraction.insert(level, target, held.copy(), true);
+					if (probe.blockedReason() != null)
+						return probe.blockedReason();
+					if (!probe.madeProgress(held))
+						return "目标放不下";
+				}
 			}
 			case UNLOAD -> {
 				if (arm.getOverflow()
@@ -924,6 +1023,27 @@ public class ProgramRuntime {
 		for (int slot = 0; slot < handler.getSlots(); slot++)
 			if (!handler.extractItem(slot, 1, true)
 				.isEmpty())
+				return slot;
+		return -1;
+	}
+
+	/**
+	 * 「等于」模式：<b>找到第一个能给出恰好 {@code count} 个的槽</b>（纯模拟，不做任何真取）。
+	 *
+	 * <p>{@code extractItem(slot, count, true)} 返回的是"这个槽最多能给几个"（不足就是不足），
+	 * 所以 {@code getCount() == count} 恰好就是"这一个槽能凑出 N 个"。
+	 *
+	 * <p>⚠️ 为什么必须**逐个槽**找、而不是"把整箱凑起来够 N 就行"：取出是**一格一摞**的语义
+	 * （原版动力臂一次只从一个槽搬一份），跨槽拼凑会把两摞不同的物品混进同一次"恰好 N 个"里。
+	 * <p>⚠️ 判据与 {@code take()} 里那次真取**必须同源**（前置检查与执行都调这一个方法），
+	 * 各写一遍就会出现"前置检查放行、真取又说不够"的摆动。
+	 *
+	 * @return 能凑出恰好 N 个的第一个槽；都凑不出返回 {@code -1}
+	 */
+	private static int exactTakeSlot(IItemHandler handler, int count) {
+		for (int slot = 0; slot < handler.getSlots(); slot++)
+			if (handler.extractItem(slot, count, true)
+				.getCount() == count)
 				return slot;
 		return -1;
 	}
@@ -1021,7 +1141,6 @@ public class ProgramRuntime {
 				timer = entry.waitTicks();
 				state = EntryState.WAITING;
 			}
-			case WAIT_REDSTONE -> state = EntryState.WAITING;
 			// 收发信号（§7.16e：一个频率 = 一个持久布尔变量）：**收** = 阻塞等待（走 tickWait 那张极性真值表）；
 			// **发通电** = 置位（一直保持，直到有人**中断**它或换卡）；**中断** = 复位（只断这一路，
 			// 并取消它未到期的脉冲）。两者都不阻塞、**没有失败出口**（发送不会失败），
@@ -1056,6 +1175,9 @@ public class ProgramRuntime {
 	 * <p>抽成一个方法是为了让自检能直接验这张真值表 —— 这个位置出过一次"取反两次"的 bug：
 	 * 电源查询那边自己异或了极性、这里又比一次，结果**收到信号反而停下**（用户实测）。
 	 * 规则只有一句：**查询侧返回原始通电状态，极性只在这里比一次**。
+	 *
+	 * <p>★ 现在它服务的"等待类"只剩两种：{@code WAIT}（只看时长，不走极性）与
+	 * {@code SIGNAL} 的**接收**模式（红石链接频率的通电状态）。
 	 */
 	public static boolean waitSatisfied(boolean powered, boolean waitForPowered) {
 		return powered == waitForPowered;
@@ -1067,10 +1189,14 @@ public class ProgramRuntime {
 				succeed(arm, task, entry);
 			return;
 		}
-		// 等红石 = 相邻方块信号；等信号 = 红石链接频率（§7.6 v4：频率从任务搬到了这里）
-		// 两者都返回**原始通电状态**，极性只在这下面比一次（曾经等信号那条自己被取反过，见 isSignalPowered）
-		boolean powered = entry.op.usesSignalPair() ? isSignalPowered(entry)
-			: arm.hasNeighborSignal();
+		// 走到这里只剩「收发信号」的**接收**模式：等的是红石链接频率（§7.6 v4：频率从任务搬到了这里）。
+		// ⚠️ 必须走 `usesSignalPair()` 那一支（= isSignalPowered）：它返回**原始通电状态**，
+		//   极性只在这下面比一次（曾经这条自己被取反过，见 isSignalPowered）；
+		//   ⚠️ 相邻方块的普通红石电（arm.hasNeighborSignal()）**不再有任何等待操作在读它** ——
+		//   那条"按相邻红石等待"的操作已按用户口径删除（「我们有更好的无线信号系统可以使用」）。
+		//   左边那个 `usesSignalPair()` 是**防御性**的：这里现在只有 SIGNAL 的接收模式会进来，
+		//   但写成"先问这一类操作用不用频率、再去读频率"就不会在将来多一种等待类时读错电源。
+		boolean powered = entry.op.usesSignalPair() && isSignalPowered(arm, entry);
 		if (waitSatisfied(powered, entry.waitForPowered)) {
 			// ★ 用户在本轮把「收信号发光」的判据收紧了：**必须成功接收**才点亮底座，
 			//   "尝试接收但没有"不算（原话：「base_powered 的模型接收信号发光的时候必须成功接收信号才发光，
@@ -1079,16 +1205,12 @@ public class ProgramRuntime {
 			//   臂身上没有"我正在收"的持续状态可当判据 ⇒ 用臂上那个短脉冲把它变成看得见的东西
 			//   （10 tick = 0.5 秒，常量在 SequencedArmBlockEntity.SIGNAL_FLASH_TICKS）。
 			//
-			// ★★ 本轮的修复点（用户口径原话：「这个只与无线信号有关，与接收红石信号无关」）：
-			//   这一行以前是**无条件**的，而它同时服务两条成功分支 ——
-			//     a) SIGNAL 处于**接收**模式、那一路**红石链接频率**通电（无线信号）⇒ **该亮**；
-			//     b) WAIT_REDSTONE 等到**相邻红石**的通电状态与"等通电 / 等断电"吻合 ⇒ **不该亮**：
-			//        那是邻居方块的红石电，不是无线（红石链接频率）信号，按用户口径与发光无关。
-			//   所以闪光只留给 a)：判据是**操作类型 + 模式**（`op == SIGNAL` 且 `isSignalReceive()`），
-			//   不靠 `usesSignalPair()` 之类"似乎等价"的间接量 —— 以后若再多一种用频率的操作，
-			//   这里必须显式再判断一次，而不是被顺手放进来。
-			//   ⚠️ 把这一句 `if` 去掉（或退回无条件调用）⇒ 自检「信号活动 ⑤ 等红石成功不亮」立刻变红。
-			//   ⚠️ 别把 `WAIT_REDSTONE` 也算进来"反正也是信号"：用户的区分正是这一条（相邻红石 ≠ 无线信号）。
+			// ★★ 用户口径原话：「这个只与无线信号有关，与接收红石信号无关」。
+			//   闪光只给"经红石链接频率收到的信号"这一种情况，判据是**操作类型 + 模式**
+			//   （`op == SIGNAL` 且 `isSignalReceive()`），不靠 `usesSignalPair()` 之类"似乎等价"的
+			//   间接量 —— 以后若再多一种用频率的操作，这里必须显式再判断一次，而不是被顺手放进来。
+			//   （那条"按相邻红石等待"的操作已经不存在了，但这条判据**不能因此简化成无条件调用**：
+			//    它守的是同一件事 —— 只有"真的收到无线信号"才点亮底座。）
 			//   发送侧不在这里 —— 它靠 `getArmLinkLevel() > 0`（见 SequencedArmBlockEntity.computeSignalActive），
 			//   只统计 heldSignals（红石链接频率）的电平，`redstoneLocked` 不参与。
 			if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())
@@ -1099,8 +1221,7 @@ public class ProgramRuntime {
 		waitElapsed++;
 		// 等待类操作把「时限」当作"最多等多久"：到点走「失败后」（§7.7 与其它操作一致）
 		if (entry.timeoutTicks() >= 0 && waitElapsed > entry.timeoutTicks())
-			applySkip(arm, task, entry, entry.onTimeout,
-				entry.op.usesSignalPair() ? "等待信号超时" : "等待红石超时");
+			applySkip(arm, task, entry, entry.onTimeout, "等待信号超时");
 	}
 
 	// ————————————————————————— 各操作 —————————————————————————
@@ -1111,6 +1232,38 @@ public class ProgramRuntime {
 			handleFailure(arm, task, entry, "目标没有物品能力");
 			return;
 		}
+		// ★ 个数模式只有一处判据（ArmProgramEntry.countIsExact()）—— 这里不重新解释 countMode。
+		if (entry.countIsExact()) {
+			// 「等于」：**必须能拿到恰好 N 个**才动手。先逐个槽模拟（真取用 false），
+			// 找到第一个够数的槽才真取。
+			// ⚠️ 顺序绝不能反：模拟用 true、真取用 false。
+			// ⚠️ 也绝不能"先真取一部分再判失败"—— 那会把半摞物品丢进臂里，
+			//    玩家看到的就是"报了失败、东西却少了"。
+			int slot = exactTakeSlot(handler, entry.count);
+			if (slot < 0) {
+				handleFailure(arm, task, entry, "数量不足（需要 " + entry.count + " 个）");
+				return;
+			}
+			if (!arm.canAccept(handler.extractItem(slot, entry.count, true))) {
+				handleFailure(arm, task, entry, "臂内已满");
+				return;
+			}
+			ItemStack taken = handler.extractItem(slot, entry.count, false);
+			if (taken.getCount() != entry.count) {
+				// 兜底：同一个 tick 里"模拟够数、真取变少"不该发生（服务端单线程）。
+				// 真发生了也**绝不吞物品** —— 放回原槽再走失败重试（塞进臂里再报失败是另一种怪状态）。
+				if (!taken.isEmpty())
+					handler.insertItem(slot, taken, false);
+				handleFailure(arm, task, entry, "数量不足（需要 " + entry.count + " 个）");
+				return;
+			}
+			ItemStack beforeHeld = arm.getHeldItem();
+			arm.insertIntoInventory(taken);
+			ArmEffects.pickup(arm.getLevel(), arm.getBlockPos(), beforeHeld, arm.getHeldItem());
+			succeed(arm, task, entry);
+			return;
+		}
+		// 「小于等于」（默认 = 取出改造前的行为）：有多少拿多少，上限 count；**不足 N 不算失败**。
 		for (int slot = 0; slot < handler.getSlots(); slot++) {
 			ItemStack available = handler.extractItem(slot, entry.count, true);
 			if (available.isEmpty())
@@ -1136,6 +1289,20 @@ public class ProgramRuntime {
 		handleFailure(arm, task, entry, "目标为空");
 	}
 
+	/**
+	 * 放入（用户口径：这条现在**也读个数**）。
+	 *
+	 * <p>两种模式的判定链（判据都只有 {@link ArmProgramEntry#countIsExact()} 一处）：
+	 * <ul>
+	 *   <li><b>小于等于</b>：搬 {@code min(手上, count)} 个过去；进去了至少 1 个就算成功。
+	 *       <b>没参与这 N 个的那一截留在臂里</b>（旧代码把整摞递出去再拿 remainder 当手，
+	 *       现在只递 amount 个 ⇒ 回收时必须把"没参与的那一截"加回去，否则一放就丢货）。</li>
+	 *   <li><b>等于</b>：① 手上不足 N 个 ⇒ 失败（一个都不真塞）；
+	 *       ② 先 simulate 判"目标能不能吃下恰好 N 个"，模拟后还有剩 ⇒ 失败（**不真塞一半**）；
+	 *       ③ 两条都过才真塞 N 个。</li>
+	 * </ul>
+	 * 失败一律走 {@link #handleFailure}（默认重试，时限 / 去向照旧 §7.7）。
+	 */
 	private void deposit(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		ItemStack held = arm.getHeldItem();
 		if (held.isEmpty()) {
@@ -1144,13 +1311,56 @@ public class ProgramRuntime {
 		}
 		BlockPos target = arm.getBlockPos()
 			.offset(offsetOf(arm, entry));
-		TargetInteraction.Insert result = TargetInteraction.insert(arm.getLevel(), target, held.copy(), false);
-		if (result.remainder()
-			.getCount() == held.getCount()) {
+		boolean exact = entry.countIsExact();
+		// 这次要搬几个：两种模式都受 count 约束（改造前是"整摞都塞"，现在上限就是 count）
+		int amount;
+		if (exact) {
+			if (held.getCount() < entry.count) {
+				handleFailure(arm, task, entry, "手上不足 " + entry.count + " 个（手上 " + held.getCount() + " 个）");
+				return;
+			}
+			amount = entry.count;
+			// 先模拟"目标能不能吃下恰好 N 个"：模拟后还有剩 = 放不下 ⇒ 失败，**一个都不真塞**
+			TargetInteraction.Insert probe = TargetInteraction.insert(arm.getLevel(), target,
+				held.copyWithCount(amount), true);
+			if (probe.blockedReason() != null) {
+				handleFailure(arm, task, entry, probe.blockedReason());
+				return;
+			}
+			if (!probe.remainder()
+				.isEmpty()) {
+				handleFailure(arm, task, entry, "目标放不下 " + amount + " 个");
+				return;
+			}
+		} else {
+			amount = Math.min(held.getCount(), entry.count);
+		}
+		TargetInteraction.Insert result = TargetInteraction.insert(arm.getLevel(), target,
+			held.copyWithCount(amount), false);
+		int leftOver = held.getCount() - amount; // 没参与这次放入的那一截
+		ItemStack remainder = result.remainder();
+		int inserted = amount - remainder.getCount();
+		// 手上回收 = 没塞进去的那几个 + 没参与的那一截（**别丢东西**）
+		ItemStack back;
+		if (leftOver <= 0)
+			back = remainder;
+		else if (remainder.isEmpty())
+			back = held.copyWithCount(leftOver);
+		else
+			back = remainder.copyWithCount(remainder.getCount() + leftOver);
+		arm.setHeldItem(back);
+		if (inserted <= 0) {
+			// 一个都没进去 = 失败。⚠️ 比较基准是**这次搬的 amount**，不是整摞 —— 照抄旧条件
+			// （`remainder.getCount() == held.getCount()`）在只搬 amount 个之后会永远判成功（amount == 1 时
+			// remainder 与 held 的数量本来就不等）或永远判失败（leftOver > 0 时基准变了）。
 			handleFailure(arm, task, entry, result.blockedReason() != null ? result.blockedReason() : "目标放不下");
 			return;
 		}
-		arm.setHeldItem(result.remainder());
+		// 「等于」要求 N 个**全部**进去：真塞之后还剩下就说明没达成（上面已把剩余还回手上，不丢货）
+		if (exact && inserted < amount) {
+			handleFailure(arm, task, entry, "目标放不下 " + amount + " 个（只进去了 " + inserted + " 个）");
+			return;
+		}
 		succeed(arm, task, entry);
 	}
 
@@ -1426,7 +1636,7 @@ public class ProgramRuntime {
 	 * <p><b>用户口径（照做，不要"优化"）</b>：
 	 * <ol>
 	 *   <li><b>控制类操作、臂不移动</b>：判断是一瞬间的事 —— 臂<b>不伸过去、不做任何动作</b>
-	 *       （与「等红石 / 收信号」同类）。容器模式的坐标只是"读哪个方块"的数据参数；
+	 *       （与「收信号」同类）。容器模式的坐标只是"读哪个方块"的数据参数；
 	 *       判据见 {@code ArmProgramEntry.movesArm()}（{@code beginEntry} 的那个分支）。
 	 *       ⚠️ 所以这里<b>不能</b>走 {@code arm.getMovingHandler()}：那是"臂当前移动目标"那一格
 	 *       （{@code movingOffset} 记的是"上一次真的动过身"的位置），而过滤不动身
@@ -1436,7 +1646,7 @@ public class ProgramRuntime {
 	 *   <li>候选为空 ⇒ <b>不满足</b>，无论过滤器是什么；</li>
 	 *   <li>过滤器为空（没放幽灵物品）⇒ <b>匹配一切</b>（Create 本体口径：
 	 *       {@code FilterItemStack.isEmpty()} 为真时 {@code test} 恒真）；</li>
-	 *   <li>符合 ⇒ {@code succeed} 走成功后；不符合 ⇒ {@code handleFailure} —— 与「等红石 / 收信号」
+	 *   <li>符合 ⇒ {@code succeed} 走成功后；不符合 ⇒ {@code handleFailure} —— 与「收信号」
 	 *       走<b>同一条路</b>：在重试窗口（{@code failAmount}×单位，{@code -1} = 一直重试）内反复判断，
 	 *       窗口到了才走 {@code onTimeout}。★ 上一版这里直接 {@code applySkip} ⇒ 一不匹配就停机，
 	 *       与用户口径"失败默认 retry"相反（这次修的第二件事）。</li>
@@ -1513,7 +1723,7 @@ public class ProgramRuntime {
 			succeed(arm, task, entry);
 			return;
 		}
-		// 不匹配 = "时机还没到"，不是"做错了"：与等红石一样在重试窗口里反复判断（见方法头注释）。
+		// 不匹配 = "时机还没到"，不是"做错了"：与等信号一样在重试窗口里反复判断（见方法头注释）。
 		handleFailure(arm, task, entry, "过滤不符：" + candidate.getHoverName()
 			.getString());
 	}
@@ -1635,7 +1845,7 @@ public class ProgramRuntime {
 		//   ① `needsTarget()`（条目级）：这一条**有没有坐标** —— 过滤的容器模式有（容器模式的坐标是
 		//      "读哪个方块"的数据参数），等待类没有；
 		//   ② 类型门：只有「取物 / 组装」才**认领**（把目标格里的物品按住等臂来加工）。
-		//   ★ 所以控制类条目（过滤 / 等红石 / 收发信号 / 调用 …）永远走不到认领那一支 ——
+		//   ★ 所以控制类条目（过滤 / 收发信号 / 调用 …）永远走不到认领那一支 ——
 		//   认领等于"占住一个交互点等臂过来"，而控制类**根本没有臂过去这件事**。
 		if (entry == null || !entry.needsTarget())
 			return null;
@@ -1752,18 +1962,19 @@ public class ProgramRuntime {
 	 * <ul>
 	 *   <li>{@code CONTINUE}：跳过这条，继续下一条；</li>
 	 *   <li>{@code SKIP_TO}：跳到指定任务/条目；</li>
-	 *   <li>{@code NONE}：不设 —— {@code UNTIL_FAIL} 的循环里表示"停在原地等条件恢复"
-	 *       （失败**不等于整轮重来**：那会把"手上已经拿着物品"这类进度丢掉；
-	 *       正确做法是停在当前条目上节流重试，条件恢复后自然继续），
-	 *       其它循环模式下才是真正的停机报错。</li>
+	 *   <li>{@code NONE}：不设 —— 时限到了就是**停机报错**。</li>
 	 * </ul>
+	 *
+	 * <p>⚠️ <b>「停在原地等条件恢复」那条分支已随任务级循环一起删除</b>：它只对老的"直到失败"
+	 * 循环方式成立（用户口径：任务循环次数不需要了，主任务恒为无限循环）。
+	 * 现在 {@code NONE} 只有一种语义 —— 停机，由 {@link #halt} 记下"停在哪一条"。
 	 */
 	private void applySkip(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, SkipAction action,
 		String reason) {
 		switch (action) {
 			case CONTINUE -> {
 				lastFailure = reason + "（跳过）";
-				// ★ 记录点④：超时后的**去向**（放弃这一条 / 跳到别处 / 原地等）。
+				// ★ 记录点④：超时后的**去向**（放弃这一条 / 跳到别处）。
 				//   与记录点③合起来回答"它为什么停了？停在哪一条？"：③是原因，④是结论。
 				if (arm.logEnabled())
 					arm.logLine(logWhere(task, entry) + " 放弃 → 继续下一条（" + reason + "）");
@@ -1780,22 +1991,7 @@ public class ProgramRuntime {
 					arm.logLine(logWhere(task, entry) + " 放弃 → 跳转 " + entry.timeoutTarget + "（" + reason + "）");
 				jumpTo(arm, entry.timeoutTarget);
 			}
-			case NONE -> {
-				if (task.loop == LoopType.UNTIL_FAIL) {
-					// "循环直到无法继续"：失败**不等于整轮重来** —— 那会把"手上已经拿着物品"这类
-					// 进度丢掉：B 被占满时取出的物品再也送不进去（实测 bug）。
-					// 正确做法是停在当前条目上、原地节流重试；条件恢复后自然继续往下走，
-					// 只有一轮真正走完才回到开头。
-					lastFailure = reason + "（UNTIL_FAIL 等待中）";
-					if (arm.logEnabled())
-						arm.logLine(logWhere(task, entry) + " 到了时限但保持原地等（UNTIL_FAIL）：" + reason);
-					resetEntryCounters(); // 同一条目重新尝试：清计时/计数，但**保留游标**
-					if (idleCooldown <= 0)
-						idleCooldown = PRECHECK_RETRY_TICKS;
-					arm.markProgramDirty();
-				} else
-					halt(arm, reason); // 停机那行由 halt 自己记（含"停在哪一条"）
-			}
+			case NONE -> halt(arm, reason); // 停机那行由 halt 自己记（含"停在哪一条"）
 		}
 	}
 
@@ -1807,7 +2003,8 @@ public class ProgramRuntime {
 	 * 于是"跳转到 1"实际跳到第 2 条 —— 实测发现的静默错位。现在统一：`N` → `entries[N-1]`。
 	 *
 	 * <p>额外允许 `N = 条目数 + 1`＝<b>跳到末尾（这一轮就到此为止）</b>：
-	 * 循环体里"提前结束这一轮"用它很自然（要连循环一起结束就用「退出」操作）。
+	 * 主任务里它等于"提前结束这一轮 ⇒ 回到第 1 条重来"（恒循环，见 {@link #finishTask}），
+	 * 子任务里它等于"提前返回调用方"。要**真的停下**只能用「退出」或「抛错」。
 	 */
 	private void jumpTo(SequencedArmBlockEntity arm, String target) {
 		ArmProgram program = arm.getProgram();
@@ -1869,15 +2066,20 @@ public class ProgramRuntime {
 	/**
 	 * 一轮走完（{@code entryIndex} 已经越过最后一条）。
 	 *
-	 * <p>§7.6 v4：循环留在任务上 —— 计次重复 n 轮、一直重复、直到成功各是各的语义；
-	 * 一轮"真正结束"之后：**在子任务里 = 返回调用方**，**在主任务里 = 收工**（主任务若在循环则回到开头）。
+	 * <p><b>子任务</b>：轮次由**调用点**决定（用户第二十七轮："把循环次数放在调用上"）——
+	 * 跑完一轮先看调用点还要求再跑几轮，还要求就原地重跑（不弹栈），否则返回调用方。
+	 *
+	 * <p>★ <b>主任务：恒为无限循环</b>（用户口径："任务循环次数已经不需要了……主任务是不断循环的"）
+	 * —— 走完最后一条就回到第 1 条继续跑，**没有"收工"这回事**，也不再有任何计次。
+	 * 「跳转到末尾」（{@code N = 条数 + 1}）同样落到这里 ⇒ 也是"这一轮到此为止、从头重来"。
+	 * 要停下只有两条路，都走 {@link #endTask}：「退出」(收工停机) 与「抛错」(失败停机)。
+	 *
+	 * <p>⚠️ 一轮结束时保留老的收臂动作（{@code cancelMove()}）：手臂不该举在最后一个目标前面
+	 * 进入下一轮（与「等待」同一条理由）—— 这是删除循环设置前就有的行为，一个字没改。
 	 */
 	private void finishTask(SequencedArmBlockEntity arm, ArmProgramTask task) {
 		resetEntryCounters();
 		entryIndex = 0;
-		// ★ 被调用的任务：轮次由**调用点**决定（用户第二十七轮："把循环次数放在调用上"）。
-		// 跑完一轮先看调用点还要求再跑几轮 —— 还要求就原地重跑（不弹栈），否则返回调用方。
-		// 子任务自身的 loop 设置在这里**不参与**：两套机制相乘（调用 ×3 × 自己循环 ×2）谁都算不清。
 		if (!callStack.isEmpty()) {
 			int top = callStack.size() - 1;
 			Frame frame = callStack.get(top);
@@ -1889,29 +2091,15 @@ public class ProgramRuntime {
 			endTask(arm, false, null); // 次数用尽：回到调用点的下一条
 			return;
 		}
-		boolean roundDone = switch (task.loop) {
-			case COUNT -> {
-				loopCounter++;
-				if (loopCounter >= Math.min(task.loopCount, ArmProgramTask.MAX_LOOP_COUNT)) {
-					loopCounter = 0;
-					yield true;
-				}
-				yield false;
-			}
-			case NONE -> {
-				loopCounter = 0;
-				yield true;
-			}
-			case FOREVER, UNTIL_FAIL -> {
-				// 永远重复：不结束，直接回到开头（要收尾就用「退出」操作）
-				yield false;
-			}
-		};
-		if (!roundDone) {
-			arm.markProgramDirty();
-			return;
-		}
-		endTask(arm, false, null);
+		// ★ 记录点⑧：主任务**跑完一轮**（"它为什么不动了？"的答案之一：不是卡住，是刚跑到末尾、
+		//   下一 tick 就从头再来）。⚠️ 报**任务名**，不要直接拼 task 对象：ArmProgramTask 没有 toString()，
+		//   拼进去是一个对象哈希（同一个坑见 endTask 里那句"被调任务失败（…）"的注释）。
+		if (arm.logEnabled())
+			arm.logLine("↻ 主任务 " + task.name + " 跑完一轮 → 回到第 1 条（恒循环）");
+		arm.cancelMove(); // 一轮结束收臂：别举在最后一个目标前面进下一轮（与「等待」同一条理由）
+		// ⚠️ §7.16e 有意的**反转**：一轮跑完**不清信号** —— 信号是持久变量，跨轮、跨停机都保持；
+		//   要断只能靠「中断」或换卡（旧行为 `clearTransmissions()` 已删，见 §7.16c 反证①）。
+		arm.markProgramDirty();
 	}
 
 	public void halt(SequencedArmBlockEntity arm, String reason) {
@@ -1929,7 +2117,7 @@ public class ProgramRuntime {
 		// 留着它只会在将来有人加"解除停机"时变成一个"一恢复就多走一步"的暗坑。
 		rateBudget = 0;
 		// ⚠️ §7.16e 有意的**反转**：停机**不再清信号**（旧行为在 §7.16c 里被 D 验过，用户这轮推翻）。
-		// 理由与"主任务正常结束"一样：信号是**持久变量**，停机只是"程序停了"，不等于"变量复位"。
+		// 理由与"主任务跑完一轮"一样：信号是**持久变量**，停机只是"程序停了"，不等于"变量复位"。
 		arm.markProgramDirty();
 	}
 
@@ -1944,7 +2132,6 @@ public class ProgramRuntime {
 	public void resetToStart(SequencedArmBlockEntity arm) {
 		taskIndex = 0;
 		entryIndex = 0;
-		loopCounter = 0;
 		idleSpins = 0;
 		idleCooldown = 0;
 		// ★ 运行日志跟着这份程序走：换卡 / 回到开头 = 另一个故事，上一份程序的现场不该混进来
@@ -1981,14 +2168,14 @@ public class ProgramRuntime {
 		tag.putString("state", state.name());
 		tag.putInt("timer", timer);
 		tag.putInt("waited", waitElapsed);
-		tag.putInt("loop", loopCounter);
 		tag.putInt("idle", idleCooldown);
 		ListTag stack = new ListTag();
 		for (Frame frame : callStack) {
 			CompoundTag f = new CompoundTag();
 			f.putInt("t", frame.returnTask());
 			f.putInt("e", frame.returnEntry());
-			f.putInt("l", frame.callerLoopCounter());
+			// ⚠️ 老的 `l`（调用方的循环计数）**不再写**：任务级循环已删除，没有那个数了。
+			//   老存档里读到它也直接无视（不做兼容读取，用户明确不要）。
 			f.putInt("r", frame.repeatsLeft()); // 调用点还剩几轮（不存的话重登后会多跑/少跑）
 			// ★ 进入这个被调任务时生效的**调用偏移**（键 `s` = shift）：不存的话，重登之后
 			//   子任务的目标会**跳回**没加偏移的位置（用户口径里的"臂卸载再载入时偏移不能丢"）。
@@ -2010,7 +2197,6 @@ public class ProgramRuntime {
 		state = readState(tag.getString("state"));
 		timer = tag.getInt("timer");
 		waitElapsed = tag.getInt("waited");
-		loopCounter = tag.getInt("loop");
 		idleCooldown = tag.getInt("idle");
 		callStack.clear();
 		ListTag stack = tag.getList("stack", Tag.TAG_COMPOUND);
@@ -2018,7 +2204,8 @@ public class ProgramRuntime {
 			CompoundTag f = stack.getCompound(i);
 			// 缺 r → 1（照 ArmProgramEntry.load 的理由：0 现在是"无限"这个**合法值**，不能拿它兜底）
 			// 缺 s = 不是三长整数数组（老存档 / 没设偏移的调用）⇒ 回落 (0,0,0)：行为与改造前一致
-			callStack.add(new Frame(f.getInt("t"), f.getInt("e"), f.getInt("l"),
+			// ⚠️ 老存档里那个 `l`（调用方的循环计数）**不读**：任务级循环已删，这一帧不再有那个数。
+			callStack.add(new Frame(f.getInt("t"), f.getInt("e"),
 				f.contains("r") ? ArmProgramEntry.clampCallRepeat(f.getInt("r")) : 1,
 				NbtUtils.readBlockPos(f, "s")
 					.orElse(BlockPos.ZERO)));

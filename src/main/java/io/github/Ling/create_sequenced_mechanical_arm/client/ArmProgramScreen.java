@@ -45,9 +45,9 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
+import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptParser;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmRegistration;
 
 import io.netty.buffer.Unpooled;
@@ -263,8 +263,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int SIGNAL_UNIT_W = 18;
 	/** 第二行右沿（= {@code FIELD_X + FIELD_W}）：所有控件都必须 ≤ 它。 */
 	private static final int SIGNAL_ROW_END = FIELD_X + FIELD_W;
+	/**
+	 * 「个数」属性第二行的两个控件（取出 / 放入共用）：模式框 56 ＋ 2 ＝ 58 处接数值框 62，
+	 * {@code 56 + 2 + 62 = 120 = FIELD_W} ⇒ 右沿仍是 197（与第一行选择框对齐）。
+	 *
+	 * <p>模式框取 56 的来历：框里能放下的文字 ≤ {@code width - 10}（Create 的 {@code Label} 不裁剪），
+	 * 而最长的那个选项是 en 的 {@code At most}（7 字符 ≈ 42px）、中文「小于等于」4 字 ≈ 36px ⇒ 46 够用。
+	 * 数值框只放 1–64（{@code "64"} = 12px），62 宽绰绰有余。
+	 */
+	private static final int COUNT_MODE_X = FIELD_X;
+	private static final int COUNT_MODE_W = 56;
+	private static final int COUNT_X = COUNT_MODE_X + COUNT_MODE_W + 2;
+	private static final int COUNT_W = FIELD_X + FIELD_W - COUNT_X;
 	/** 第二行的**可用宽度**（左侧三个幽灵槽压到 GUI 111 ⇒ 115..197 只有 82px）。 */
 	private static final int SIGNAL_ROW_W = FIELD_W - 38;
+	/**
+	 * 「收发信号 · 距离」属性第二行那个数值框：起点沿用信号那一行的 {@link #SIGNAL_MODE_X}（115）、
+	 * 宽度铺到右沿 {@code SIGNAL_ROW_END}（197）—— 也就是**恰好 {@link #SIGNAL_ROW_W}（82）**。
+	 *
+	 * <p>为什么不从 {@link #FIELD_X}（77）起：「收发信号」这条操作的第二行在**动作头**那一态是从 115 起的
+	 * （它要占三个幽灵槽，槽位压到 GUI 111），距离这一行沿用同一个左沿 —— 在"动作头"与"距离"
+	 * 两个属性之间切换时那个框**不会左右跳**，而且天然让开槽位（{@code checkGhostSlotClearance} 盯着）。
+	 * 右沿与 {@code SIGNAL_ROW_END} 对齐 = 与第一行那个选择框同一条右边界（既有常量，**没有新数字**）。
+	 */
+	private static final int SIGNAL_RANGE_X = SIGNAL_MODE_X;
+	private static final int SIGNAL_RANGE_W = SIGNAL_ROW_END - SIGNAL_RANGE_X;
 	/**
 	 * 信号标题芯片的宽度上限 = {@code ROW_CLIP_RIGHT - 25 - 26} = <b>153</b>。
 	 *
@@ -1878,10 +1901,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	private List<Prop> props(Card card) {
-		if (card.task) {
-			ArmProgramTask task = task(card.taskIndex);
-			return task == null ? List.of() : taskProps(task);
-		}
+		if (card.task)
+			return taskProps(); // 任务卡片没有胶囊属性（任务级循环已删）
 		ArmProgramEntry entry = entry(card);
 		return entry == null ? List.of() : entryProps(entry);
 	}
@@ -1907,8 +1928,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 朝向**不是**胶囊属性：它和坐标一样是这个动作的必填项，放在编辑器第二行（见 buildBaseControls）；
 		// 前摇也没有了（已有独立的"等待"操作）
 		switch (entry.op) {
-			case TAKE -> props.add(intProp(tr("entry.count"), tr("hint.entry_count"), ArmEntryText.countText(entry), 1,
-				1, 64, () -> entry.count, v -> entry.count = v));
+			// 个数：**取出与放入共用同一个属性**（用户本轮口径：放入也开始读 count）。
+			// ⚠️ 只加这一项：其它属性（成功后 / 失败后 / 坐标 / 交互面）的显示判据一个字都没动。
+			case TAKE, DEPOSIT -> props.add(countProp(entry));
 			case UNLOAD -> {
 				props.add(enumProp(tr("entry.unload_repeat"), tr("hint.entry_unload_repeat"),
 					ArmEntryText.unloadRepeatText(entry), UnloadRepeat.values(), UnloadRepeat.ONCE,
@@ -1916,6 +1938,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				props.add(enumProp(tr("entry.unload_amount"), tr("hint.entry_unload_amount"),
 					ArmEntryText.unloadAmountText(entry), UnloadAmount.values(), UnloadAmount.ONE_STACK,
 					() -> entry.unloadAmount, v -> entry.unloadAmount = v));
+			}
+			// 「收发信号 · 距离」（用户口径：距离只约束「收」）：**只有「接收」模式才列这个属性** ——
+			// 用户原话"中断信号不需要这个属性"，而发送侧按已定方案也不读它（发出去了由收方的距离决定）。
+			// 两个判据分工：**列不列**看模式（isSignalReceive），**显不显示**看值（hasSignalRange）——
+			// 后者是单点方法，胶囊 / 反编译器 / 运行时都问它，别在这里第四次写同一个条件。
+			case SIGNAL -> {
+				if (entry.isSignalReceive())
+					props.add(signalRangeProp(entry));
 			}
 			case CALL -> {
 				props.add(intProp(tr("entry.call_repeat"), tr("hint.entry_call_repeat"),
@@ -2005,24 +2035,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return props;
 	}
 
-	private List<Prop> taskProps(ArmProgramTask task) {
-		List<Prop> props = new ArrayList<>();
-		// ★ 循环设置只属于**主任务**（列表里的第一个）：子任务的轮次归"调用点"决定
-		//（用户第二十七轮："把循环次数放在调用上"）。给子任务也显示循环，就会出现
-		// "调用 ×3 × 子任务自己循环 ×2"这种要相乘、谁都算不清的组合 —— 所以这里干脆不给它。
-		boolean isMainTask = program.tasks.isEmpty() || program.tasks.get(0) == task;
-		if (!isMainTask)
-			return props;
-		// §7.6 v4：任务只剩"循环"这一项设置 —— 频率搬去了「等待信号」操作，
-		// 优先级/取反随调度器一起删掉了（单线程没有"谁先跑"的问题）。
-		props.add(enumProp(tr("task.loop"), tr("hint.task_loop"),
-			tr("chip.loop", tr("opt." + task.loop.name()
-				.toLowerCase(java.util.Locale.ROOT))), LoopType.values(), LoopType.NONE, () -> task.loop,
-			v -> task.loop = v));
-		if (task.loop == LoopType.COUNT)
-			props.add(intProp(tr("task.loop_count"), tr("hint.task_loop_count"), tr("chip.loop_count", task.loopCount),
-				1, 1, ArmProgramTask.MAX_LOOP_COUNT, () -> task.loopCount, v -> task.loopCount = v));
-		return props;
+	/**
+	 * ★ <b>任务卡片上没有任何胶囊属性</b>（原来的「循环」与「循环次数」两个控件随字段一起删除，
+	 * 用户口径："任务循环次数已经不需要了，因为只有一个主任务有这个属性，但是主任务是不断循环的"）。
+	 *
+	 * <p>任务卡片仍然可以编辑「名字 + 图标」（那是卡片本体，不是胶囊属性）。
+	 * 空表下"添加属性 ＋"不画也不可点（见 {@link #addPropVisible}），属性选择框也不建
+	 * （见 {@code buildEditor} 里那句空表守卫）—— 不留一个"能点开却什么都没有"的入口。
+	 *
+	 * <p>⚠️ 别把"任务级属性"这条路整个删掉：{@link #props(Card)} / {@link #firstUnsetName(Card)}
+	 * 都按"空表"处理，将来任务真有了新属性只改这一处。
+	 */
+	private static List<Prop> taskProps() {
+		return List.of();
 	}
 
 	/**
@@ -2031,7 +2056,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * <p>⚠️ 按**条目**判而不是按类型（§7.16b 一.6）：同一条 {@code SIGNAL}，收有失败出口、发没有。
 	 *
 	 * <p>★ 「过滤」在这一类（用户口径：过滤是控制类操作、**失败默认 retry**）：不匹配 / 没有物品
-	 * 就与「等红石」一样在重试窗口里反复判断 ⇒ 它必须有「时限 + 单位」那两个控件
+	 * 就与「收信号」一样在重试窗口里反复判断 ⇒ 它必须有「时限 + 单位」那两个控件
 	 * （判据仍然只有 {@link ArmProgramEntry#hasRetryWindow()} 一处）。
 	 */
 	private static boolean hasFailure(ArmProgramEntry entry) {
@@ -2085,15 +2110,24 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 			@Override
 			void buildEditor() {
-				// 第二行两格：① 去向（继续/跳转）② 落点输入框（**总是显示**，用户要求"再跟一个输入框"）
-				inlinePicker(FIELD_X, 54, tr("entry.on_success"), tr("hint.entry_on_success"),
+				// 第二行：① 去向（继续 / 跳转）；② 落点输入框 —— **只有选了「跳转」才建**。
+				// 用户口径（带截图）："成功后不跳转也不应该给跳转位置的输入框" —— 不跳转时那个框
+				// 存的值运行时一个字都不读，摆在界面上只会让人以为"填了就会跳"。
+				// 宽度算式与原来**逐像素相同**（去向 54 ＋ 2 ＝ 56，落点 56..120 ⇒ 右沿 197），
+				// 只是把 54 提成具名常量 w1，别再出现"裸 54 / 裸 56"两份来源。
+				final int w1 = 54;
+				inlinePicker(FIELD_X, w1, tr("entry.on_success"), tr("hint.entry_on_success"),
 					List.of(tr("skip.stay"), tr("skip.jump")), entry.onSuccess == SkipAction.SKIP_TO ? 1 : 0, i -> {
 						entry.onSuccess = i == 1 ? SkipAction.SKIP_TO : SkipAction.NONE;
 						if (entry.onSuccess == SkipAction.SKIP_TO && entry.successTarget.isBlank())
 							entry.successTarget = "1";
+						// 去向换了 ⇒ 第二行的控件集合跟着换（"跳转"要多一个落点框，见上面）
 						rebuildPending = true;
 					});
-				textField(FIELD_X + 56, ROW2_Y, FIELD_W - 56, tr("entry.jump_target"),
+				if (entry.onSuccess != SkipAction.SKIP_TO)
+					return;
+				int x2 = FIELD_X + w1 + 2;
+				textField(x2, ROW2_Y, FIELD_W - w1 - 2, tr("entry.jump_target"),
 					tr("hint.entry_jump_target"), entry.successTarget, 32, v -> {
 						entry.successTarget = v;
 						dirty = true;
@@ -2105,14 +2139,18 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/**
 	 * 「失败后」—— <b>一个属性管住整条失败路径</b>（用户第四轮要求：把「时限」和「失败后」合起来）。
 	 *
-	 * <p>第二行（{@code retryWindow=true}，即取/放/卸/组装/等红石/**过滤**）：四个控件 ——
-	 * ① 去向（停下 / 跳过 / 跳转）② 落点输入框 ③ 时限 0–120 ④ 单位 t / s / m。
+	 * <p>第二行（{@code retryWindow=true}，即取 / 放 / 卸 / 组装 / <b>过滤</b> / 收信号）：四个控件 ——
+	 * ① 去向（停下 / 跳过 / 跳转）② 落点输入框（**只有「跳转」才有**）③ 时限 0–120 ④ 单位 t / s / m。
 	 * 语义：失败时<b>重试</b>，攒够 时限×单位 之后执行①；时限 = 0 就是"立刻"执行①；
 	 * ①②③④ 全不设（这个属性没加上）= 一直重试（{@code failAmount = -1}）——
 	 * 这正是**新建条目的默认值**，也就是用户要的"失败默认 retry"。
 	 *
-	 * <p>第二行（{@code retryWindow=false}，即左键的硬失败）：只有 ①去向 + ②落点 ——
+	 * <p>第二行（{@code retryWindow=false}，即左键的硬失败）：只有 ①去向 +（**选了「跳转」才有的**）②落点 ——
 	 * 硬失败是立刻发生的，给它"重试多久"没有意义。
+	 *
+	 * <p>★ <b>落点框只有「失败后 = 跳转」时才建</b>（用户带截图指出的：不跳转不该有落点输入框）：
+	 * 不跳转时那个值运行时不读，摆着只会让人以为"填了就会跳"。落点框不建时，后面的时限 / 单位
+	 * **整体左移填满空出来的位置**（右沿仍是 197，不留空洞）—— 见 buildEditor 里的 timeX / unitX。
 	 */
 	private Prop failureProp(ArmProgramEntry entry, boolean retryWindow) {
 		return new Prop(tr("entry.on_failure"), tr(retryWindow ? "hint.entry_on_timeout" : "hint.entry_on_failure"),
@@ -2144,7 +2182,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			@Override
 			void buildEditor() {
 				// ① 去向
-				int w1 = retryWindow ? 28 : 34;
+				final int w1 = retryWindow ? 28 : 34;
 				inlinePicker(FIELD_X, w1, tr("entry.on_failure"), tr("hint.entry_fail_action"),
 					List.of(tr("skip.stop"), tr("skip.continue"), tr("skip.jump")), entry.onTimeout.ordinal(), i -> {
 						pushUndo();
@@ -2158,22 +2196,35 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 							entry.failAmount = 0;
 						rebuildPending = true;
 					});
-				// ② 落点（总是显示：跳转要用它；不跳转时它只是留着）
-				int x2 = FIELD_X + w1 + 2;
-				textField(x2, ROW2_Y, retryWindow ? 38 : FIELD_W - w1 - 2, tr("entry.jump_target"),
-					tr("hint.entry_jump_target"), entry.timeoutTarget, 32, v -> {
-						entry.timeoutTarget = v;
-						dirty = true;
-					});
+				// ② 落点输入框 —— **只有选了「跳转」才建**（与「成功后」同一条用户口径：
+				//   "成功后不跳转也不应该给跳转位置的输入框"；失败后这一侧同理，用户带截图指出的）。
+				//   不跳转时那个值运行时不读，摆着只会让人以为"填了就会跳"。
+				final int x2 = FIELD_X + w1 + 2;
+				final boolean jumps = entry.onTimeout == SkipAction.SKIP_TO;
+				// 落点框的宽度：会重试 = 38（给后面的时限/单位让位）；硬失败 = 一路铺到右沿（它后面没有控件）
+				final int jumpW = retryWindow ? 38 : FIELD_W - w1 - 2;
+				if (jumps)
+					textField(x2, ROW2_Y, jumpW, tr("entry.jump_target"),
+						tr("hint.entry_jump_target"), entry.timeoutTarget, 32, v -> {
+							entry.timeoutTarget = v;
+							dirty = true;
+						});
 				if (!retryWindow)
 					return;
-				// ③ 时限 0–120（含 120）+ ④ 单位 t/s/m
-				inlineInt(x2 + 40, 30, tr("entry.timeout"), tr("hint.entry_timeout"), 0, 120,
+				// ③ 时限 0–120（含 120）+ ④ 单位 t/s/m —— **位置跟着 ② 走**：
+				//   有落点框时让它一整格（38 ＋ 2 的间隔，时限 147..177、单位 179..197，与原来逐像素相同）；
+				//   没有落点时这两格**整体左移**填满空出来的位置，右沿仍是 197（不留空洞、也不压去向框）。
+				//   ⚠️ 别在这里留裸常量：所有 x 都从 x2 与上面几个宽度算出来（40 / 72 那种数已经不再出现）。
+				final int timeW = 30;
+				final int timeX = jumps ? x2 + jumpW + 2 : x2;
+				inlineInt(timeX, timeW, tr("entry.timeout"), tr("hint.entry_timeout"), 0, 120,
 					Math.max(0, entry.failAmount), v -> {
 						pushUndo();
 						entry.failAmount = v;
 					});
-				inlinePicker(x2 + 72, 18, tr("entry.wait_unit"), tr("hint.entry_fail_unit"),
+				final int unitX = timeX + timeW + 2;
+				// 单位框的宽度**吸收剩余量**：有落点时是 18（与原来逐像素相同），没有落点时变宽到右沿。
+				inlinePicker(unitX, SIGNAL_ROW_END - unitX, tr("entry.wait_unit"), tr("hint.entry_fail_unit"),
 					labels(WaitUnit.values()), entry.failUnit.ordinal(), i -> {
 						entry.failUnit = WaitUnit.values()[i];
 						dirty = true;
@@ -2185,6 +2236,107 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 单位的短后缀：t / s / m（唯一实现在 {@link ArmEntryText#unitSuffix}）。 */
 	private static String unitSuffix(WaitUnit unit) {
 		return ArmEntryText.unitSuffix(unit);
+	}
+
+	/**
+	 * 「个数」属性（取出 / 放入共用；用户本轮口径：等于 / 小于等于 ＋ 数值）。
+	 *
+	 * <p>第二行**两个**控件（照本文件既有的"一行多个盒子"写法）：
+	 * ① 模式选择框（小于等于 / 等于 —— 顺序 = {@code CountMode.ordinal}，ATMOST 在前就是默认项）；
+	 * ② 数值框（1..64，范围常量只从 {@link ScriptParser#COUNT_MIN} / {@link ScriptParser#COUNT_MAX} 取）。
+	 *
+	 * <p>★ 判据一律问单点方法：显示看 {@link ArmProgramEntry#countIsSet()}，
+	 * 模式看 {@link ArmProgramEntry#countIsExact()}（胶囊文案也走同一支 {@code ArmEntryText.countText}）。
+	 * 这里**不重新解释** countMode —— 三处各写一个 if 的话，界面说"等于"、运行时按"小于等于"跑，
+	 * 那种分裂只有在实机里丢过物品才看得出来。
+	 */
+	private Prop countProp(ArmProgramEntry entry) {
+		return new Prop(tr("entry.count"), tr("hint.entry_count"), ArmEntryText.countText(entry), true) {
+			@Override
+			boolean isSet() {
+				return entry.countIsSet();
+			}
+
+			@Override
+			void reset() {
+				// 垃圾桶 = 恢复默认：个数与模式**一起**回默认（只清一个会留下"等于 1"的胶囊，
+				// 而 countIsSet() 会认为它还在 ⇒ 点垃圾桶后属性不消失）。
+				// ⚠️ 默认值按操作给（取出 1 / 放入 64）：问 defaultCount(op)，别写死 1。
+				entry.count = ArmProgramEntry.defaultCount(entry.op);
+				entry.countMode = ArmProgramEntry.CountMode.ATMOST;
+			}
+
+			@Override
+			void reveal() {
+				// 加进来就得一眼看出它非默认：默认是 ATMOST + defaultCount(op)，显式给"2 个"。
+				// ⚠️ 只动 count、**不动模式** —— "加一个属性只多一个胶囊"那条不变量盯着这里。
+				// ⚠️ 2 必须确实"非默认"：放入的默认是 64、取出的默认是 1，2 对两者都成立。
+				entry.count = 2;
+			}
+
+			@Override
+			void buildEditor() {
+				inlinePicker(COUNT_MODE_X, COUNT_MODE_W, tr("entry.count_mode"), tr("hint.entry_count_mode"),
+					labels(ArmProgramEntry.CountMode.values()), entry.countMode.ordinal(), i -> {
+						pushUndo();
+						entry.countMode = ArmProgramEntry.CountMode.values()[i];
+						rebuildPending = true;
+					});
+				inlineInt(COUNT_X, COUNT_W, tr("entry.count"), tr("hint.entry_count"), ScriptParser.COUNT_MIN,
+					ScriptParser.COUNT_MAX, entry.count, v -> {
+						pushUndo();
+						entry.count = v;
+					});
+			}
+		};
+	}
+
+	/**
+	 * 「接收距离」属性（用户口径：<b>距离只约束「收」</b> —— 我只接受半径内的来源，发出去不管）。
+	 *
+	 * <p>只有一个数值控件（0..{@link ArmProgramEntry#SIGNAL_RANGE_MAX}），位置见 {@link #SIGNAL_RANGE_X}。
+	 * 语义（模型里的长说明在 {@link ArmProgramEntry#signalRange}）：
+	 * <ul>
+	 *   <li>{@code 0}（默认）= 只有"来源与本臂<b>同一格</b>"才算收到 —— 自己发自己收的自环，用户说的
+	 *       "只能自己接收发送"；</li>
+	 *   <li>{@code 1..256} = 方块欧氏距离 {@code dx²+dy²+dz² <= N²}（含边界）；</li>
+	 *   <li><b>只有「接收」有它</b>：发送 / 中断既不显示也不读（见 {@code entryProps} 里那个分支）。</li>
+	 * </ul>
+	 *
+	 * <p>★ 判据只有 {@link ArmProgramEntry#hasSignalRange()}（收模式且半径 &gt; 0）；胶囊文案走
+	 * {@link ArmEntryText#signalRangeText}（与卡片上那枚胶囊同一句）。
+	 */
+	private Prop signalRangeProp(ArmProgramEntry entry) {
+		return new Prop(tr("entry.signal_range"), tr("hint.entry_signal_range"),
+			ArmEntryText.signalRangeText(entry), true) {
+			@Override
+			boolean isSet() {
+				return entry.hasSignalRange();
+			}
+
+			@Override
+			void reset() {
+				// 垃圾桶 = 恢复默认（0 = 只能同格收到），属性随之从卡片上消失
+				entry.signalRange = 0;
+			}
+
+			@Override
+			void reveal() {
+				// 加进来就得**一眼看出它非 0**：0 与"没加这个属性"在卡片上看不出区别。
+				// 16 是个一眼能读出来的小半径，也正是文档里的示例数。
+				entry.signalRange = 16;
+			}
+
+			@Override
+			void buildEditor() {
+				// 夹取只走 clampSignalRange（读盘 / 脚本解析 / 这里三处共用同一个区间）
+				inlineInt(SIGNAL_RANGE_X, SIGNAL_RANGE_W, tr("entry.signal_range"), tr("hint.entry_signal_range"),
+					0, ArmProgramEntry.SIGNAL_RANGE_MAX, entry.signalRange, v -> {
+						pushUndo();
+						entry.signalRange = ArmProgramEntry.clampSignalRange(v);
+					});
+			}
+		};
 	}
 
 	private Prop intProp(Component name, Component hint, Component chip, int def, int min, int max, IntSupplier get,
@@ -2399,7 +2551,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 末尾"＋"打开的那个属性：优先选**还没加**的第一个，全加满了就选第一个。 */
 	@Nullable
 	private String firstUnsetName(Card card) {
-		List<Prop> all = card.task ? taskProps(task(card.taskIndex)) : entryProps(entry(card));
+		List<Prop> all = card.task ? taskProps() : entryProps(entry(card));
 		for (Prop prop : all)
 			if (!prop.show())
 				return prop.name.getString();
@@ -2590,6 +2742,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		if (editing.propName() == null) {
 			if (entry != null) {
 				picker(tr("entry.op"), tr("hint.entry_op"), labels(OperationType.values()), entry.op.ordinal(), i -> {
+					// 记下切换**之前**的操作：下面"个数默认值随操作变"那一段要拿旧默认值比对。
+					OperationType previousOp = entry.op;
 					entry.op = OperationType.values()[i];
 					// ★ 坐标对"不需要坐标的操作"没有意义，**切过去就清掉**（用户第四十一轮就是被这个问住的：
 					//   脚本里 `call 任务` 后面跟出来一串 `-3 0 -1` —— 那是"这条条目曾经是别的操作"
@@ -2599,6 +2753,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					//   ⚠️ 判据用**条目级**的 needsTarget()：过滤的容器模式有坐标（它是数据参数），不能清。
 					if (!entry.needsTarget())
 						entry.offset = BlockPos.ZERO;
+					// ★ 「个数」的默认值**按操作变**（取出 1 / 放入 64，见 defaultCount）：
+					//   切操作时把仍是"上一个操作的默认值"的个数换成新操作的默认值 ——
+					//   否则从「取出 1」切到「放入」会变成"一次只放 1 个"（旧行为是一整摞），
+					//   而玩家并没有动过那个数字。玩家自己改过的值（≠ 旧默认）原样保留。
+					//   ⚠️ 判据用 defaultCount，别在这里硬编码 1 / 64 两份。
+					if (entry.op.hasCount() && entry.count == ArmProgramEntry.defaultCount(previousOp))
+						entry.count = ArmProgramEntry.defaultCount(entry.op);
 					rebuildPending = true;
 					dirty = true;
 				});
@@ -2614,7 +2775,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 
 		// ——— 第一行：属性选择框（全部属性，含还没加的）；第二行：选中属性的值 ———
-		List<Prop> all = entry != null ? entryProps(entry) : taskProps(task);
+		// ★ 任务卡片没有任何属性（循环已删）⇒ 空表，什么都不建：连"属性选择框"都不画
+		//   （一个零项的选择框既没有内容、滚起来还会越界）。
+		List<Prop> all = entry != null ? entryProps(entry) : taskProps();
+		if (all.isEmpty())
+			return;
 		int index = 0;
 		for (int i = 0; i < all.size(); i++)
 			if (all.get(i).name.getString()
@@ -2622,7 +2787,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				index = i;
 				break;
 			}
-		editingProp = all.isEmpty() ? null : all.get(index);
+		editingProp = all.get(index);
 		final int startIndex = index;
 		picker(tr("edit.prop"), tr("hint.edit_prop"),
 			all.stream()
@@ -2935,12 +3100,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 						dirty = true;
 					});
 			}
-			// 等红石（相邻信号）：第二行 = 极性；图标用第一个幽灵槽记
-			case WAIT_REDSTONE -> inlinePicker(FIELD_X, FIELD_W, tr("entry.wait_power"),
-				tr("hint.entry_wait_power"), List.of(tr("on"), tr("off")), entry.waitForPowered ? 0 : 1, i -> {
-					entry.waitForPowered = i == 0;
-					dirty = true;
-				});
 			// 收发信号（红石链接频率）：**两个**幽灵槽记一对物品（槽位/槽里的物品由 renderEditor 画，
 			// 它们是真菜单槽，拖物品进来即绑定），所以第二行必须让开**两个**槽 ——
 			// 用户实测："滚动选择框的左边把幽灵物品槽位占用了"（第二个槽在 GUI 73..91，而这一行原来从 77 起）。
@@ -3138,7 +3297,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		ModGuiTextures.DATA_AREA_END.render(graphics, x + width - 2, y);
 	}
 
-	/** 第二行的枚举选择框（上游 {@code addSelectionScrollInput}）。 */
+	/**
+	 * 第二行的枚举选择框（上游 {@code addSelectionScrollInput}）。
+	 *
+	 * <p>⚠️ 文字画在 {@code y + 5} 而不是 {@code y + 4}（用户带截图反馈："第二行的文字似乎高了 1~2 个像素"）：
+	 * 第二行是 **18px** 高的 DATA_AREA 盒子，8px 字体垂直居中应当是 {@code (18 - 8) / 2 = 5}
+	 * —— {@code +4} 会整体高 1px。胶囊那边是 **16px** 盒子（{@code +4} 正好居中），**别跟着改**。
+	 */
 	private void inlinePicker(int x, int width, Component name, Component hint, List<Component> options, int selected,
 		IntConsumer onPick) {
 		addEditorBox(x, ROW2_Y, width);
@@ -3148,13 +3313,17 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		input.addHint(hint.copy());
 		input.setState(selected);
 		input.calling(onPick::accept);
-		Label label = label(leftPos + x + 5, topPos + ROW2_Y + 4,
+		Label label = label(leftPos + x + 5, topPos + ROW2_Y + 5,
 			options.get(Mth.clamp(selected, 0, options.size() - 1)), width - 10);
 		input.writingTo(label);
 		addEditorWidget(input);
 	}
 
-	/** 第二行的数值选择框（上游 {@code addScrollInput}）。{@code max} 是**含**的上界。 */
+	/**
+	 * 第二行的数值选择框（上游 {@code addScrollInput}）。{@code max} 是**含**的上界。
+	 *
+	 * <p>文字 {@code y + 5}：理由与 {@link #inlinePicker} 同一条（18px 盒子 + 8px 字体居中）。
+	 */
 	private void inlineInt(int x, int width, Component name, Component hint, int min, int max, int value,
 		IntConsumer onPick) {
 		addEditorBox(x, ROW2_Y, width);
@@ -3167,7 +3336,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		input.addHint(hint.copy());
 		input.setState(value);
 		input.calling(onPick::accept);
-		Label label = label(leftPos + x + 5, topPos + ROW2_Y + 4, Component.literal(String.valueOf(value)),
+		Label label = label(leftPos + x + 5, topPos + ROW2_Y + 5, Component.literal(String.valueOf(value)),
 			width - 10);
 		input.writingTo(label);
 		addEditorWidget(input);
@@ -3184,11 +3353,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 *
 	 * <p>附加行必须是**一行一个 Component**（见 {@link #noteTipLines}）：把带 {@code \n} 的整段塞进
 	 * 一个组件，在 tooltip 装得下屏幕时不会被断行，{@code \n} 会画成一个"缺字方框"（用户实测）。
+	 *
+	 * <p>⚠️ 输入框的 y 是 {@code y + 5}、高度 8：理由与 {@link #inlinePicker} 同一条
+	 * （18px 的 DATA_AREA 盒子 + 8px 字体垂直居中 = 5）。{@code y} 是"第二行"那一格，
+	 * 对话框那条（也是 18px 盒子）同样适用；而 16px 的胶囊（{@code +4}）**不在这个函数里**。
 	 */
 	private void textField(int x, int y, int width, Component name, Component hint, List<Component> extraLines,
 		String value, int maxLength, Consumer<String> onEdit) {
 		addEditorBox(x, y, width);
-		EditBox box = new EditBox(font, leftPos + x + 5, topPos + y + 4, width - 10, 8, name);
+		EditBox box = new EditBox(font, leftPos + x + 5, topPos + y + 5, width - 10, 8, name);
 		box.setBordered(false);
 		box.setTextColor(0xffffff);
 		box.setMaxLength(maxLength);
@@ -3314,8 +3487,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 「过滤」的**过滤位置**两个选项（手持 / 容器，用户口径的"二选一"）。
 	 *
 	 * <p>与 {@link #signalModeLabels} 同一条理由**不能走通用的 {@link #labels(Enum[])}**：
-	 * 那个按枚举名派生成 {@code opt.held} / {@code opt.container}（后者恰好是**任务循环**那个
-	 * "一直重复"的键），而这里要的是 {@code opt.filter_held} / {@code opt.filter_container}
+	 * 那个按枚举名派生成 {@code opt.held} / {@code opt.container}，而语言文件里没有这两个键，
+	 * 而这里要的是 {@code opt.filter_held} / {@code opt.filter_container}
 	 * —— 键命不中时选择框里画的就是**裸键名**，而这两个键名都超宽（42−10=32），会直接糊出框。
 	 * 顺序按 ordinal 走（下标 i ↔ {@code FilterSource.values()[i]}），枚举增删项也不会错位。
 	 */
@@ -3672,8 +3845,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			ArmProgram program = new ArmProgram();
 			ArmProgramTask task = new ArmProgramTask();
 			task.name = "smoke";
-			task.loop = LoopType.COUNT;
-			task.loopCount = 3;
 			program.tasks.add(task);
 			for (OperationType op : OperationType.values()) {
 				ArmProgramEntry entry = new ArmProgramEntry();
@@ -3800,6 +3971,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String signalRow = screen.signalRowProblem();
 			if (signalRow != null && problem == null)
 				problem = "收发信号第二行: " + signalRow;
+			// ★ 收信号的「距离」属性：只对「接收」出现，且第二行那一格的几何对得上常量
+			String signalRangeRow = screen.signalRangeRowProblem();
+			if (signalRangeRow != null && problem == null)
+				problem = "收发信号距离: " + signalRangeRow;
+			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
+			String exitRow = screen.exitRowProblem();
+			if (exitRow != null && problem == null)
+				problem = "成功后 / 失败后第二行: " + exitRow;
 			// ★ 断言 10：收/发两套文案 + 「切到发送时默认 1gt」那条陷阱
 			String signalWording = screen.signalWordingProblem();
 			if (signalWording != null && problem == null)
@@ -4528,9 +4707,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 属性表 / 基础内容必须跟动作走（用户实测反馈："等待不该有超时，也不该有时限"、
 	 * "选了等待还让我填坐标"、"朝向应该放第二行"、"所有动作都能加完成后跳转"）。
 	 *
-	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出/放入/卸货/组装/等红石/过滤）
+	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出/放入/卸货/组装/过滤/收信号）
 	 * 才有「超时后 + 时限」；③ 前摇已经删掉（任何动作都不该再有它）；④ 朝向**不在任何卡片的胶囊里**；
-	 * ⑤ 第二行的 DATA_AREA 盒子数：位置类 1（坐标）、左键/右键 2（坐标+朝向）、等红石 2、等待 3。
+	 * ⑤ 第二行的 DATA_AREA 盒子数：位置类 1（坐标）、左键/右键 2（坐标+朝向）、等待 2、收信号 1/3。
 	 */
 	@Nullable
 	private String checkPropTable(ArmProgramTask task) {
@@ -4591,7 +4770,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// 收发信号：模式 +（只有**发送通电**才有）数值 + 单位 ⇒ 接收 / 中断 1、发送 3
 				//（用户本轮口径：「中断」= 立即清除，**不接收持续时间** ⇒ 它不再有数值/单位两个盒子）
 				case SIGNAL -> entry.hasSignalDuration() ? 3 : 1;
-				case WAIT_REDSTONE, CALL, THROW -> 1;
+				case CALL, THROW -> 1;
 				case BREAK -> 0;
 				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 = 2
 				//（用户第四十三轮：容器模式**不要朝向** —— 读容器与方位无关）。
@@ -4610,7 +4789,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				init(minecraft, 427, 240);
 				int failBoxes = editorBoxes.size();
 				editing = null;
-				int want = retryWindow ? 4 : 2;
+				// ★ 落点框**只在「失败后 = 跳转」时才建**（用户带截图指出的：不跳转不该有落点输入框）
+				//   ⇒ 盒子数跟着去向走：会重试 = 4（跳转）/ 3（停下 / 跳过）；硬失败 = 2（跳转）/ 1。
+				//   反证：把 buildEditor 里那个 `if (jumps)` 去掉（回到"总是建落点"）⇒ 烟雾数据里
+				//   那些「失败后 = 停下」的条目会报"应当是 3 个控件、实际 4"，这条立刻红。
+				boolean jumps = entry.onTimeout == SkipAction.SKIP_TO;
+				int want = retryWindow ? (jumps ? 4 : 3) : (jumps ? 2 : 1);
 				if (failBoxes != want)
 					return entry.op + " 的「失败后」应当是 " + want + " 个控件，实际 " + failBoxes;
 			}
@@ -4691,6 +4875,238 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	// ——— §7.16b 四「客户端」的三条新断言 ———
+
+	/**
+	 * 自检：两个出口的**落点输入框只在「跳转」时才建**，且剩下的控件跟着左移填满（用户带截图指出的）。
+	 *
+	 * <p>用户口径：<i>"成功后不跳转也不应该给跳转位置的输入框"</i>，失败后同理。不跳转时那个值运行时
+	 * 一个字都不读，摆着只会让人以为"填了就会跳"。
+	 *
+	 * <p>断言三件事（每个去向各一遍）：
+	 * <ol>
+	 *   <li><b>盒子数跟着去向走</b>：成功后 = 1（继续）/ 2（跳转）；失败后（会重试）= 3（停下 / 跳过）/
+	 *       4（跳转）；失败后（硬失败，挖掘 / 调用）= 1 / 2；</li>
+	 *   <li><b>不留空洞、不重叠</b>：相邻两个盒子之间恰好 2px（含去向 → 落点、落点 → 时限、
+	 *       时限 → 单位）。落点框不建时时限与单位**整体左移**，间距仍是 2；</li>
+	 *   <li><b>右沿恒为 {@link #SIGNAL_ROW_END}（197）</b>：单位框 / 落点框吸收剩余宽度，
+	 *       整排铺满（"左移填满空出来的位置"就是这条）。</li>
+	 * </ol>
+	 *
+	 * <p>反证：把 {@code failureProp} 里那个 {@code if (jumps)} 去掉（回到"落点总是建"）⇒ ① 立刻红
+	 * （"失败后 = 停下"那条期待 3 个、实际 4 个）；把 {@code timeX} 写回 {@code x2 + 40}（不左移）⇒ ② 红
+	 * （去向框右沿 105 与时限框左沿 147 相隔 42px 的空洞）；把单位的宽度写死 18 ⇒ ③ 红。
+	 */
+	@Nullable
+	private String exitRowProblem() {
+		if (program.tasks.isEmpty())
+			return "自检前提不成立：烟雾程序里没有任务";
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry probe = new ArmProgramEntry();
+		probe.op = OperationType.TAKE; // 有重试窗口
+		task.entries.add(probe);
+		int index = task.entries.size() - 1;
+		try {
+			String successName = tr("entry.on_success").getString();
+			String failureName = tr("entry.on_failure").getString();
+			// ——— 「成功后」：继续 = 只建去向（1）、跳转 = 多一个落点框（2）———
+			probe.op = OperationType.USE;
+			probe.onTimeout = SkipAction.NONE;
+			probe.failAmount = -1;
+			Prop successRow = null;
+			for (Prop prop : entryProps(probe))
+				if (prop.name.getString()
+					.equals(successName))
+					successRow = prop;
+			if (successRow == null)
+				return "属性表里没有「成功后」（所有动作都该有）";
+			for (SkipAction action : List.of(SkipAction.NONE, SkipAction.SKIP_TO)) {
+				probe.onSuccess = action;
+				editingProp = successRow;
+				editing = new EditTarget(false, 0, index, successName);
+				init(minecraft, 427, 240);
+				String problem = exitRowGeometry("成功后=" + action, action == SkipAction.SKIP_TO ? 2 : 1, 54);
+				editing = null;
+				editingProp = null;
+				if (problem != null)
+					return problem;
+			}
+			probe.onSuccess = SkipAction.NONE;
+			// ——— 「失败后」（会重试）：停下 / 跳过 3 个、跳转 4 个 ———
+			probe.op = OperationType.TAKE;
+			Prop failureRow = null;
+			for (Prop prop : entryProps(probe))
+				if (prop.name.getString()
+					.equals(failureName))
+					failureRow = prop;
+			if (failureRow == null)
+				return "会重试的操作缺少「失败后」";
+			for (SkipAction action : List.of(SkipAction.NONE, SkipAction.CONTINUE, SkipAction.SKIP_TO)) {
+				probe.onTimeout = action;
+				probe.failAmount = 0; // 让它 isSet（属性显示出来，编辑器才进得去）
+				editingProp = failureRow;
+				editing = new EditTarget(false, 0, index, failureName);
+				init(minecraft, 427, 240);
+				String problem = exitRowGeometry("失败后=" + action, action == SkipAction.SKIP_TO ? 4 : 3, 28);
+				editing = null;
+				editingProp = null;
+				if (problem != null)
+					return problem;
+			}
+			// ——— 「失败后」（硬失败：挖掘）：停下 / 跳过 1 个、跳转 2 个 ———
+			probe.op = OperationType.MINE;
+			probe.onSuccess = SkipAction.NONE;
+			probe.failAmount = -1;
+			failureRow = null;
+			for (Prop prop : entryProps(probe))
+				if (prop.name.getString()
+					.equals(failureName))
+					failureRow = prop;
+			if (failureRow == null)
+				return "硬失败的操作缺少「失败后」";
+			for (SkipAction action : List.of(SkipAction.CONTINUE, SkipAction.SKIP_TO)) {
+				probe.onTimeout = action;
+				editingProp = failureRow;
+				editing = new EditTarget(false, 0, index, failureName);
+				init(minecraft, 427, 240);
+				String problem = exitRowGeometry("硬失败 失败后=" + action, action == SkipAction.SKIP_TO ? 2 : 1,
+					34);
+				editing = null;
+				editingProp = null;
+				if (problem != null)
+					return problem;
+			}
+		} finally {
+			editing = null;
+			editingProp = null;
+			task.entries.remove(index);
+		}
+		return null;
+	}
+
+	/**
+	 * {@link #exitRowProblem} 的几何部分：盒子数 = {@code want}、相邻恰隔 2px、右沿 = 197。
+	 *
+	 * @param firstW 第一格（去向框）的宽度 —— 它必须与 {@code successProp} / {@code failureProp} 里的算式一致
+	 */
+	@Nullable
+	private String exitRowGeometry(String label, int want, int firstW) {
+		int boxes = editorBoxes.size();
+		if (boxes != want)
+			return label + " 的第二行应当是 " + want + " 个控件，实际 " + boxes;
+		int expectedLeft = FIELD_X;
+		for (int i = 0; i < boxes; i++) {
+			int left = editorBoxes.get(i)[0] - leftPos;
+			int width = editorBoxes.get(i)[2];
+			if (left != expectedLeft)
+				return label + " 的第 " + (i + 1) + " 个控件起点不对（" + left + " ≠ " + expectedLeft
+					+ "）：控件之间不许留空洞、也不许叠在一起";
+			if (i == 0 && width != firstW)
+				return label + " 的去向框宽度不是常量（" + width + " ≠ " + firstW + "）";
+			int right = left + width;
+			if (right > SIGNAL_ROW_END)
+				return label + " 的第 " + (i + 1) + " 个控件越界（右沿 " + right + " > " + SIGNAL_ROW_END + "）";
+			expectedLeft = right + 2; // 相邻两格之间固定 2px（与去向 → 落点原来那条 2px 一致）
+		}
+		// 只要**不止一个**控件，最后一个就必须**收在右沿**上（单位框 / 落点框吸收剩余宽度 ⇒ 整排铺满）。
+		// 只剩去向框一个时没有"空出来的位置"要填，它按自己的宽度摆着（右沿 ≤ 197 已在上面查过）。
+		if (boxes > 1) {
+			int last = editorBoxes.get(boxes - 1)[0] - leftPos + editorBoxes.get(boxes - 1)[2];
+			if (last != SIGNAL_ROW_END)
+				return label + " 的第二行没有铺到右沿（" + last + " ≠ " + SIGNAL_ROW_END
+					+ "）—— 应当由最后一格吸收剩余宽度";
+		}
+		return null;
+	}
+
+	/**
+	 * 自检：收信号的「距离」属性第二行那**一格**（用户本轮新增的属性）。
+	 *
+	 * <p>断言四件事：
+	 * <ol>
+	 *   <li><b>只有「接收」模式的属性表里有它</b>：发送 / 中断一个都不许有（用户原话"中断信号不需要
+	 *       这个属性"；发送侧按已定方案也不读它）；</li>
+	 *   <li>它真建出 <b>1</b> 个 DATA_AREA 盒子，左沿 = {@link #SIGNAL_MODE_X}、宽度 =
+	 *       {@link #SIGNAL_ROW_W}、右沿 = {@link #SIGNAL_ROW_END}（197）；</li>
+	 *   <li>最大值 {@link ArmProgramEntry#SIGNAL_RANGE_MAX}（256）的文字在 {@code width - 10} 里放得下
+	 *       （Create 的 Label 不裁剪）；</li>
+	 *   <li>控件不出面板（右沿 &le; 200，与 {@link #signalRowProblem} 同一条）。</li>
+	 * </ol>
+	 *
+	 * <p>反证：把 {@code SIGNAL_RANGE_W} 改成 {@code FIELD_W}（忘了减起点差）⇒ ② 红（右沿 235）；
+	 * 在 {@code entryProps} 的 SIGNAL 分支删掉 {@code if (entry.isSignalReceive())} ⇒ ① 红；
+	 * 把 {@code SIGNAL_RANGE_W} 压到 20 ⇒ ③ 红（"256" 放不下）。
+	 */
+	@Nullable
+	private String signalRangeRowProblem() {
+		if (program.tasks.isEmpty())
+			return "自检前提不成立：烟雾程序里没有任务";
+		String name = tr("entry.signal_range").getString();
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry probe = new ArmProgramEntry();
+		probe.op = OperationType.SIGNAL;
+		task.entries.add(probe);
+		int index = task.entries.size() - 1;
+		try {
+			// ① 只有「接收」有它
+			probe.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
+			Prop rangeProp = null;
+			for (Prop prop : entryProps(probe))
+				if (prop.name.getString()
+					.equals(name))
+					rangeProp = prop;
+			if (rangeProp == null)
+				return "「接收」的属性表里没有「距离」";
+			for (ArmProgramEntry.SignalMode mode : List.of(ArmProgramEntry.SignalMode.SEND_ON,
+				ArmProgramEntry.SignalMode.SEND_OFF)) {
+				probe.signalMode = mode;
+				if (entryProps(probe).stream()
+					.anyMatch(p -> p.name.getString()
+						.equals(name)))
+					return "模式 " + mode + " 的属性表里不该有「距离」（距离只约束「收」）";
+			}
+			// ②③④ 真建一次，量几何
+			probe.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
+			probe.signalRange = 16; // 非 0 才 isSet（属性显示出来，编辑器才进得去）
+			editingProp = rangeProp;
+			editing = new EditTarget(false, 0, index, name);
+			init(minecraft, 427, 240);
+			if (editorBoxes.size() != 1) {
+				int boxes = editorBoxes.size();
+				editing = null;
+				editingProp = null;
+				return "「距离」的第二行应当是 1 个控件，实际 " + boxes;
+			}
+			int left = editorBoxes.get(0)[0] - leftPos;
+			int width = editorBoxes.get(0)[2];
+			if (left != SIGNAL_RANGE_X)
+				return "「距离」控件的起点不对（" + left + " ≠ " + SIGNAL_RANGE_X + "）";
+			if (width != SIGNAL_RANGE_W)
+				return "「距离」控件的宽度不对（" + width + " ≠ " + SIGNAL_RANGE_W + "）";
+			if (left + width != SIGNAL_ROW_END)
+				return "「距离」控件没有铺到右沿（" + (left + width) + " ≠ " + SIGNAL_ROW_END + "）";
+			int numWidth = font.width(String.valueOf(ArmProgramEntry.SIGNAL_RANGE_MAX));
+			if (numWidth > SIGNAL_RANGE_W - 10)
+				return "「距离」的最大值放不下（" + numWidth + " > " + (SIGNAL_RANGE_W - 10) + "）";
+			for (GuiEventListener listener : editorWidgets) {
+				if (!(listener instanceof ScrollInput input) || !input.visible)
+					continue;
+				// 只查那一格数值框（属性选择框在第一行，宽度不一样，别拿它当判据）
+				if (input.getY() - topPos != ROW2_Y)
+					continue;
+				int right = input.getX() - leftPos + input.getWidth();
+				if (right > 200) {
+					editing = null;
+					editingProp = null;
+					return "「距离」控件出面板（右沿 " + right + "）";
+				}
+			}
+		} finally {
+			editing = null;
+			editingProp = null;
+			task.entries.remove(index);
+		}
+		return null;
+	}
 
 	/**
 	 * 自检 9：收发信号第二行那 **82px** 的算术（用户反馈第二轮：模式 30 + 2 + 数值 30 + 2 + 单位 18）。
@@ -4950,9 +5366,24 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		"chip.signal_recv", "chip.signal_send", "chip.signal_cut",
 		"hint.entry_signal_mode", "hint.entry_signal_ticks",
 		"entry.signal_mode", "entry.signal_wait_off", "entry.wait_unit",
+		// 「接收距离」（本轮新增，用户口径：距离只约束「收」）：属性名 / 悬停提示 / 胶囊片段。
+		// 少一个的表现是"界面上显示裸键名"，编译与运行都不报错 —— 所以放在这张表里一起守。
+		"entry.signal_range", "hint.entry_signal_range", "chip.signal_range",
 		// 「调用偏移」（本轮新增）：属性名 / 悬停提示 / 胶囊片段 —— 三个键都要在两边语言文件里，
 		// 少一个的表现是"界面上显示裸键名"，编译与运行都不报错（所以放在这张表里一起守）。
 		"entry.call_shift", "hint.entry_call_shift", "chip.call_shift"
+	};
+
+	/**
+	 * 「个数」属性（取出 / 放入）用到的键：属性名 / 模式名 / 悬停提示 / 两个胶囊文案 / 两个选项名。
+	 *
+	 * <p>与 {@link #SIGNAL_LANG_KEYS} 同一条理由：{@code opt.atmost} / {@code opt.exact} 是
+	 * 由枚举名**派生**的键（{@code labels(CountMode.values())}），改名 / 加项会自动换成查不到的键，
+	 * 而界面上只表现为"选择框里画着裸键名"，编译与运行都不报错。
+	 */
+	private static final String[] COUNT_LANG_KEYS = {
+		"entry.count", "entry.count_mode", "hint.entry_count", "hint.entry_count_mode",
+		"chip.count_atmost", "chip.count_exact", "opt.atmost", "opt.exact"
 	};
 
 	/**
@@ -4963,8 +5394,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 除命令反馈外还有 §12.3b 那两个新备注的悬停标题（现在挂在标题芯片上）。
 	 */
 	private static final String[] SCRIPT_LANG_KEYS = {
-		"need_player", "bad_name", "read_failed", "check_ok", "check_failed", "warning",
-		"export_need_card", "export_empty", "export_header", "export_written", "export_failed",
+		// ⚠️ 这张表只管"代码里真的会去查的键"：表里多写一个从没被查过的键，自检就会一直红在这里
+		//   （上一版正是这样：`read_failed` / `export_header` 是早期迭代留下的**不存在**的键名，
+		//   语言文件里从来没有它们，代码里也没有任何 `tr("code.…")` 查它们 ⇒ 这条自检从落地起就是 FAIL）。
+		//   以后加命令反馈时：先写代码里的 `tr("code.xxx")`，再把 xxx 加进这里。
+		"need_player", "bad_name", "check_ok", "check_failed", "warning",
+		"export_need_card", "export_empty", "export_written", "export_failed",
 		"import_need_card", "import_over_limit", "import_too_large", "import_ok",
 		"program_note", "task_note"
 	};
@@ -5002,11 +5437,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				if (!en.containsKey(full))
 					missing.add("en:" + key);
 			}
+			// 「个数」属性这一组（用户本轮：等于 / 小于等于 + 数值，取出与放入共用）
+			for (String key : COUNT_LANG_KEYS) {
+				String full = prefix + key;
+				if (!zh.containsKey(full))
+					missing.add("zh:" + key);
+				if (!en.containsKey(full))
+					missing.add("en:" + key);
+			}
 			// 脚本的键挂在**另一个前缀**下：命令反馈在 `create_sequenced_mechanical_arm.code.*`，
 			// 两个备注的悬停标题在 `create_sequenced_mechanical_arm.gui.editor.entry.*`
 			for (String key : SCRIPT_LANG_KEYS) {
 				boolean command = key.startsWith("export") || key.startsWith("import")
-					|| key.equals("need_player") || key.equals("bad_name") || key.equals("read_failed")
+					|| key.equals("need_player") || key.equals("bad_name")
 					|| key.equals("check_ok") || key.equals("check_failed") || key.equals("warning");
 				String full = command ? "create_sequenced_mechanical_arm.code." + key : prefix + "entry." + key;
 				if (!zh.containsKey(full))
@@ -5018,6 +5461,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				return "缺键 " + missing;
 			if (zh.containsKey(prefix + "opt.wait_signal") || en.containsKey(prefix + "opt.wait_signal"))
 				return "残留死键 opt.wait_signal（枚举改名后它再也查不到）";
+			// ★ 本轮删除的两批键也一并钉住（死键没有编译期成本，只会在下一次改名时变成"看起来还在"）：
+			//   ① 被删除的那条操作（用户："我们有更好的无线信号系统可以使用"）⇒
+			//      opt.wait_redstone / entry.wait_power / hint.entry_wait_power 再也没有任何代码查它们；
+			//   ② 任务级循环删除（主任务恒为无限循环）⇒ task.loop / task.loop_count / hint.task_loop /
+			//      hint.task_loop_count / chip.loop / chip.loop_count / opt.none / opt.count / opt.forever /
+			//      opt.until_fail / gui.arm.loop 全部作废。
+			//   反证：把任意一个键加回**任意一份**语言文件（两边都加也一样）⇒ 这条立刻报红。
+			String[] dead = {
+				"opt.wait_redstone", "entry.wait_power", "hint.entry_wait_power",
+				"task.loop", "task.loop_count", "hint.task_loop", "hint.task_loop_count",
+				"chip.loop", "chip.loop_count",
+				"opt.none", "opt.count", "opt.forever", "opt.until_fail"
+			};
+			List<String> resurrected = new ArrayList<>();
+			for (String key : dead) {
+				String full = prefix + key;
+				if (zh.containsKey(full) || en.containsKey(full))
+					resurrected.add(key);
+			}
+			if (!resurrected.isEmpty())
+				return "残留死键（对应的功能已删除，代码里没有地方再查它们）：" + resurrected;
+			String goggleLoop = "create_sequenced_mechanical_arm.gui.arm.loop";
+			if (zh.containsKey(goggleLoop) || en.containsKey(goggleLoop))
+				return "残留死键 gui.arm.loop（护目镜那行「循环 x / y」已随任务级循环删除）";
 			return null;
 		} catch (Throwable t) {
 			return "读语言文件时异常 " + t;
@@ -5332,7 +5799,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					action(null, leftPos + 25 + plusX + 11, cardTop + CARD_ROW_Y + 8, -1);
 					if ("addprop".equals(lastHit))
 						return "卡片 " + i + " 的 ＋ 已经在裁剪区外，却仍然点得到（画在 x=" + plusX + "）";
-					if (!addPropReachable(chipWidth(shownProps(card).get(shownProps(card).size() - 1))))
+					// ⚠️ 任务卡片现在没有任何胶囊属性（循环已删）⇒ 空表也不能在这里越界：
+					//   空表时"最后一枚胶囊的宽"按 0 算（此时 ＋ 永远在裁剪区内，这一支本来就到不了）。
+					List<Prop> lastBasis = shownProps(card);
+					int lastChipWidth = lastBasis.isEmpty() ? 0 : chipWidth(lastBasis.get(lastBasis.size() - 1));
+					if (!addPropReachable(lastChipWidth))
 						return "卡片 " + i + " 的 ＋ 不可见又够不到（滚到最右也没用；画在 x=" + plusX + "）";
 				}
 			}

@@ -16,23 +16,21 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * 一个任务（PLAN.md §4.1 的 Task）：一串有序操作 + 循环。
+ * 一个任务（PLAN.md §4.1 的 Task）：一串有序操作。
  *
  * <p><b>§7.6 v4：单线程 + 调用栈</b>。任务不再有优先级 / 频率门控 ——
  * 列表里的<b>第一个任务就是主任务</b>（默认执行），其余任务只能被
- * {@link OperationType#CALL 调用}触发。红石链接频率搬进了「等待信号」操作，
- * 于是"这个任务要通电才跑"变成任务开头的第一条 `等待信号` 条目。
+ * {@link OperationType#CALL 调用}触发。红石链接频率搬进了「收发信号」操作，
+ * 于是"这个任务要通电才跑"变成任务开头的第一条 `signal recv` 条目。
  *
- * <p>循环留在任务上（用户："一个任务就只包含循环次数的设置了"）：
- * 子任务循环 n 次，就等于"调用它 n 次的语义"由它自己定义。
+ * <p>★ <b>任务级循环已删除</b>（用户口径："任务循环次数已经不需要了，因为只有一个主任务有这个属性，
+ * 但是主任务是不断循环的"）：<b>主任务恒为无限循环</b>（走完最后一条就回到第 1 条，永久重复），
+ * 要收尾只能用「退出」(收工停机) 或「抛错」(失败停机)；<b>子任务</b>则跑完就返回调用方，
+ * 跑几轮由**调用点**的 {@code callRepeat} 决定。所以任务上只剩名字 / 备注 / 图标 + 条目表。
  */
 public class ArmProgramTask {
 
-	public static final int MAX_LOOP_COUNT = 1024;
-
 	public String name = "task";
-	public LoopType loop = LoopType.NONE;
-	public int loopCount = 1;
 	/**
 	 * 任务备注（PLAN.md §12.3b，NBT 键 {@code note}）：{@code task} 那一行的行尾注释，
 	 * 或紧跟其后的独占行注释块。
@@ -45,22 +43,11 @@ public class ArmProgramTask {
 	public ItemStack icon = ItemStack.EMPTY;
 	public final List<ArmProgramEntry> entries = new ArrayList<>();
 
-	public enum LoopType {
-		/** 走完一轮就结束。 */
-		NONE,
-		/** 走完一轮就回到开头，重复 {@link #loopCount} 轮。 */
-		COUNT,
-		/** 走完一轮就回到开头，一直重复（靠「退出」操作收尾）。 */
-		FOREVER,
-		/** 一直重复；失败时**停在原地等条件恢复**（不整轮重来）—— 取不到就等着那种。 */
-		UNTIL_FAIL
-	}
-
 	public CompoundTag save(HolderLookup.Provider registries) {
 		CompoundTag tag = new CompoundTag();
 		tag.putString("name", name);
-		tag.putString("loop", loop.name());
-		tag.putInt("loopN", loopCount);
+		// ★ 任务级循环（老的 `loop` / `loopN` 两个键）**已删、且不做兼容读取**（用户明确不要向后兼容）：
+		//   老卡里那两个键读的时候直接无视，下一次保存它们就消失了。
 		// 非空才写（同 sigmode 的省字节做法，§12.3b）
 		if (!note.isEmpty())
 			tag.putString("note", note);
@@ -76,8 +63,6 @@ public class ArmProgramTask {
 	public static ArmProgramTask load(CompoundTag tag, HolderLookup.Provider registries) {
 		ArmProgramTask task = new ArmProgramTask();
 		task.name = tag.contains("name") ? tag.getString("name") : "task";
-		task.loop = readLoop(tag.getString("loop"));
-		task.loopCount = Math.max(1, Math.min(MAX_LOOP_COUNT, tag.getInt("loopN")));
 		// 备注不在这里夹（见 ArmProgram.load 的说明）：截断会破坏"文本 → 模型 → 文本"的不变量 #1
 		task.note = tag.getString("note");
 		if (tag.contains("icon"))
@@ -88,7 +73,7 @@ public class ArmProgramTask {
 
 		// ——— v3 → v4：任务的频率门控搬成任务开头的「收发信号（收）」条目 ———
 		// 老卡片的意思是"这个任务要通电（或断电）才跑"，直接丢掉会让它从"门控"变成"常驻"，
-		// 静默改变行为；写成第一条等待信号就完全等价（signalMode 缺省 = RECEIVE，行为不变）。
+		// 静默改变行为；写成第一条「收发信号（收）」就完全等价（signalMode 缺省 = RECEIVE，行为不变）。
 		Couple<Frequency> legacy = readLegacyFrequency(tag, registries);
 		if (legacy != null) {
 			ArmProgramEntry gate = new ArmProgramEntry();
@@ -145,26 +130,9 @@ public class ArmProgramTask {
 		return parsed;
 	}
 
-	private static LoopType readLoop(String name) {
-		for (LoopType type : LoopType.values()) {
-			if (type.name()
-				.equalsIgnoreCase(name))
-				return type;
-		}
-		return LoopType.NONE;
-	}
-
 	/** 护目镜 / 调试用的一行描述。 */
 	public String describeHead() {
-		StringBuilder sb = new StringBuilder("task[").append(name)
-			.append("] loop=")
-			.append(loop);
-		if (loop == LoopType.COUNT)
-			sb.append('x')
-				.append(loopCount);
-		sb.append(" entries=")
-			.append(entries.size());
-		return sb.toString();
+		return "task[" + name + "] entries=" + entries.size();
 	}
 
 	/** 调试用：把任务里的操作逐条列成文本。 */

@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
@@ -194,6 +195,7 @@ public class SequencedArmSelfTest {
 		checkSignalSendReceive(server);
 		checkSignalCutHasNoDuration(server);
 		checkSignalActiveModel(server);
+		checkSignalRange(server);
 		checkEntryPredicates();
 		checkSignalSendPreset();
 		checkArmPointClassification(server);
@@ -203,6 +205,7 @@ public class SequencedArmSelfTest {
 		checkClaimFollowsIntent(server);
 		checkDeployPrecheckScansAllSlots(server);
 		checkRetractBeforeNextMove(server);
+		checkCountMode(server);
 		checkMovePoseTimeline();
 		checkClaimPositionPolicy();
 		checkEffects(server);
@@ -221,6 +224,7 @@ public class SequencedArmSelfTest {
 		checkFilterOperation(server);
 		checkEntryRate(server);
 		checkRunLog(server);
+		checkMainTaskLoopsForever(server);
 		checkAttackAndMine(server);
 		checkClipboardChecklist(server);
 		checkOverflowStackAndExchange(server);
@@ -1275,6 +1279,269 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
+	 * 「个数模式」自检（用户本轮口径：<b>等于 / 小于等于</b>，且这条属性**同时服务取出与放入**）。
+	 *
+	 * <p>语义（已与用户对过，别再改）：<b>等于</b> = 必须能完成恰好 N 个，不够就走「失败后」（默认重试）；
+	 * <b>小于等于</b> = 有多少动多少、上限 N，不足 N <b>不算失败</b>，也就是取出操作改造前的行为。
+	 *
+	 * <p>六条行为 + 一条 NBT 往返，每条的反证（改哪一行会变红）写在各自注释里。
+	 * 夹具与 {@link #checkRetractBeforeNextMove} 同一套：真世界 + 真臂 + 真置物台 + 真 {@code runtime.tick()}，
+	 * 自检**不跑运动学** —— 每拍把 {@code chasedPointProgress} 当作"已到位"（公开字段，见 PLAN §0.5 夹具注意）。
+	 */
+	private static void checkCountMode(MinecraftServer server) {
+		// ——— ⑦ NBT 往返（不依赖世界，先跑：夹具坏了也不该把这条一起吞掉）———
+		// 反证：把 save() 里那句 `if (countMode != CountMode.ATMOST)` 去掉（无条件写 cmode）⇒
+		// 「小于等于不写键」红；把 load() 的 enumOf 默认值写成 EXACT ⇒「老卡读成小于等于」红。
+		ArmProgramEntry exactEntry = new ArmProgramEntry();
+		exactEntry.op = OperationType.TAKE;
+		exactEntry.count = 3;
+		exactEntry.countMode = ArmProgramEntry.CountMode.EXACT;
+		CompoundTag exactTag = exactEntry.save(server.registryAccess());
+		ArmProgramEntry exactBack = ArmProgramEntry.load(exactTag.copy(), server.registryAccess());
+		boolean exactKept = exactBack.countIsExact() && exactBack.count == 3;
+		ArmProgramEntry atMostEntry = new ArmProgramEntry();
+		atMostEntry.op = OperationType.DEPOSIT;
+		atMostEntry.count = 3;
+		CompoundTag atMostTag = atMostEntry.save(server.registryAccess());
+		boolean keyAbsent = !atMostTag.contains("cmode") && !atMostEntry.countIsExact();
+		CompoundTag legacyTag = exactTag.copy();
+		legacyTag.remove("cmode"); // 老卡：只有 count、没有模式
+		ArmProgramEntry legacyBack = ArmProgramEntry.load(legacyTag, server.registryAccess());
+		boolean legacyAtMost = !legacyBack.countIsExact() && legacyBack.count == 3;
+
+		// ——— ⑧ 「个数」的默认值**按操作给**（用户口径：放入默认 64 = 整摞 = 改造前行为）———
+		// 反证：
+		//   ① 把 defaultCount() 里的 DEPOSIT 分支删掉（放入也回落到 1）⇒「放入默认是 64」红；
+		//   ② 把 load() 里那条"放入 + 没写过 cmode + count==1 ⇒ 64"的迁移删掉 ⇒「老卡的放入迁成整摞」红；
+		//   ③ 把那句迁移的 `!tag.contains("cmode")` 去掉 ⇒「等于 1 的放入没被迁移」红（玩家真选的 1 被改掉）。
+		boolean depositDefault = ArmProgramEntry.defaultCount(OperationType.DEPOSIT) == 64
+			&& ArmProgramEntry.defaultCount(OperationType.TAKE) == 1;
+		// 默认的放入**不该**顶着"最多 64 个"的胶囊（countIsSet 要跟 defaultCount 比，不是跟 1 比）
+		ArmProgramEntry freshDeposit = new ArmProgramEntry();
+		freshDeposit.op = OperationType.DEPOSIT;
+		freshDeposit.count = ArmProgramEntry.defaultCount(OperationType.DEPOSIT);
+		boolean depositDefaultQuiet = !freshDeposit.countIsSet();
+		// 老卡：改造前「放入」根本不读 count，存着的 1 是字段初始值 ⇒ 读进来必须变成 64
+		CompoundTag oldDepositTag = new CompoundTag();
+		oldDepositTag.putString("op", OperationType.DEPOSIT.name());
+		oldDepositTag.putInt("count", 1);
+		ArmProgramEntry oldDepositBack = ArmProgramEntry.load(oldDepositTag, server.registryAccess());
+		boolean legacyDepositMigrated = oldDepositBack.count == 64;
+		// 玩家**真的**选了"放入恰好 1 个"（EXACT 一定写过 cmode）⇒ 不许被那条迁移改掉
+		CompoundTag exactOneTag = oldDepositTag.copy();
+		exactOneTag.putString("cmode", ArmProgramEntry.CountMode.EXACT.name());
+		ArmProgramEntry exactOneBack = ArmProgramEntry.load(exactOneTag, server.registryAccess());
+		boolean exactOneKept = exactOneBack.count == 1 && exactOneBack.countIsExact();
+
+		LOGGER.info("[selftest] 个数模式 NBT: 等于模式往返={} 小于等于不写键={} 老卡读成小于等于={}", exactKept, keyAbsent,
+			legacyAtMost);
+		LOGGER.info("[selftest] 个数默认值: 放入默认=64 且 取出默认=1={} 默认的放入不占胶囊={} 老卡的放入迁成整摞={} 等于1的放入没被迁移={}",
+			depositDefault, depositDefaultQuiet, legacyDepositMigrated, exactOneKept);
+		if (!depositDefault)
+			LOGGER.error("[selftest] 「个数」的默认值不是「取出 1 / 放入 64」—— 默认的放入会从整摞变成一次 1 个");
+		if (!depositDefaultQuiet)
+			LOGGER.error("[selftest] 默认的「放入」在卡片上顶着个数胶囊（countIsSet 在拿 1 当基准，应该问 defaultCount）");
+		if (!legacyDepositMigrated)
+			LOGGER.error("[selftest] 老卡里的「放入」没有迁成 64（整摞）—— 那些卡会一次只放 1 个");
+		if (!exactOneKept)
+			LOGGER.error("[selftest] 显式选了「放入·等于 1 个」的条目被迁移改成了 64（cmode 键的判据丢了）");
+		if (!exactKept)
+			LOGGER.error("[selftest] 个数模式「等于」过不了 NBT 往返（存了 EXACT、读回来是别的模式）");
+		if (!keyAbsent)
+			LOGGER.error("[selftest] 默认的「小于等于」把 cmode 键写进了 NBT —— 老卡存取前后就不再逐字节相同");
+		if (!legacyAtMost)
+			LOGGER.error("[selftest] 没有 cmode 键的老卡没有读成「小于等于」—— 老程序的取出行为会被改掉");
+
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 94, 200, spawn.getZ() + 94);
+		// 每个用例一个**自己的**置物台：夹具之间不互相清容器（清容器要真抽，抽的路径本身也是被测对象）
+		BlockPos takeAtMostSrc = armPos.offset(2, 0, 0);
+		BlockPos takeExactSrc = armPos.offset(0, 0, 2);
+		BlockPos takeShortSrc = armPos.offset(0, 0, -2);
+		BlockPos depAtMostSink = armPos.offset(-2, 0, 0);
+		BlockPos depExactSink = armPos.offset(2, 0, -2);
+		BlockPos depShortSink = armPos.offset(-2, 0, 2);
+		BlockPos[] targets = { takeAtMostSrc, takeExactSrc, takeShortSrc, depAtMostSink, depExactSink, depShortSink };
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState[] oldTargets = new BlockState[targets.length];
+		for (int i = 0; i < targets.length; i++)
+			oldTargets[i] = level.getBlockState(targets[i]);
+
+		boolean takeAtMost = false;
+		boolean takeExactEnough = false;
+		boolean takeExactShort = false;
+		boolean depositAtMost = false;
+		boolean depositExactEnough = false;
+		boolean depositExactShort = false;
+		boolean fed = false;
+		String detail;
+		try {
+			// 先把区块加载出来：启动期新加的方块实体会被**挂起**到区块真正加载为止（其它夹具同一条纪律）
+			level.getChunkAt(armPos);
+			for (BlockPos target : targets)
+				level.getChunkAt(target);
+			BlockState depot = stateOf("create:depot");
+			if (depot == null) {
+				LOGGER.error("[selftest] 个数模式自检**没跑起来**：找不到 create:depot");
+				return;
+			}
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			for (BlockPos target : targets)
+				level.setBlockAndUpdate(target, depot);
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 个数模式自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
+			// 前提：物品真的放进了载具（否则下面的断言全是空转）。
+			// ⚠️ 用 `&` 而不是 `&&`：三个载具都要真的喂上，短路会让"哪一个没喂上"看不出来。
+			fed = putOneInto(level, takeAtMostSrc, new ItemStack(Items.IRON_INGOT, 1))
+				& putOneInto(level, takeExactSrc, new ItemStack(Items.IRON_INGOT, 5))
+				& putOneInto(level, takeShortSrc, new ItemStack(Items.IRON_INGOT, 1));
+
+			// ——— ① 取出 · 小于等于：容器 1 个、count=3 ⇒ 有多少拿多少（1 个），**不算失败** ———
+			// 反证：让 take() 在 ATMOST 下也要求够数 ⇒ 源还剩 1、臂里 0。
+			clearArm(arm);
+			int beforeAtMost = countIn(level, takeAtMostSrc);
+			runCountEntry(arm, takeAtMostSrc, OperationType.TAKE, 3, ArmProgramEntry.CountMode.ATMOST,
+				() -> countIn(level, takeAtMostSrc) != beforeAtMost, 80);
+			takeAtMost = countIn(level, takeAtMostSrc) == 0 && armItems(arm) == 1;
+
+			// ——— ② 取出 · 等于 · 够数：容器 5 个、count=3 ⇒ **恰好**拿走 3 个（容器剩 2）———
+			// 反证：把 take() 的 EXACT 分支改回 ATMOST 那一支（跳过 exactTakeSlot）⇒ 臂里会多出来（3 没变但
+			// 若把 count 当上限用的旧写法会把 5 拿光）⇒ 容器剩 0、臂里 5。
+			clearArm(arm);
+			int beforeExact = countIn(level, takeExactSrc);
+			runCountEntry(arm, takeExactSrc, OperationType.TAKE, 3, ArmProgramEntry.CountMode.EXACT,
+				() -> countIn(level, takeExactSrc) != beforeExact, 80);
+			takeExactEnough = countIn(level, takeExactSrc) == 2 && armItems(arm) == 3;
+
+			// ——— ③ 取出 · 等于 · 不够：容器 1 个、count=3 ⇒ **不成功**（走 handleFailure、什么都不动）———
+			// 反证：把 EXACT 的"凑不出就失败"删掉（退化成有多少拿多少）⇒ 容器剩 0、臂里 1。
+			clearArm(arm);
+			runCountEntry(arm, takeShortSrc, OperationType.TAKE, 3, ArmProgramEntry.CountMode.EXACT, () -> false, 80);
+			String takeShortFailure = arm.runtime.getLastFailure();
+			takeExactShort = countIn(level, takeShortSrc) == 1 && armItems(arm) == 0
+				&& takeShortFailure != null && takeShortFailure.contains("数量不足");
+
+			// ——— ④ 放入 · 小于等于：手上 5 个、count=3 ⇒ 目标 +3、臂里剩 2 ———
+			// 反证：把 deposit() 的 ATMOST 分支改回"整摞都塞"（`held` 而不是 `copyWithCount(amount)`）⇒ 目标 5、臂里 0；
+			// 把回收那句漏掉"没参与的那一截"（`back = remainder`）⇒ 臂里 0（物品凭空少了 2 个）。
+			arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 5));
+			runCountEntry(arm, depAtMostSink, OperationType.DEPOSIT, 3, ArmProgramEntry.CountMode.ATMOST,
+				() -> arm.getHeldItem()
+					.getCount() != 5, 80);
+			depositAtMost = countIn(level, depAtMostSink) == 3 && arm.getHeldItem()
+				.getCount() == 2;
+
+			// ——— ⑤ 放入 · 等于 · 够数：手上 5 个、count=3 ⇒ 目标 +3、臂里剩 2 ———
+			// 反证：EXACT 分支忘了先判"手上够不够"、直接按 min 塞 ⇒ ③④ 里那种"塞一半"就会在 ⑥ 被抓住。
+			arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 5));
+			runCountEntry(arm, depExactSink, OperationType.DEPOSIT, 3, ArmProgramEntry.CountMode.EXACT,
+				() -> arm.getHeldItem()
+					.getCount() != 5, 80);
+			depositExactEnough = countIn(level, depExactSink) == 3 && arm.getHeldItem()
+				.getCount() == 2;
+
+			// ——— ⑥ 放入 · 等于 · 不够：手上 2 个、count=3 ⇒ 目标不变、臂里仍 2 ———
+			// 反证：删掉 EXACT 的"手上不足 N 个"那条判定 ⇒ 会先真塞 2 个（目标 +2），物品被拆散了。
+			arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 2));
+			runCountEntry(arm, depShortSink, OperationType.DEPOSIT, 3, ArmProgramEntry.CountMode.EXACT, () -> false, 80);
+			String depShortFailure = arm.runtime.getLastFailure();
+			depositExactShort = countIn(level, depShortSink) == 0 && arm.getHeldItem()
+				.getCount() == 2 && depShortFailure != null && depShortFailure.contains("手上不足");
+
+			detail = "源1余=" + countIn(level, takeAtMostSrc) + " 源2余=" + countIn(level, takeExactSrc) + " 源3余="
+				+ countIn(level, takeShortSrc) + " 目标1=" + countIn(level, depAtMostSink) + " 目标2="
+				+ countIn(level, depExactSink) + " 目标3=" + countIn(level, depShortSink) + " 臂内=" + armItems(arm)
+				+ " 失败原因=" + text(takeShortFailure) + " / " + text(depShortFailure);
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			for (int i = 0; i < targets.length; i++)
+				level.setBlockAndUpdate(targets[i], oldTargets[i]);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 个数模式: 取出·小于等于={} 取出·等于·够数={} 取出·等于·不够={} 放入·小于等于={} "
+			+ "放入·等于·够数={} 放入·等于·不够={}（前提·物品已放入载具={} 实测：{}）", takeAtMost, takeExactEnough,
+			takeExactShort, depositAtMost, depositExactEnough, depositExactShort, fed, detail);
+		if (!fed)
+			LOGGER.error("[selftest] 个数模式自检**没跑起来**：物品没能放进载具 —— 六条断言等于没测");
+		if (!takeAtMost)
+			LOGGER.error("[selftest] 「取出 · 小于等于」不再「有多少拿多少」（容器 1 个、个数 3）：这等于改掉了"
+				+ "取出改造前的默认行为");
+		if (!takeExactEnough)
+			LOGGER.error("[selftest] 「取出 · 等于」没有恰好拿 3 个（容器 5 个时应当剩 2、臂里 3）");
+		if (!takeExactShort)
+			LOGGER.error("[selftest] 「取出 · 等于」在凑不出 3 个时仍然动了东西（容器 1 个时应当原样不动、"
+				+ "臂里不多个数，并走「失败后」重试）");
+		if (!depositAtMost)
+			LOGGER.error("[selftest] 「放入 · 小于等于」没有按上限搬（手上 5 个、个数 3 ⇒ 目标 3、臂里 2）");
+		if (!depositExactEnough)
+			LOGGER.error("[selftest] 「放入 · 等于」没有恰好搬 3 个（手上 5 个 ⇒ 目标 3、臂里 2）");
+		if (!depositExactShort)
+			LOGGER.error("[selftest] 「放入 · 等于」在手上不足 3 个时仍然塞了东西（手上 2 个时应当一个都不动）");
+	}
+
+	/**
+	 * 把一条「取 / 放」条目跑到**第一次有结果**为止（自检不跑运动学：每拍把
+	 * {@code chasedPointProgress} 当作"已到位"，手法与 {@link #checkRetractBeforeNextMove} 相同）。
+	 *
+	 * <p>{@code stop} 是"这一条已经有结果"的<b>可观测量</b>（源 / 目标 / 臂里某个数量变了），
+	 * 不是运行时内部游标 —— 主任务恒循环，成功后这一条会立刻从头再来（第二次当然会失败），
+	 * 不停在第一次结果处，断言看到的就永远是第二轮。
+	 */
+	private static void runCountEntry(SequencedArmBlockEntity arm, BlockPos target, OperationType op, int count,
+		ArmProgramEntry.CountMode mode, BooleanSupplier stop, int maxTicks) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检个数";
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = op;
+		entry.offset = target.subtract(arm.getBlockPos());
+		entry.count = count;
+		entry.countMode = mode;
+		task.entries.add(entry);
+		program.tasks.add(task);
+		arm.setProgram(program); // 换程序会 resetToStart（游标归零、错误清空、收回）
+		for (int i = 0; i < maxTicks && !stop.getAsBoolean(); i++) {
+			arm.chasedPointProgress = 1f;
+			arm.runtime.tick(arm);
+		}
+	}
+
+	/** 那个方块里现在一共有几个物品（所有槽合计；夹具里只有一种物品，数得清就够用）。 */
+	private static int countIn(ServerLevel level, BlockPos pos) {
+		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
+		if (handler == null)
+			return -1;
+		int total = 0;
+		for (int slot = 0; slot < handler.getSlots(); slot++)
+			total += handler.getStackInSlot(slot)
+				.getCount();
+		return total;
+	}
+
+	/** 臂里现在一共有几个物品（手持 + 溢出）—— 判"臂里多了几个"用它，比只看手持稳。 */
+	private static int armItems(SequencedArmBlockEntity arm) {
+		int total = arm.getHeldItem()
+			.getCount();
+		for (ItemStack stack : arm.getOverflow())
+			total += stack.getCount();
+		return total;
+	}
+
+	/** 把臂清空（手持 + 溢出）：每个用例都从"空手"开始，断言才数得清。 */
+	private static void clearArm(SequencedArmBlockEntity arm) {
+		arm.setHeldItem(ItemStack.EMPTY);
+		arm.getOverflow()
+			.clear();
+	}
+
+	/**
 	 * 一次移动的**姿态时间线**（纯函数，不需要世界）—— 用户第二十七轮续三十九实测发现的回归。
 	 *
 	 * <p><b>用户实测</b>：<i>"动画的旋转缺失了一部分……原本的旋转，前面一半没有了，然后突然瞬移到后面一半，
@@ -1796,9 +2063,11 @@ public class SequencedArmSelfTest {
 		// v27：旧的混合操作 PUNCH 必须迁到挖掘（老卡因此继续只挖方块、不会突然开始打实体）
 		boolean legacyPunch = OperationType.byName("PUNCH", null) == OperationType.MINE;
 
-		// 等待类必须**只有**三种原地等待：运行时靠这个标志决定"等待前先收回手臂"，
+		// 等待类必须**只有**两种原地等待：运行时靠这个标志决定"等待前先收回手臂"，
 		// 把控制类（调用/退出/抛错）算进去就会在连续两条目标之间多绕一趟（§7.6 v4）。
-		boolean waitSplit = OperationType.WAIT.isWait() && OperationType.WAIT_REDSTONE.isWait()
+		// ⚠️ 原来的第三条（"等相邻红石"）已按用户口径整体删除（"我们有更好的无线信号系统可以使用"）：
+		//   判据本身仍然只有 {@code OperationType.isWait()} 一处，这行只负责把它钉死。
+		boolean waitSplit = OperationType.WAIT.isWait()
 			&& OperationType.SIGNAL.isWait() && !OperationType.CALL.isWait() && !OperationType.BREAK.isWait()
 			&& !OperationType.THROW.isWait() && !OperationType.TAKE.isWait() && !OperationType.MINE.isWait();
 
@@ -1836,7 +2105,7 @@ public class SequencedArmSelfTest {
 		if (!legacyPunch)
 			LOGGER.error("[selftest] 旧名字 PUNCH 没有迁到「挖掘」—— 老卡里的攻击条目会突然开始打实体（可能打到玩家）");
 		if (!waitSplit)
-			LOGGER.error("[selftest] 等待类分类错了：只有 等待/等红石/等信号 该在等待前收回手臂，控制类不算");
+			LOGGER.error("[selftest] 等待类分类错了：只有 等待/收信号 该在等待前收回手臂，控制类不算");
 		if (interactable)
 			LOGGER.warn("[selftest] 石头居然被认成 Create 交互点（上游变了？）—— 这条自检的前提需要复核");
 		if (!outside || !anglesOk)
@@ -1986,7 +2255,7 @@ public class SequencedArmSelfTest {
 	 *
 	 * <p>用户问："连续无进展超时是如何触发的呢？我觉得我们应该不需要这个吧？毕竟有些事件需要玩家主动触发，
 	 * 动力臂必须一直等待。" —— 原来那两条计时/步数预算（60s 无成功、20 万步）确实是**按时间**停机的，
-	 * 等玩家补货、等红石链接通电都会误杀，已删除；换成只认"原地绕圈"的空转守卫。
+	 * 等玩家补货、等待红石链接通电都会误杀，已删除；换成只认"原地绕圈"的空转守卫。
 	 *
 	 * <p>这条自检守的就是新守卫的**判据**：移动/等待/延迟/重试必须算"在跟世界打交道"（否则长时间的等待会被
 	 * 当成空转停机 —— 这正是我们要根除的那个行为）；而空闲/执行不能算（否则守卫永远抓不到任何东西）。
@@ -2000,7 +2269,7 @@ public class SequencedArmSelfTest {
 			&& !ProgramRuntime.isPaced(ProgramRuntime.EntryState.EXECUTING)
 			&& !ProgramRuntime.isPaced(ProgramRuntime.EntryState.HALTED);
 
-		// 两种操作的"等待"必须都在 paced 里：WAIT/等红石/等信号 进 WAITING，阻塞重试（等玩家补货）进 RETRY
+		// 两种操作的"等待"必须都在 paced 里：WAIT/收信号 进 WAITING，阻塞重试（等玩家补货）进 RETRY
 		boolean waitsCovered = OperationType.WAIT.isWait() && OperationType.SIGNAL.isWait()
 			&& ProgramRuntime.isPaced(ProgramRuntime.EntryState.WAITING)
 			&& ProgramRuntime.isPaced(ProgramRuntime.EntryState.RETRY);
@@ -2363,6 +2632,109 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 剪贴板装不下时没有「只带最新那些行」或丢的行数没报对", detail);
 		if (!readOnlyRefused)
 			LOGGER.error("[selftest] 只读剪贴板被改写了 —— 1.20 老存档迁移过来的那种剪贴板必须一个字都不动", detail);
+	}
+
+	/**
+	 * ★ 「主任务恒为无限循环」的自检（用户口径："任务循环次数已经不需要了，因为只有一个主任务有这个属性，
+	 * 但是主任务是不断循环的"）。
+	 *
+	 * <p><b>为什么要有这一条</b>：任务级循环（{@code loop} / {@code loopN}）整块删除之后，
+	 * "跑完最后一条会怎样"完全由 {@code ProgramRuntime.finishTask} 里主任务那一支决定 ——
+	 * 它写错的表现是**静默**的（程序停在末尾不动，或者一轮跑完就收工），界面上看不出任何异常。
+	 *
+	 * <p><b>夹具</b>：主任务 = [等待 0t, 等待 0t]（两条**一瞬间就出结果**的无动作条目；不碰世界、
+	 * 不依赖交互点，也不产生"失败重试"）。跑到 {@code 80} 拍，用两个**互相独立**的证人数"跑了几轮"：
+	 * <ol>
+	 *   <li><b>游标</b>：先看见它停在**第 2 条**（下标 1），再看见它**回到第 1 条**（下标 0）——
+	 *       这就是"一轮走完、从头再来"；每一对"见到 1 → 见到 0"记一轮；</li>
+	 *   <li><b>运行日志</b>：数"跑完一轮"那行的条数（记录点⑧，{@code finishTask} 里唯一的日志行）。</li>
+	 * </ol>
+	 * 另外全程 {@code isHalted()} 必须为假 —— 恒循环**不许**被当成"跑完就停机"。
+	 *
+	 * <p><b>改哪一行会变红</b>：
+	 * <ul>
+	 *   <li>把 {@code ProgramRuntime.finishTask} 里主任务那一支改成停机（{@code endTask} / {@code halt}）⇒
+	 *       游标轮数 = 0（停在末尾不动）且 {@code isHalted()} 为真、日志里**一条**"跑完一轮"都没有；</li>
+	 *   <li>把"重新回到第 1 条"写成 {@code entryIndex = task.entries.size() - 1}（回到**最后一条**）⇒
+	 *       游标永远不再回到 0 ⇒ 轮数 0（这条断言就是靠"下标 1 → 0 的回落"抓它的）；</li>
+	 *   <li>只让它重跑**一次**（例如加个计数器停在第二轮）⇒ 轮数 < 3，与日志条数同样对不上。</li>
+	 * </ul>
+	 */
+	private static void checkMainTaskLoopsForever(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		// 与别的夹具错开（各条自检用 +52…+108 一带的空地）
+		BlockPos armPos = new BlockPos(spawn.getX() + 120, 200, spawn.getZ() + 76);
+		BlockState oldArm = level.getBlockState(armPos);
+		int rounds = 0;
+		int loggedRounds = 0;
+		boolean sawSecondEntry = false;
+		boolean halted = false;
+		boolean ran = false;
+		try {
+			level.getChunkAt(armPos); // 离出生点有点远：先把区块拿下来，免得方块实体没建出来（同 checkRunLog）
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 主任务恒循环 自检没跑起来（臂的方块实体没建出来）");
+			} else {
+				ran = true;
+				arm.setSpeed(32); // 转速为 0 时解释器整 tick 跳过
+				// 容量钉成一个远大于本段产出的确定值（本段约十几轮 ⇒ 二十来行）
+				SequencedArmBlockEntity.pinLogLinesForTests(SequencedArmBlockEntity.LOG_LINES_PER_PAGE
+					* SequencedArmBlockEntity.LOG_MAX_PAGES);
+				ArmProgram program = new ArmProgram();
+				ArmProgramTask main = new ArmProgramTask();
+				main.name = "恒循环";
+				for (int i = 0; i < 2; i++) {
+					ArmProgramEntry wait = new ArmProgramEntry();
+					wait.op = OperationType.WAIT;
+					wait.waitAmount = 0;
+					wait.waitUnit = ArmProgramEntry.WaitUnit.TICK;
+					main.entries.add(wait);
+				}
+				program.tasks.add(main);
+				arm.setProgram(program);
+				arm.runtime.resetToStart(arm); // 也把运行日志清空（换卡/回到开头 = 另一个故事）
+				int previous = arm.runtime.entryIndex;
+				for (int i = 0; i < 80; i++) {
+					arm.runtime.tick(arm);
+					int now = arm.runtime.entryIndex;
+					if (now == 1)
+						sawSecondEntry = true;
+					// 一轮走完的证据：游标从**后面**回到第 1 条（下标 0）
+					if (previous != 0 && now == 0 && arm.runtime.callStack.isEmpty())
+						rounds++;
+					previous = now;
+					if (arm.runtime.isHalted())
+						halted = true;
+				}
+				for (String line : arm.logSnapshot())
+					if (line.contains("跑完一轮"))
+						loggedRounds++;
+			}
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 主任务恒循环 自检异常：{}", t.toString());
+		} finally {
+			SequencedArmBlockEntity.pinLogLinesForTests(null); // 异常路径也不能把容量留给后面的夹具
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 主任务恒循环: 跑起来={} 见到第 2 条={} 回到第 1 条的轮数={} 日志里「跑完一轮」={} 期间停机={}",
+			ran, sawSecondEntry, rounds, loggedRounds, halted);
+		if (!ran)
+			LOGGER.error("[selftest] 主任务恒循环 自检没跑起来 —— 等于没测");
+		if (halted)
+			LOGGER.error("[selftest] 主任务跑完一轮就**停机**了（用户口径：主任务是不断循环的）—— "
+				+ "查 ProgramRuntime.finishTask 的主任务那一支是不是又走回 endTask/halt");
+		if (!sawSecondEntry)
+			LOGGER.error("[selftest] 主任务恒循环 的对照组不成立：80 拍里一次都没看见游标停在**第 2 条**"
+				+ "（夹具的两条「等待 0t」根本没跑起来，下面的轮数断言就是测了空气）");
+		if (rounds < 3 || loggedRounds < 3)
+			LOGGER.error("[selftest] 主任务没有**恒循环**（回到第 1 条的轮数={}、日志里「跑完一轮」={}，都应当 ≥ 3）—— "
+				+ "用户口径：任务循环次数不需要了，主任务走完最后一条就回到第 1 条永久重复；"
+				+ "查 ProgramRuntime.finishTask 里 callStack 为空时那一支（它必须重置游标并 markProgramDirty，而不是 endTask）",
+				rounds, loggedRounds);
 	}
 
 	/**
@@ -3020,6 +3392,44 @@ public class SequencedArmSelfTest {
 		if (!filterTwoQuestions)
 			LOGGER.error("[selftest] 过滤的两处判据混了（应当：不移动手臂 + 容器模式有坐标）—— "
 				+ "movesArm() 是类型级、needsTarget() 是条目级，删掉任何一个都会让臂先飞过去或让坐标框消失");
+
+		// ★ 「接收距离」的**单点判据**（用户口径：距离只约束「收」；0 = 只能自己接收发送）：
+		//   ① 收 + 0 ⇒ 没有（默认不占胶囊位、脚本也不写它）；
+		//   ② 收 + 16 ⇒ 有；③ 发 / 中断 + 16 ⇒ **没有**（发送侧不读它）；
+		//   ④ NBT：默认 0 不写键（老卡零扰动）、写了的能往返、超范围的读回来被夹进 0..256。
+		//   反证：把 hasSignalRange() 里的 isSignalReceive() 去掉 ⇒ ③ 红；把 clampSignalRange 里的
+		//   Math.min 去掉 ⇒ ④ 的"夹进 256"红。
+		ArmProgramEntry recvZero = new ArmProgramEntry();
+		recvZero.op = OperationType.SIGNAL;
+		ArmProgramEntry recvSome = new ArmProgramEntry();
+		recvSome.op = OperationType.SIGNAL;
+		recvSome.signalRange = 16;
+		ArmProgramEntry sendSome = new ArmProgramEntry();
+		sendSome.op = OperationType.SIGNAL;
+		sendSome.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		sendSome.signalRange = 16;
+		boolean rangePredicate = !recvZero.hasSignalRange() && recvSome.hasSignalRange() && !sendSome.hasSignalRange();
+		HolderLookup.Provider bare = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+		CompoundTag zeroTag = recvZero.save(bare);
+		boolean rangeZeroNotWritten = !zeroTag.contains("range");
+		CompoundTag rangeTag = recvSome.save(bare);
+		boolean rangeRoundTrip = rangeTag.contains("range")
+			&& ArmProgramEntry.load(rangeTag, bare).signalRange == 16;
+		CompoundTag overTag = rangeTag.copy();
+		overTag.putInt("range", 9999);
+		boolean rangeClamped = ArmProgramEntry.load(overTag, bare).signalRange
+			== ArmProgramEntry.SIGNAL_RANGE_MAX;
+		LOGGER.info("[selftest] 接收距离判据: 收+0={} 收+16={} 发+16={} 默认不写键={} 往返={} 超范围夹取={}",
+			recvZero.hasSignalRange(), recvSome.hasSignalRange(), sendSome.hasSignalRange(), rangeZeroNotWritten,
+			rangeRoundTrip, rangeClamped);
+		if (!rangePredicate)
+			LOGGER.error("[selftest] hasSignalRange() 判据不对（应当：收 + 半径>0 才算有；发 / 中断恒无）");
+		if (!rangeZeroNotWritten)
+			LOGGER.error("[selftest] 接收距离默认 0 也写了 range 键（老卡存取前后不再逐字节不变）");
+		if (!rangeRoundTrip)
+			LOGGER.error("[selftest] 接收距离过不了 NBT 往返（存 16 读回来不是 16）");
+		if (!rangeClamped)
+			LOGGER.error("[selftest] 接收距离超范围时没有被夹进 0.." + ArmProgramEntry.SIGNAL_RANGE_MAX);
 	}
 
 	/**
@@ -3276,23 +3686,25 @@ public class SequencedArmSelfTest {
 	// ——————————————— 底座 base_powered 的判据（用户第十九轮反馈，本轮收紧） ———————————————
 
 	/**
-	 * 断言 ①–⑤：客户端该画 {@code base} 还是 {@code base_powered} ——
+	 * 断言 ①–④：客户端该画 {@code base} 还是 {@code base_powered} ——
 	 * {@code SequencedArmBlockEntity.isSignalActive()} 的完整口径。
 	 *
 	 * <p><b>用户口径（本轮原话）</b>：「base_powered 的模型接收信号发光的时候<b>必须成功接收信号</b>才发光，
-	 * <b>尝试接收但是没有就不会发光</b>」。旧口径把"正在等红石 / 正在等信号"和"被相邻红石点亮"
+	 * <b>尝试接收但是没有就不会发光</b>」。旧口径把"正在等"和"被相邻红石点亮"
 	 * 也算成"收到" ⇒ "一直在等、一直没信号"的臂**常亮** —— 那正是这次反馈的现象，两条旧判据已删。
 	 *
-	 * <p><b>本轮追加的用户口径</b>：「这个只与无线信号有关，与接收红石信号无关。」
-	 * 于是 {@code ProgramRuntime.tickWait} 的成功分支里，{@code flashSignalReceived()} 只留给
-	 * 「收发信号」的**接收**模式（红石链接频率 = 无线信号），「等红石」（相邻方块的红石充能/断电）
-	 * 成功**不点亮**底座 —— 这就是新增的 ⑤（两条极性各一条断言）。
+	 * <p><b>用户口径</b>：「这个只与无线信号有关，与接收红石信号无关。」
+	 * 于是"按相邻红石等待"那条操作<b>整条删除</b>（用户后来的话：「我现在倾向于移除这个操作，
+	 * 因为我们有更好的无线信号系统可以使用」）⇒ 原来那条断言 ⑤（那条操作成功不亮，两条极性各一条）
+	 * 与被测对象一起消失：**那条操作没有了，也就不存在"它成功时亮不亮"这回事**。
+	 * ① 里"相邻红石没通电时不亮"那半段同理删除（那个夹具用的是已删的枚举常量，段不成立）；
+	 * ① 的"收信号没通电时不亮"半段与本段的其余部分**一个字都没放松**。
 	 *
 	 * <p><b>每条断言"改哪一行会变红"</b>：
 	 * <ol>
 	 *   <li>{@code 正在等但没信号 ⇒ false}（用户这次反馈的字面场景）：把"正在等"那条判据加回
-	 *       {@code computeSignalActive()}（{@code runtime.state == WAITING} 且当前条目是等红石 / 收信号），
-	 *       或者在"开始等"时就调 {@code flashSignalReceived()} ⇒ 本次日志里两条 ① 的
+	 *       {@code computeSignalActive()}（{@code runtime.state == WAITING} 且当前条目是收信号），
+	 *       或者在"开始等"时就调 {@code flashSignalReceived()} ⇒ 本次日志里 ① 的
 	 *       {@code 亮=} 变 true、{@code 不亮成立=} 变 false；</li>
 	 *   <li>{@code 真的收到 ⇒ 亮，约 10 tick 后灭}：删掉 {@code ProgramRuntime.tickWait} 里那行
 	 *       {@code arm.flashSignalReceived();} ⇒ {@code ② 收到即亮} 变 false；把
@@ -3305,31 +3717,20 @@ public class SequencedArmSelfTest {
 	 *   <li>{@code 被红石点亮（redstoneLocked）⇒ false}（旧口径已被用户推翻）：把
 	 *       {@code if (redstoneLocked) return true;} 加回 {@code computeSignalActive()} ⇒
 	 *       {@code ④ 红石点亮不亮} 变红。</li>
-	 *   <li>{@code 等红石成功 ⇒ 不亮}（本轮新增，两条极性各一条）：把 {@code ProgramRuntime.tickWait} 里
-	 *       {@code if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())} 这层判据去掉
-	 *       （退回无条件的 {@code arm.flashSignalReceived();}）⇒ {@code ⑤ 等通电 / 等断电} 两条立刻变红
-	 *       （{@code 亮=true 脉冲=9}、{@code 不亮成立=false}）；把 {@code WAIT_REDSTONE} 也放进那个 if
-	 *       （"反正也是信号"）⇒ 同样变红。</li>
 	 * </ol>
-	 *
-	 * <p>⚠️ ⑤ 的驱动有个**特殊之处**：真按 {@code setBlockAndUpdate} 摆红石块，{@code neighborChanged}
-	 * 会把 {@code redstoneLocked} 同步翻真，而 {@code ProgramRuntime.tick()} 在
-	 * {@code if (arm.isRedstoneLocked()) return;} 整 tick 早退 ⇒「等通电」的成功分支根本走不到。
-	 * 所以 ⑤-a 用 {@code Block.UPDATE_CLIENTS} 只改世界、不动锁（并非放宽断言：万一锁也翻了，
-	 * ⑤ 的**前提** {@code 通电而锁仍旧值} 会先红，明确告诉你是"没验到"而不是"判据错"）。
 	 *
 	 * <p><b>驱动方式</b>：自检<b>不跑 {@code arm.tick()}</b>（运动学要真实动力网络，见
 	 * {@link #checkOverflowStackAndExchange}），逐 tick 调的是 {@code arm.tick()} 里同样那一句
 	 * {@link SequencedArmBlockEntity#tickSignalActive()}（脉冲倒计时 + 口径重算 + 翻转检测）与
-	 * {@code runtime.tick(arm)}；「等红石 / 等信号」两条只有真跑解释器才会走到，**不伪造**运行时状态。
+	 * {@code runtime.tick(arm)}；「收信号」只有真跑解释器才会走到，**不伪造**运行时状态。
 	 *
-	 * <p><b>夹具隔离（本轮新增）</b>：四段断言**共用同一条臂**（同一个方块实体实例 ⇒ 同一张
+	 * <p><b>夹具隔离</b>：四段断言**共用同一条臂**（同一个方块实体实例 ⇒ 同一张
 	 * {@code heldSignals} 表），而「发」出去的信号是**持久状态** —— {@code emitSignal(..., ticks = 0)}
 	 * 就是"一直保持"，只有「中断」/ 换卡 / 拆方块才断。所以每段起跑前都走
 	 * {@link #quietArm(SequencedArmBlockEntity)} 显式清干净，并把"确实清干净了"当成前提断言出来：
 	 * 上一段漏过来的 15 电平只会红在**前提**上，不会伪装成 ① / ④ 的判据错。
 	 *
-	 * <p><b>日志字段口径（本轮修正）</b>：{@code 亮=} 印的是 {@code isSignalActive()} 的**真实**值，
+	 * <p><b>日志字段口径</b>：{@code 亮=} 印的是 {@code isSignalActive()} 的**真实**值，
 	 * 断言值另外用 {@code 不亮成立=} 印。旧日志把断言值挂在 {@code 亮=} 后面，于是"确实不亮"（断言成立）
 	 * 被读成 {@code 亮=true}（"本该不亮却亮了"）—— 那次 {@code run/logs/latest.log} 的 ① / ④ 就是这样被
 	 * 误读成红，实际上一条 {@code ERROR} 都没有。
@@ -3349,22 +3750,15 @@ public class SequencedArmSelfTest {
 
 		boolean placed = false;
 		// —— 夹具隔离的前提（true = 进那一段之前这条臂身上**没有被持有的信号、没有未到期的短脉冲**）——
-		// 为什么每条都要断言：见 quietArm() 的注释（四段共用同一个方块实体实例 + 信号是持久状态）。
-		boolean quietBeforeWait = false;
+		// 为什么每条都要断言：见 quietArm() 的注释（各段共用同一个方块实体实例 + 信号是持久状态）。
 		boolean quietBeforeRecv = false;
 		boolean quietBeforeSend = false;
 		boolean quietBeforeLock = false;
-		boolean waitRedstoneReached = false;
-		boolean neighborQuiet = false;
 		// ⚠️ 日志字段口径（本轮修的就是这个）：`litIn*` 是**真实的亮灭**（isSignalActive() 的现场值），
 		//   `*Dark` 才是断言（true = "不亮"成立）。旧日志把**断言值**印在 `亮=` 后面 ⇒
 		//   断过的时候日志读作 `亮=true`，看着像"本该不亮却亮了"（run/logs/latest.log 的 ① / ④ 就是
 		//   这样被误读成三处红的，其实那次一条 ERROR 都没有）。电平 / 脉冲一起印出来，
 		//   下次真泄漏时能当场看出是"表里那 15 漏过来了"还是"脉冲没到期"。
-		boolean litInWaitRedstone = false;
-		int levelAtWait = -1;
-		int flashAtWait = -1;
-		boolean waitingNoSignalDark = false; // ①（等红石）
 		boolean recvReachedWaiting = false;
 		boolean freqIdle = false;
 		boolean litInRecvWait = false;
@@ -3382,21 +3776,11 @@ public class SequencedArmSelfTest {
 		int levelAtLock = -1;
 		int flashAtLock = -1;
 		boolean lockDark = false;
-		// ⑤（本轮新增）「等红石」**成功**之后 ⇒ 不亮。两条极性各一条：等通电 / 等断电。
-		// ⚠️ 断言量的初值故意取"最坏"（`lit` = true、`flash` = -1），漏跑时日志能一眼看出来。
-		boolean quietBeforeRedstoneWait = false;
-		boolean redstoneOnWaiting = false;
-		boolean redstoneOnSucceeded = false;
-		boolean redstoneOnUnlocked = false; // 前提：世界已通电、而 redstoneLocked 仍是旧值（否则解释器整 tick 早退）
-		boolean litAfterRedstoneOn = true;
-		int flashAfterRedstoneOn = -1;
-		boolean redstoneWaitOnDark = false; // ⑤-a 断言：等通电**成功之后**不亮（isSignalActive() == false && signalFlashTicks() == 0）
-		boolean redstoneOffWaiting = false;
-		boolean redstoneOffUnpowered = false; // 前提：⑤-b 起跑时相邻确实**没有**红石电（否则"等断电"当场吻合、对照组不成立）
-		boolean redstoneOffSucceeded = false;
-		boolean litAfterRedstoneOff = true;
-		int flashAfterRedstoneOff = -1;
-		boolean redstoneWaitOffDark = false; // ⑤-b 断言：等断电**成功之后**不亮（同上）
+		// ⚠️ 原来这里还有一大段 ⑤（"按相邻红石等待"那条操作成功 ⇒ 不亮，两条极性各一条）及其夹具前提。
+		//   **整段随那条操作一起删除**（用户口径：「我现在倾向于移除这个操作，
+		//   因为我们有更好的无线信号系统可以使用」）：被测的那条操作不存在了，
+		//   "它成功时亮不亮"也就没有意义。原本它守的那条区分（只有无线信号点亮底座）
+		//   现在由 `tickWait` 里 `op == SIGNAL && isSignalReceive()` 那层判据 + ② / ④ 两条断言守着。
 		try {
 			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
 				.defaultBlockState());
@@ -3406,37 +3790,22 @@ public class SequencedArmSelfTest {
 				placed = true;
 				arm.setSpeed(32); // 转速为 0 时解释器整 tick 跳过（与原版一致）
 
-				// ——— ① 正在等红石、**没有**通电 ⇒ 不亮 ———
-				ArmProgramEntry waitRedstone = new ArmProgramEntry();
-				waitRedstone.op = OperationType.WAIT_REDSTONE;
-				waitRedstone.waitForPowered = true; // 等通电
-				arm.setProgram(oneEntryProgram("waitr", waitRedstone));
-				arm.runtime.resetToStart(arm);
-				// 进 ① 之前先保证这条臂**没有任何被持有的信号**，并把这件事本身断言出来
-				// （`setProgram` / `resetToStart` 只清"发"，不清也许还在的短脉冲 ⇒ 仍然要 quietArm）。
-				quietBeforeWait = quietArm(arm);
-				// 连跑十几拍：真进 WAITING 之后还要让 tickWait 真跑几拍（"在等、但一直没有"要持续可见）
-				for (int i = 0; i < 14; i++) {
-					arm.runtime.tick(arm);
-					arm.tickSignalActive(); // = arm.tick() 里那一句
-					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
-						waitRedstoneReached = true;
-				}
-				neighborQuiet = !arm.hasNeighborSignal();
-				litInWaitRedstone = arm.isSignalActive();
-				levelAtWait = arm.getArmLinkLevel();
-				flashAtWait = arm.signalFlashTicks();
-				waitingNoSignalDark = waitRedstoneReached && neighborQuiet && !litInWaitRedstone;
-
 				// ——— ① 正在等一路频率、但那一路**没通电** ⇒ 也不亮 ———
+				// ⚠️ 这一段的"等相邻红石"那一半（同一个 ① 里的前半段）已随该操作一起删除：
+				//   它要构造的条目用的是已删除的枚举常量。留在这里的是**用户这次反馈的字面场景**：
+				//   "尝试接收但没收到 ⇒ 不亮"，一个字都没放松。
 				ArmProgramEntry recv = new ArmProgramEntry();
 				recv.op = OperationType.SIGNAL;
 				recv.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
 				recv.waitForPowered = true;
 				recv.frequency = recvFreq;
+				// ★ 接收半径（用户口径：距离只约束「收」）：本段的发端臂在 +3 格，而默认的 0 只认
+				// **同一格**（= 自己发自己收的自环）⇒ 这条夹具必须显式给一个够得着的半径。
+				// 反证：把它改回 0（或删掉这一行）⇒ ② 的「收到即亮」永远等不到 ⇒ 本段红。
+				recv.signalRange = 16;
 				arm.setProgram(oneEntryProgram("recv", recv));
 				arm.runtime.resetToStart(arm);
-				quietBeforeRecv = quietArm(arm); // 同上：这一段也必须从"手上没有任何信号"起跑
+				quietBeforeRecv = quietArm(arm); // 这一段也必须从"手上没有任何信号"起跑
 				for (int i = 0; i < 14; i++) {
 					arm.runtime.tick(arm);
 					arm.tickSignalActive();
@@ -3518,86 +3887,10 @@ public class SequencedArmSelfTest {
 				flashAtLock = arm.signalFlashTicks();
 				lockDark = lockEngaged && !litWhileLocked && levelAtLock == 0;
 
-				// ——— ⑤ 「等红石」的**成功**那一刻 ⇒ **不亮**（本轮新增，用户口径） ———
-				// 用户原话：「这个只与无线信号有关，与接收红石信号无关。」
-				// 背景：`ProgramRuntime.tickWait` 的成功分支同时服务两种东西 ——
-				//   a)「收发信号」的**接收**模式（Create 的**红石链接频率** = 无线信号）⇒ 亮，正确；
-				//   b)「等红石」（`WAIT_REDSTONE`，相邻方块的红石充能/断电）⇒ **不是无线信号，不该亮**。
-				// 本轮把 `arm.flashSignalReceived()` 收进 `if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())`，
-				// ⑤ 就是"b 被挡掉"的唯一证人：**把那个 `if` 去掉（退回无条件调用）⇒ ⑤ 两条立刻变红**
-				// （`不亮成立=false`、`脉冲=9`）。
-				//
-				// ⚠️ 顺序有讲究：④ 刚把 powerPos 摆成红石块、臂此刻是**通电锁死**的；
-				//   `ProgramRuntime.tick()` 在 `isRedstoneLocked()` 那一行整 tick 早退 ⇒ 不先撤掉的话 ⑤ 一拍都推不动。
-				level.setBlockAndUpdate(powerPos, oldPower);
-				arm.redstoneUpdate();
-
-				// ——— ⑤-a 等**通电**（waitForPowered = true）———
-				ArmProgramEntry waitOn = new ArmProgramEntry();
-				waitOn.op = OperationType.WAIT_REDSTONE;
-				waitOn.waitForPowered = true;
-				arm.setProgram(oneEntryProgram("waitr_on", waitOn));
-				arm.runtime.resetToStart(arm);
-				arm.runtime.state = ProgramRuntime.EntryState.IDLE; // resetToStart 不动 state（上一段可能停在任意态），这里钉死起跑态
-				quietBeforeRedstoneWait = quietArm(arm);
-				// 先进 WAITING（此刻相邻无红石 ⇒ "等通电"等不到）
-				for (int i = 0; i < 6 && !redstoneOnWaiting; i++) {
-					arm.runtime.tick(arm);
-					arm.tickSignalActive();
-					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
-						redstoneOnWaiting = true;
-				}
-				// ★ 红石块只用**客户端更新**的 flag 摆（`Block.UPDATE_CLIENTS`）：`hasNeighborSignal()` 立刻为真，
-				//   但**不触发** `neighborChanged` ⇒ `redstoneLocked` 保持旧值 false。
-				//   为什么非这么放：按 `setBlockAndUpdate` 摆的话，`neighborChanged` 会同步把 `redstoneLocked`
-				//   翻成 true，而 `ProgramRuntime.tick()` 第一件事就是
-				//   `if (arm.isRedstoneLocked()) return;`（常驻门控：通电即暂停）⇒ 解释器**永远走不到**
-				//   「等通电」的成功分支，这条断言就退化成"暂停时也不亮"（恒真、永远不会红 = 测了空气）。
-				//   这一放法只是把这个"成功分支"从门控后面拿出来验，**不改任何产品语义**。
-				level.setBlock(powerPos, Blocks.REDSTONE_BLOCK.defaultBlockState(), Block.UPDATE_CLIENTS);
-				redstoneOnUnlocked = arm.hasNeighborSignal() && !arm.isRedstoneLocked();
-				for (int i = 0; i < 8 && !redstoneOnSucceeded; i++) {
-					arm.runtime.tick(arm);
-					arm.tickSignalActive();
-					// 从 WAITING 走到别的状态 = 极性吻合 ⇒ tickWait 的成功分支**刚刚**在这一拍跑过
-					//（成功那一刻 `succeed` 就把状态挪走了，所以判据只能看"离开 WAITING"）
-					if (redstoneOnWaiting && arm.runtime.state != ProgramRuntime.EntryState.WAITING) {
-						redstoneOnSucceeded = true;
-						litAfterRedstoneOn = arm.isSignalActive();
-						flashAfterRedstoneOn = arm.signalFlashTicks();
-						// 断言本体：**不亮**且**脉冲为 0**（后者是关键 —— 用户口径只否掉"亮"，
-						// 但脉冲留着会让随后 10 tick 里亮起来，所以两条一起断言）
-						redstoneWaitOnDark = !litAfterRedstoneOn && flashAfterRedstoneOn == 0;
-					}
-				}
-				// 撤掉红石块（UPDATE_ALL ⇒ neighborChanged ⇒ redstoneLocked 归 false + 客户端同步）
-				level.setBlockAndUpdate(powerPos, oldPower);
-				arm.redstoneUpdate();
-
-				// ——— ⑤-b 等**断电**（waitForPowered = false）：这一支在正常世界里完全可达 ———
-				ArmProgramEntry waitOff = new ArmProgramEntry();
-				waitOff.op = OperationType.WAIT_REDSTONE;
-				waitOff.waitForPowered = false;
-				arm.setProgram(oneEntryProgram("waitr_off", waitOff));
-				arm.runtime.resetToStart(arm);
-				arm.runtime.state = ProgramRuntime.EntryState.IDLE; // 同上：起跑态钉死
-				redstoneOffUnpowered = !arm.hasNeighborSignal() && !arm.isRedstoneLocked();
-				for (int i = 0; i < 6 && !redstoneOffWaiting; i++) {
-					arm.runtime.tick(arm);
-					arm.tickSignalActive();
-					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
-						redstoneOffWaiting = true;
-				}
-				for (int i = 0; i < 8 && !redstoneOffSucceeded; i++) {
-					arm.runtime.tick(arm);
-					arm.tickSignalActive();
-					if (redstoneOffWaiting && arm.runtime.state != ProgramRuntime.EntryState.WAITING) {
-						redstoneOffSucceeded = true;
-						litAfterRedstoneOff = arm.isSignalActive();
-						flashAfterRedstoneOff = arm.signalFlashTicks();
-						redstoneWaitOffDark = !litAfterRedstoneOff && flashAfterRedstoneOff == 0;
-					}
-				}
+				// ⚠️ 这里原来是 ⑤（"按相邻红石等待"那条操作成功 ⇒ 不亮，两条极性各一条），**整段删除**：
+				//   被测的那条操作已按用户口径移除，枚举常量都不存在了，构造不出夹具。
+				//   它原来守的区分（只有**无线信号**点亮底座）仍然由 ② / ④ 与
+				//   `ProgramRuntime.tickWait` 里 `op == SIGNAL && isSignalReceive()` 那层判据守着。
 			}
 		} catch (Throwable t) {
 			LOGGER.error("[selftest] 信号活动 行为自检异常：{}", t.toString());
@@ -3610,38 +3903,30 @@ public class SequencedArmSelfTest {
 		// ★ 字段口径：`亮=` 印的是**真实亮灭**（isSignalActive()），`不亮成立=` 印的才是断言。
 		//   旧日志只印断言、却挂在 `亮=` 后面 ⇒ 断过（= "确实不亮"）时读作 `亮=true`，
 		//   看上去正好是反的（用户报的"三处红"就是这么来的：那次 run/logs/latest.log 一条 ERROR 都没有）。
-		LOGGER.info("[selftest] 信号活动 ① 等红石没通电时不亮: 前提·无持有信号={} 进等待={} 相邻无红石={} 亮={}（电平={} 脉冲={}）"
-			+ " 不亮成立={} ; ① 收信号没通电时不亮: 前提·无持有信号={} 进等待={} 该频率无电={} 亮={}（电平={} 脉冲={}） 不亮成立={}",
-			quietBeforeWait, waitRedstoneReached, neighborQuiet, litInWaitRedstone, levelAtWait, flashAtWait,
-			waitingNoSignalDark, quietBeforeRecv, recvReachedWaiting, freqIdle, litInRecvWait, levelAtRecv, flashAtRecv,
-			recvWaitingDark);
+		LOGGER.info("[selftest] 信号活动 ① 收信号没通电时不亮: 前提·无持有信号={} 进等待={} 该频率无电={} 亮={}（电平={} 脉冲={}） 不亮成立={}",
+			quietBeforeRecv, recvReachedWaiting, freqIdle, litInRecvWait, levelAtRecv, flashAtRecv, recvWaitingDark);
 		LOGGER.info("[selftest] 信号活动 ② 收到即亮={} 亮起时脉冲剩余={} 亮了几拍={} 到点自己灭={}", litOnReceive,
 			flashRemainingOnLight, flashLasted, fadedAfterFlash);
 		LOGGER.info("[selftest] 信号活动 ③ 发时亮={} 归零后灭={}（进 ③ 前无持有信号={}）", sendLit, sendDarkAfterPulse,
 			quietBeforeSend);
 		LOGGER.info("[selftest] 信号活动 ④ 红石点亮不亮: 前提·无持有信号={} 锁已生效={} 亮={}（电平={} 脉冲={}） 不亮成立={}",
 			quietBeforeLock, lockEngaged, litWhileLocked, levelAtLock, flashAtLock, lockDark);
-		// ⑤ 本轮新增（用户口径：「这个只与无线信号有关，与接收红石信号无关」）
-		LOGGER.info("[selftest] 信号活动 ⑤ 等红石成功不亮: 前提·无持有信号={} 通电而锁仍旧值={} | 等通电: 进等待={} 成功={} 亮={} 脉冲={}"
-			+ " 不亮成立={} | 等断电: 相邻无红石电={} 进等待={} 成功={} 亮={} 脉冲={} 不亮成立={}",
-			quietBeforeRedstoneWait, redstoneOnUnlocked, redstoneOnWaiting, redstoneOnSucceeded, litAfterRedstoneOn,
-			flashAfterRedstoneOn, redstoneWaitOnDark, redstoneOffUnpowered, redstoneOffWaiting, redstoneOffSucceeded,
-			litAfterRedstoneOff, flashAfterRedstoneOff, redstoneWaitOffDark);
+		// ⚠️ ⑤（"按相邻红石等待"那条操作成功不亮）的日志与两条断言**随那条操作一起删除**：见上面 ④ 之后那段说明。
 		if (!placed)
-			LOGGER.error("[selftest] 信号活动 自检没跑起来（臂没建成）—— 下面 ①–⑤ 的断言等于没验");
+			LOGGER.error("[selftest] 信号活动 自检没跑起来（臂没建成）—— 下面 ①–④ 的断言等于没验");
 		// 夹具隔离的前提**自己也要红**：下次谁再漏一条"一直保持"的信号进来，会在这里直接报，
 		// 而不是伪装成 ① / ④ 的判据错（那样会把人往 computeSignalActive() 里带）。
-		if (!quietBeforeWait || !quietBeforeRecv || !quietBeforeSend || !quietBeforeLock)
-			LOGGER.error("[selftest] 信号活动 的夹具前提不成立：进 ① / ① / ③ / ④ 之前这条臂上还留着被持有的信号或未到期的短脉冲"
-				+ "（{}/{}/{}/{}）—— 这是夹具没隔离干净（信号是持久状态，只有「中断」/换卡/clearTransmissions 才断），"
-				+ "不是 computeSignalActive() 的错", quietBeforeWait, quietBeforeRecv, quietBeforeSend, quietBeforeLock);
-		if (!waitRedstoneReached || !recvReachedWaiting)
-			LOGGER.error("[selftest] 信号活动 ① 的对照组不成立：程序没停在「等红石 / 收信号」的 WAITING 上"
-				+ "（那两条\"正在等也不亮\"的断言就是测了空气）");
+		if (!quietBeforeRecv || !quietBeforeSend || !quietBeforeLock)
+			LOGGER.error("[selftest] 信号活动 的夹具前提不成立：进 ① / ③ / ④ 之前这条臂上还留着被持有的信号或未到期的短脉冲"
+				+ "（{}/{}/{}）—— 这是夹具没隔离干净（信号是持久状态，只有「中断」/换卡/clearTransmissions 才断），"
+				+ "不是 computeSignalActive() 的错", quietBeforeRecv, quietBeforeSend, quietBeforeLock);
+		if (!recvReachedWaiting)
+			LOGGER.error("[selftest] 信号活动 ① 的对照组不成立：程序没停在「收信号」的 WAITING 上"
+				+ "（那条\"正在等也不亮\"的断言就是测了空气）");
 		if (!freqIdle)
 			LOGGER.error("[selftest] 信号活动 ① 的对照组不成立：还没发信号，那一路频率就已经有电了");
 		// ① 用户这次反馈的字面场景：尝试接收但没收到 ⇒ **不亮**
-		if (!waitingNoSignalDark || !recvWaitingDark)
+		if (!recvWaitingDark)
 			LOGGER.error("[selftest] 信号活动 ① 「正在等但没收到信号」把底座点亮了"
 				+ "（用户口径：必须成功接收才发光，尝试接收不算）—— 查 computeSignalActive() 里是不是又把\"正在等\"算进去了");
 		// ② 收到的那一刻起亮，且看得见、会自己灭
@@ -3662,40 +3947,20 @@ public class SequencedArmSelfTest {
 		else if (!lockDark)
 			LOGGER.error("[selftest] 信号活动 ④ 被相邻红石点亮就把底座点亮了"
 				+ "（用户口径：那只是\"通电即暂停\"，不是收到信号 —— 查 computeSignalActive() 里是不是又把 redstoneLocked 加回去了）");
-		// ⑤ 本轮口径：底座发光**只跟无线信号（红石链接频率）有关**，接收相邻红石不算 ⇒
-		//   「等红石」的两条成功路径都必须是"不亮 + 脉冲 0"。
-		//   ⚠️ 变红方式：把 ProgramRuntime.tickWait 里那句
+		// ⚠️ 原来的 ⑤（"按相邻红石等待"那条操作的两条成功路径都必须是"不亮 + 脉冲 0"）**整块删除**：
+		//   那条操作已被用户删除（「我们有更好的无线信号系统可以使用」），
+		//   连夹具都构造不出来，那两条断言也就失去了被测对象。
+		//   ⚠️ 但**判据本身没有放松**：`ProgramRuntime.tickWait` 里
 		//   `if (entry.op == OperationType.SIGNAL && entry.isSignalReceive()) arm.flashSignalReceived();`
-		//   退回成无条件的 `arm.flashSignalReceived();` ⇒ 下面两条立刻红（`亮=true 脉冲=9`）。
-		//   只在"开始等"时闪、或把脉冲算进 computeSignalActive() 的其它写法，也会红在这里。
-		if (!quietBeforeRedstoneWait)
-			LOGGER.error("[selftest] 信号活动 ⑤ 的夹具前提不成立：进「等红石」之前这条臂上还留着被持有的信号或未到期的短脉冲"
-				+ "（那样'成功不亮'可能是脉冲刚好到期借来的，不是判据对）");
-		if (!redstoneOnWaiting || !redstoneOnSucceeded)
-			LOGGER.error("[selftest] 信号活动 ⑤ 的对照组不成立：「等通电」没有先停在 WAITING 再成功"
-				+ "（这条\"等红石成功不亮\"就成了测空气）");
-		if (!redstoneOnUnlocked)
-			LOGGER.error("[selftest] 信号活动 ⑤ 的前提不成立：摆了红石块之后 `hasNeighborSignal()` 与 `redstoneLocked` 是"
-				+ "「通电且已锁」—— 那 `ProgramRuntime.tick()` 会整 tick 早退（通电即暂停），"
-				+ "「等通电」的成功分支根本走不到，这条断言不成立（不是判据错）");
-		else if (!redstoneWaitOnDark)
-			LOGGER.error("[selftest] 信号活动 ⑤ 「等红石·等通电」**成功之后**把底座点亮了"
-				+ "（用户口径：发光只跟无线信号有关，接收相邻红石不算 —— 查 ProgramRuntime.tickWait 里 flashSignalReceived() 的 if 判据）");
-		if (!redstoneOffUnpowered)
-			LOGGER.error("[selftest] 信号活动 ⑤-b 的对照组不成立：起跑时相邻已经有红石电"
-				+ "（那样\"等断电\"一进就吻合，看不出成功那一刻）");
-		if (!redstoneOffWaiting || !redstoneOffSucceeded)
-			LOGGER.error("[selftest] 信号活动 ⑤-b 的对照组不成立：「等断电」没有先停在 WAITING 再成功");
-		else if (!redstoneWaitOffDark)
-			LOGGER.error("[selftest] 信号活动 ⑤ 「等红石·等断电」**成功之后**把底座点亮了"
-				+ "（用户口径：发光只跟无线信号有关，接收相邻红石不算 —— 查 ProgramRuntime.tickWait 里 flashSignalReceived() 的 if 判据）");
+		//   那一层仍然在（把 `if` 去掉 ⇒ ②「收到即亮」与 ④「红石点亮不亮」之间的区分就只剩 ④；
+		//   ②/④ 里"只有无线信号点亮底座"仍然被逐条钉着）。
 	}
 
 	/**
 	 * 夹具隔离：把这条臂上**所有被持有的信号**与未到期的短脉冲清干净，并返回"确实清干净了"。
 	 *
 	 * <p><b>为什么必须显式清（用户这次报的"假红"根因就在这里）</b>：④ 之前那几段断言
-	 * （① 等红石 / ① 收信号 / ② 收到 / ③ 发 / ④ 红石锁）**共用同一个方块实体实例**，
+	 * （① 收信号 / ② 收到 / ③ 发 / ④ 红石锁）**共用同一个方块实体实例**，
 	 * 而"发"出去的信号是<b>持久状态</b> —— {@code emitSignal(freq, 15, 0)} 的 {@code ticks = 0} 就是
 	 * "一直保持"（§7.16e 用户口径），只有「中断」({@link SequencedArmBlockEntity#releaseSignal})、
 	 * 换卡（{@code setProgram} / {@code resetToStart} 里的
@@ -3724,6 +3989,215 @@ public class SequencedArmSelfTest {
 		ArmProgram program = new ArmProgram();
 		program.tasks.add(namedTask(taskName, entry));
 		return program;
+	}
+
+	// ——————————————— 「收发信号」的接收距离（用户口径：距离只约束「收」） ———————————————
+
+	/**
+	 * 断言：<b>接收距离</b>（用户口径："默认为 0（只能自己接收发送），范围是 0~256 格"；距离<b>只约束「收」</b>）。
+	 *
+	 * <p>五条，每条都真驱动 {@code runtime.tick()}（不看常量、不调私有方法）：
+	 * <ol>
+	 *   <li><b>自环</b>：本臂发 F1（15、保持），<b>同一条臂</b>「收 F1 · range=0」⇒ 成功
+	 *       （{@code distSqr == 0 <= 0} —— 这就是"只能自己接收发送"）；</li>
+	 *   <li><b>够不着</b>：第二只臂在 {@link #SIGNAL_RANGE_TEST_FAR} 格外发 F2，本臂「收 F2 · range=0」⇒ 不成功；</li>
+	 *   <li><b>够得着</b>：同一只第二臂 + 本臂「收 F2 · range=256」⇒ 成功；</li>
+	 *   <li><b>发送侧不受距离影响</b>：远臂的「发」条目 {@code signalRange = 0}（**真走 execute → emitSignal**）、
+	 *       本臂 {@link #SIGNAL_RANGE_TEST_FAR} 格外「收 · range=256」⇒ 收到；</li>
+	 *   <li><b>含边界</b>：第二只臂正好摆在 N = {@link #SIGNAL_RANGE_TEST_EDGE} 格（沿 x 轴，欧氏 = 切比雪夫同解）
+	 *       ⇒「range=N」成功、「range=N-1」不成功。</li>
+	 * </ol>
+	 *
+	 * <p><b>每条的反证</b>：
+	 * <ul>
+	 *   <li>把 {@code isSignalPowered} 的距离判定删掉（退回"只看同频率有没有人通电"）⇒ ② / ⑤后半 红；</li>
+	 *   <li>把那个 {@code <=} 写成 {@code <} ⇒ ① （{@code 0 < 0} 不成立）与 ⑤前半（正好 N 格）都红；</li>
+	 *   <li>把距离判定**挪到发送侧**（例如 emit 时按自己半径筛）⇒ ④ 红（远臂 range=0 就发不出去了）；</li>
+	 *   <li>把 {@code hasSignalRange()} 写成恒 {@code false}（缓存三元组丢了半径那一项也一样）⇒ ③ 红。</li>
+	 * </ul>
+	 *
+	 * <p>⚠️ 判据用臂上那个"收到"短脉冲而不是游标：单条目任务成功后主任务恒循环会把 {@code entryIndex}
+	 * 抹回 0（见 {@link #checkSignalCutHasNoDuration} 的同一段说明）。
+	 */
+	private static void checkSignalRange(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		// 与其它信号自检（+52/+52、+64/+58、+76/+60）用同一片空地，z 取 +76 这一带（没人用过）
+		BlockPos nearPos = new BlockPos(spawn.getX() + 52, 201, spawn.getZ() + 76);
+		BlockPos farPos = nearPos.offset(SIGNAL_RANGE_TEST_FAR, 0, 0);
+		BlockPos edgePos = nearPos.offset(SIGNAL_RANGE_TEST_EDGE, 0, 0);
+		BlockState oldNear = level.getBlockState(nearPos);
+		BlockState oldFar = level.getBlockState(farPos);
+		BlockState oldEdge = level.getBlockState(edgePos);
+		Couple<Frequency> loopFreq = testFrequency(Items.BOWL, Items.STICK);
+		Couple<Frequency> farFreq = testFrequency(Items.SUGAR, Items.GLASS_BOTTLE);
+		Couple<Frequency> sendFreq = testFrequency(Items.ARROW, Items.BONE);
+		Couple<Frequency> edgeFreq = testFrequency(Items.STRING, Items.FEATHER);
+
+		boolean selfLoop = false;
+		boolean tooFarBlocked = false;
+		boolean withinReach = false;
+		boolean sendIgnoresRange = false;
+		boolean edgeIncluded = false;
+		boolean edgeExcluded = false;
+		// 前提（现场对照）：那只远臂 / 边界臂真的让频率通上了电 —— 没有它，"没收到"可能只是"根本没人发"
+		boolean farPowered = false;
+		boolean edgePowered = false;
+		boolean farSendRan = false;
+		boolean quietBefore = false;
+		String error = null;
+		try {
+			SequencedArmBlockEntity arm = freshArm(level, nearPos);
+			SequencedArmBlockEntity farArm = freshArm(level, farPos);
+			SequencedArmBlockEntity edgeArm = freshArm(level, edgePos);
+			if (arm == null || farArm == null || edgeArm == null) {
+				error = "臂的方块实体没建出来（near=" + (arm != null) + " far=" + (farArm != null) + " edge="
+					+ (edgeArm != null) + "）";
+			} else {
+				// ——— ① 自环：本臂发 F1（15、保持），同一条臂「收 F1 · range=0」⇒ 成功 ———
+				// ⚠️ 顺序：先把程序装好（setProgram / resetToStart 会 clearTransmissions），**再**发信号。
+				armForReceive(arm, receiveEntry(loopFreq, 0));
+				quietBefore = quietArm(arm);
+				arm.emitSignal(loopFreq, 15, 0); // 15 = 通电、ticks=0 = 一直保持
+				SignalProbe loop = driveReceive(arm, 12);
+				selfLoop = loop.waited() && loop.received();
+
+				// ——— ② 够不着：远臂在自己那一格上通电，本臂「收 F2 · range=0」⇒ 不成功 ———
+				quietArm(farArm); // 远臂只需要"干净地发"，不需要程序
+				farArm.emitSignal(farFreq, 15, 0);
+				farPowered = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(farFreq);
+				armForReceive(arm, receiveEntry(farFreq, 0));
+				SignalProbe farZero = driveReceive(arm, 12);
+				tooFarBlocked = farZero.waited() && !farZero.received();
+
+				// ——— ③ 够得着：同一只远臂 + 本臂「收 F2 · range=256」⇒ 成功 ———
+				armForReceive(arm, receiveEntry(farFreq, 256));
+				SignalProbe farWide = driveReceive(arm, 12);
+				withinReach = farWide.received();
+
+				// ——— ④ 发送侧不受距离影响：远臂「发」条目的 range=0，本臂 100 格外 range=256 ⇒ 收到 ———
+				// 这一条把「距离只管收」钉死：发送侧那个 0 是"只能同格"的值，但它对发送毫无影响。
+				ArmProgramEntry send = new ArmProgramEntry();
+				send.op = OperationType.SIGNAL;
+				send.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+				send.waitForPowered = true;
+				send.frequency = sendFreq;
+				send.signalRange = 0; // 发送侧的距离：**不参与任何判定**
+				send.waitAmount = 0; // 0 = 一直保持（没有到点恢复）
+				farArm.setProgram(oneEntryProgram("send", send));
+				farArm.setSpeed(32);
+				farArm.runtime.resetToStart(farArm);
+				quietArm(farArm);
+				for (int i = 0; i < 6 && !farArm.holdsSignal(sendFreq); i++)
+					farArm.runtime.tick(farArm); // 真走 execute → arm.emitSignal（不是直接调 emitSignal）
+				farSendRan = farArm.holdsSignal(sendFreq);
+				armForReceive(arm, receiveEntry(sendFreq, 256));
+				SignalProbe sent = driveReceive(arm, 12);
+				sendIgnoresRange = farSendRan && sent.received();
+
+				// ——— ⑤ 含边界：第二只臂正好 N 格（沿 x 轴）———
+				quietArm(edgeArm); // 同样只需要"干净地发"
+				edgeArm.emitSignal(edgeFreq, 15, 0);
+				edgePowered = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(edgeFreq);
+				armForReceive(arm, receiveEntry(edgeFreq, SIGNAL_RANGE_TEST_EDGE));
+				SignalProbe edgeIn = driveReceive(arm, 12);
+				edgeIncluded = edgeIn.received();
+				armForReceive(arm, receiveEntry(edgeFreq, SIGNAL_RANGE_TEST_EDGE - 1));
+				SignalProbe edgeOut = driveReceive(arm, 12);
+				edgeExcluded = edgeOut.waited() && !edgeOut.received();
+			}
+		} catch (Throwable t) {
+			error = "行为自检异常：" + t;
+		} finally {
+			level.setBlockAndUpdate(nearPos, oldNear);
+			level.setBlockAndUpdate(farPos, oldFar);
+			level.setBlockAndUpdate(edgePos, oldEdge);
+		}
+		// ★ 日志口径：**断言值只出现在 `=` 右边**（这个模组踩过"标签印成断言值"的坑）。
+		LOGGER.info("[selftest] 信号距离: 自环(range=0)={} 够不着({}格外 range=0)={} 够得着(range=256)={} "
+			+ "发送侧不受距离影响={} 边界(range={})={} 边界外(range={})={}",
+			selfLoop, SIGNAL_RANGE_TEST_FAR, tooFarBlocked, withinReach, sendIgnoresRange, SIGNAL_RANGE_TEST_EDGE,
+			edgeIncluded, SIGNAL_RANGE_TEST_EDGE - 1, edgeExcluded);
+		LOGGER.info("[selftest] 信号距离 前提: 夹具干净={} 远臂通电={} 边界臂通电={} 远臂发送条目真的跑了={}", quietBefore,
+			farPowered, edgePowered, farSendRan);
+		if (error != null) {
+			LOGGER.error("[selftest] 信号距离 这条断言的前提不成立：{}", error);
+			return;
+		}
+		if (!quietBefore)
+			LOGGER.error("[selftest] 信号距离 夹具起跑时不干净（表里还有信号 / 脉冲没到期）—— 后面的结论说明不了问题");
+		if (!farPowered || !edgePowered)
+			LOGGER.error("[selftest] 信号距离 远臂 / 边界臂没有让频率通上电（对照组不成立，「没收到」就说明不了问题）");
+		if (!farSendRan)
+			LOGGER.error("[selftest] 信号距离 远臂的「发」条目没有真的执行（④ 就退化成测了空气）");
+		if (!selfLoop)
+			LOGGER.error("[selftest] 信号距离 ① 自环没成功：range=0 时同一格（distSqr=0）必须算收到"
+				+ " —— 查 anyPowerWithin 里的比较是不是写成了 `<`");
+		if (!tooFarBlocked)
+			LOGGER.error("[selftest] 信号距离 ② 100 格外、range=0 竟然收到了 —— 距离判定没生效（还在用不带位置的通电查询？）");
+		if (!withinReach)
+			LOGGER.error("[selftest] 信号距离 ③ range=256 却收不到 100 格外的信号 —— 半径判定把「够得着」也筛掉了");
+		if (!sendIgnoresRange)
+			LOGGER.error("[selftest] 信号距离 ④ 发送侧被距离影响了（用户口径：距离只管收，发出去不管）");
+		if (!edgeIncluded)
+			LOGGER.error("[selftest] 信号距离 ⑤ range 正好等于距离的那一格必须**算收到**（含边界）");
+		if (!edgeExcluded)
+			LOGGER.error("[selftest] 信号距离 ⑤ range 比距离少一格却收到了 —— 边界判定少了 1 格");
+	}
+
+	/** 自检用的"够不着"距离（格）：远臂摆在本臂 +x 这个格数上（用户口径的 ~100 格）。 */
+	private static final int SIGNAL_RANGE_TEST_FAR = 100;
+	/** 自检用的"正好在边界上"的距离（格）：沿 x 轴摆，欧氏距离与切比雪夫同解。 */
+	private static final int SIGNAL_RANGE_TEST_EDGE = 8;
+
+	/** 一条「收信号」条目：等通电、绑这对频率、接收半径 = {@code range}。 */
+	private static ArmProgramEntry receiveEntry(Couple<Frequency> freq, int range) {
+		ArmProgramEntry recv = new ArmProgramEntry();
+		recv.op = OperationType.SIGNAL;
+		recv.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
+		recv.waitForPowered = true;
+		recv.frequency = freq;
+		recv.signalRange = range;
+		return recv;
+	}
+
+	/**
+	 * 把一条「收信号」条目装进臂并从第 1 条起跑。
+	 *
+	 * <p>⚠️ 它**不发信号**：{@code setProgram} / {@code resetToStart} 都会 {@code clearTransmissions()}，
+	 * 所以"要先发的那个频率"必须在调用本方法**之后**再发（顺序写反 ⇒ 收到的是自己刚被清掉的东西，
+	 * 自环那一条会变成"测了空气"）。
+	 */
+	private static void armForReceive(SequencedArmBlockEntity arm, ArmProgramEntry receive) {
+		arm.setProgram(oneEntryProgram("recv", receive));
+		arm.setSpeed(32); // 转速为 0 时解释器整 tick 跳过（与原版一致）
+		arm.runtime.resetToStart(arm);
+		quietArm(arm); // 同样必须在上面两行之后（它们会清发射表）
+	}
+
+	/**
+	 * 驱动若干拍，返回"到过等待态吗 / 真的收到了吗"。
+	 *
+	 * <p>判据用臂上那个"收到"短脉冲（{@code tickWait} 只在极性成立**那一刻**调
+	 * {@code flashSignalReceived()}）：游标不可用 —— 单条目任务成功后主任务恒循环会把 {@code entryIndex}
+	 * 抹回 0（见 {@link #checkSignalCutHasNoDuration}）。{@code waited} 是"没收到"那一侧的前提：
+	 * 它证明条目**真的进了等待态**，而不是压根没跑。
+	 */
+	private static SignalProbe driveReceive(SequencedArmBlockEntity arm, int ticks) {
+		boolean waited = false;
+		boolean received = false;
+		for (int i = 0; i < ticks; i++) {
+			arm.runtime.tick(arm);
+			if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
+				waited = true;
+			if (arm.signalFlashTicks() > 0)
+				received = true;
+		}
+		return new SignalProbe(waited, received);
+	}
+
+	/** {@link #driveReceive} 的结果：到过等待态吗 / 真的收到了吗。 */
+	private record SignalProbe(boolean waited, boolean received) {
 	}
 
 	/**
@@ -4078,8 +4552,6 @@ public class SequencedArmSelfTest {
 		// ① 正常保存：改动必须落到卡上，且往返无损
 		ArmProgram edited = DevPresets.mainWithSubTasks();
 		edited.tasks.get(0).entries.get(0).delay = 37;
-		edited.tasks.get(0).loopCount = 7;
-		edited.tasks.get(0).loop = ArmProgramTask.LoopType.COUNT;
 		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
 		// 卡上先设一个**非零**原点：编辑器保存（整份程序 → NBT → 文本）**绝不能**把它顶掉或丢掉
 		// —— 用户第四十轮把原点搬上卡，这条正是那个"搬家"的落点。
@@ -4094,8 +4566,10 @@ public class SequencedArmSelfTest {
 		// `IndexOutOfBoundsException` @ `SequencedArmSelfTest.java:1494` + crash-report）。
 		// 所以先判"卡上到底读出了东西没有"，再谈里面的字段。
 		boolean savedReadable = !saved.tasks.isEmpty() && !saved.tasks.get(0).entries.isEmpty();
-		boolean applied = savedReadable && saved.tasks.get(0).entries.get(0).delay == 37
-			&& saved.tasks.get(0).loopCount == 7 && saved.tasks.get(0).loop == ArmProgramTask.LoopType.COUNT;
+		// ⚠️ 这里原来还比"任务级循环（loop / loopN）**随卡往返**" —— 那两个字段已删除
+		//   （用户口径：主任务恒为无限循环，循环次数不需要了），那半句断言随之消失；
+		//   剩下的"delay 真的落盘了"一字未改。
+		boolean applied = savedReadable && saved.tasks.get(0).entries.get(0).delay == 37;
 		boolean lossless = saved.save(registries)
 			.equals(edited.save(registries));
 		// P1（§19）：`program.absolute` 那个"坐标空间"标记已删。用户第四十轮起原点是**卡级**属性，
@@ -4516,6 +4990,9 @@ public class SequencedArmSelfTest {
 	private static void checkLegacyJumpShift() {
 		CompoundTag legacyTask = new CompoundTag();
 		legacyTask.putString("name", "老任务");
+		// ★ 老卡里那两个"任务级循环"键**故意留着**：任务级循环已删除，`ArmProgramTask.load`
+		//   现在**直接无视**它们（用户明确不要向后兼容）—— 这一段顺带把"带着它们的卡照样读得进来"
+		//   钉住（真删了字段读取之后，这两行只是无害的残留键）。
 		legacyTask.putString("loop", "COUNT");
 		legacyTask.putInt("loopN", 2);
 		ListTag entries = new ListTag();
@@ -5309,8 +5786,9 @@ public class SequencedArmSelfTest {
 		wait.waitAmount = 0;
 		wait.waitUnit = ArmProgramEntry.WaitUnit.TICK;
 		sub.entries.add(wait);
-		// 子任务自己**故意**设成"一直重复"：如果实现里还读子任务的 loop，这条自检会立刻暴露
-		sub.loop = ArmProgramTask.LoopType.FOREVER;
+		// ⚠️ 这里原来还有一句 `sub.loop = FOREVER`（"如果实现里还读子任务的循环，这条自检会立刻暴露"）。
+		//   任务级循环整体删除后**连字段都不存在了**，"子任务自己循环"这种组合在模型里不可能出现 ⇒
+		//   那条反证随字段一起消失（不是被放松：它证明的东西已经由类型系统保证）。
 		program.tasks.add(sub);
 		return program;
 	}
@@ -5976,7 +6454,7 @@ public class SequencedArmSelfTest {
 	 *   <li><b>过滤是控制类操作、臂不移动</b>（"判断过滤是一瞬间的事情，不需要动力臂伸过去判断"）：
 	 *       容器模式的坐标只是"<b>读哪个方块</b>"的数据参数 ⇒ 容器那几条必须在**完全不模拟到位**
 	 *       的条件下跑出结果，而且整个过程中臂<b>一次都不许进 MOVING</b>（⑩ 的两条正面证据）；</li>
-	 *   <li><b>失败默认 retry</b>（与「等红石 / 收信号」同一条路）：不匹配 / 没有物品可比都是
+	 *   <li><b>失败默认 retry</b>（与「收信号」同一条路）：不匹配 / 没有物品可比都是
 	 *       "还没到时机"，在重试窗口里反复判断、窗口到了才走「失败后」（⑨ 的两条）。</li>
 	 * </ol>
 	 *
@@ -6565,6 +7043,19 @@ public class SequencedArmSelfTest {
 		boolean badOpReported = reportsAt(registries, "task main\n  teleport 0 0 0\n", 2, "未知操作");
 		boolean badModeReported = reportsAt(registries, "task main\n  signal recv_x on freq=iron_ingot\n", 2, "信号模式");
 		boolean missingFreqReported = reportsAt(registries, "task main\n  signal recv on\n", 2, "频率");
+		// 「接收距离」的三条编译期错误（用户口径：只对「收」有意义、0..256）：
+		// ① 发送侧写了 range= ⇒ 报"range 只对收信号有意义"（**不静默丢弃**，否则玩家以为"只发 16 格内"）；
+		// ② 超出 0..256 ⇒ 报范围错；③ 写在别的操作上 ⇒ 报"range 只对 signal 有意义"。
+		// 反证：把 ScriptParser 里那段 `if (parsed.range != 0 && parsed.mode != RECEIVE)` 删掉 ⇒ ① 红。
+		boolean rangeOnSendReported = reportsAt(registries,
+			"task main\n  signal send_on range=16 freq=iron_ingot + copper_ingot\n", 2, "range")
+			&& reportsAt(registries, "task main\n  signal send_off range=1 freq=iron_ingot + copper_ingot\n", 2,
+				"range");
+		boolean rangeOutOfRangeReported = reportsAt(registries,
+			"task main\n  signal recv on range=300 freq=iron_ingot + copper_ingot\n", 2, "range")
+			&& reportsAt(registries, "task main\n  signal recv on range=-1 freq=iron_ingot + copper_ingot\n", 2,
+				"range");
+		boolean rangeWrongOpReported = reportsAt(registries, "task main\n  take 0 0 0 range=16\n", 2, "range");
 		// ⚠️ `/*` 在**引号外**才算注释开头（§12.3a 细则 2），所以这里必须用真的注释、
 		// 而不是 "引号里带 /* 的字符串"：后者正是那条细则要保护的写法。
 		boolean unclosedCommentReported = reportsAt(registries, "task main\n  take 0 0 0 /* 没闭合\n", 2, "没有闭合");
@@ -6572,6 +7063,8 @@ public class SequencedArmSelfTest {
 			"[selftest] 脚本编译期错误: 超长备注={} 未知任务={} 已知任务名列出={} 未知物品={} 个数越界={} 坐标越界={} 未知操作={} 未知模式={} 缺频率={} 注释未闭合={}",
 			overLongReported, unknownTaskReported, knownListed, unknownItemReported, badCountReported, badCoordReported,
 			badOpReported, badModeReported, missingFreqReported, unclosedCommentReported);
+		LOGGER.info("[selftest] 脚本编译期错误（接收距离）: 发送侧写了range={} 越界={} 写错操作={}", rangeOnSendReported,
+			rangeOutOfRangeReported, rangeWrongOpReported);
 		if (!overLongReported)
 			problems.add("超过 " + ArmProgramEntry.NOTE_MAX + " 字的备注没有报错（静默截断会破坏不变量①）");
 		if (!unknownTaskReported)
@@ -6592,6 +7085,12 @@ public class SequencedArmSelfTest {
 			problems.add("signal 没绑频率没有报错（那条条目会永远等不到）");
 		if (!unclosedCommentReported)
 			problems.add("块注释没有闭合没有报错");
+		if (!rangeOnSendReported)
+			problems.add("发送 / 中断写了 range= 没有报错（静默收下会让玩家以为\"只发 N 格内\"）");
+		if (!rangeOutOfRangeReported)
+			problems.add("range 超出 0..256 没有报错");
+		if (!rangeWrongOpReported)
+			problems.add("range 写在非 signal 操作上没有报错");
 
 		// ⑥ 物品的三种写法（§12.1）：只有"无组件 / 唯一组件是染色 / 其它"这三种输出
 		ItemStack plainItem = new ItemStack(Items.IRON_INGOT);
@@ -7002,7 +7501,6 @@ public class SequencedArmSelfTest {
 		ArmProgram other = new ArmProgram();
 		ArmProgramTask otherTask = new ArmProgramTask();
 		otherTask.name = "other";
-		otherTask.loop = ArmProgramTask.LoopType.FOREVER;
 		ArmProgramEntry otherEntry = new ArmProgramEntry();
 		otherEntry.op = OperationType.WAIT;
 		otherTask.entries.add(otherEntry);
@@ -7407,10 +7905,8 @@ public class SequencedArmSelfTest {
 			ArmProgramTask y = b.tasks.get(t);
 			if (!x.name.equals(y.name))
 				return "任务 " + t + " 名字变了：" + x.name + " → " + y.name;
-			if (x.loop != y.loop)
-				return "任务「" + x.name + "」的循环方式变了：" + x.loop + " → " + y.loop;
-			if (x.loopCount != y.loopCount)
-				return "任务「" + x.name + "」的循环次数变了：" + x.loopCount + " → " + y.loopCount;
+			// ⚠️ 这里原来还比"循环方式 / 循环次数"：任务级循环删除后没有那两个字段了
+			//   （主任务恒为无限循环、子任务的轮次归调用点的 callRepeat）⇒ 那两条比较随之删除。
 			if (!x.note.equals(y.note))
 				return "任务「" + x.name + "」的备注不同：[ " + showNote(x.note) + " ] → [ " + showNote(y.note) + " ]";
 			if (!ItemStack.matches(x.icon, y.icon))
@@ -7431,7 +7927,7 @@ public class SequencedArmSelfTest {
 		String where = "任务「" + task + "」第 " + (index + 1) + " 条";
 		if (a.op != b.op)
 			return where + "操作变了：" + a.op + " → " + b.op;
-		// ★ offset 只在**这一条需要坐标**时比较（用户第四十一轮）：对不需要坐标的操作（等待 / 等红石 /
+		// ★ offset 只在**这一条需要坐标**时比较（用户第四十一轮）：对不需要坐标的操作（等待 /
 		//   信号 / 调用 / 退出 / 抛错 / 手持过滤），"offset 恒为 0"已经是**模型定义**的一部分
 		//   （ArmProgramEntry.load 读完就自愈、编辑器切换操作时清零、ScriptDecompiler 也不写它）
 		//   ⇒ 文本里本来就没有它，拿它当往返不变量等于把这条定义判红。这就是那条**被推翻的旧口径**
@@ -7461,6 +7957,13 @@ public class SequencedArmSelfTest {
 			return where + "备注不同：[ " + showNote(a.note) + " ] → [ " + showNote(b.note) + " ]";
 		if (a.count != b.count)
 			return where + "个数变了：" + a.count + " → " + b.count;
+		// ★ 个数模式也必须逐字段往返（用户本轮口径：等于 / 小于等于）。
+		//   加了字段却忘了写进文本的症状**是静默的**：脚本里"等于 3 个"读回来变成"最多 3 个"，
+		//   于是这条操作从"必须够数才动"退化成"有多少拿多少"—— 只有丢过物品才会发现。
+		//   反证：把 ScriptDecompiler 里 `if (entry.countIsExact())` 那一段删掉 ⇒ 语料「个数模式」红。
+		//   （只在**两侧都**有 count 参数的操作上比：其它操作的这个字段从不进文本，比它等于把定义判红。）
+		if (a.op.hasCount() && b.op.hasCount() && a.countMode != b.countMode)
+			return where + "个数模式变了：" + a.countMode + " → " + b.countMode;
 		// ★ 「时长」只在**这一条真有持续时间**时才进文本，所以只有那种情况才比：
 		//   SIGNAL 里只有「发送通电」写 `place=`（用户本轮口径：中断 = 立即清除该频率、接收 = 等通电，
 		//   两者都**不接收**持续时间参数），WAIT 写自己的时长。拿空参数去比等于把模型里
@@ -7483,6 +7986,15 @@ public class SequencedArmSelfTest {
 			return where + "极性变了：" + a.waitForPowered + " → " + b.waitForPowered;
 		if (a.signalMode != b.signalMode)
 			return where + "信号模式变了：" + a.signalMode + " → " + b.signalMode;
+		// ★ 「接收距离」也必须逐字段往返 —— 但**只比「收」那一侧**：发送 / 中断的 `range=` 在文本里
+		//   一个字都不写（用户口径：距离只约束收，见 ArmProgramEntry.hasSignalRange），拿它们残留的值
+		//   去比等于把"运行时不读它"判成往返不变量（与上面 sendMode / signalNoDuration 同一理由）。
+		//   反证：把 ScriptDecompiler 里那段 `if (entry.hasSignalRange()) out.append(" range=")` 删掉
+		//   ⇒ 语料「接收距离」报"接收距离变了：16 → 0"。
+		boolean rangeMeaningful = (a.op == OperationType.SIGNAL && a.isSignalReceive())
+			|| (b.op == OperationType.SIGNAL && b.isSignalReceive());
+		if (rangeMeaningful && a.signalRange != b.signalRange)
+			return where + "接收距离变了：" + a.signalRange + " → " + b.signalRange;
 		if (!a.callTarget.equals(b.callTarget))
 			return where + "调用目标变了：" + a.callTarget + " → " + b.callTarget;
 		if (a.callRepeat != b.callRepeat)
@@ -7561,13 +8073,19 @@ public class SequencedArmSelfTest {
 	 *
 	 * <p>为什么用常量表而不是写成一大段文本再切：每一份都要**独立编译**并各自报错，
 	 * 切成一份一份之后，"哪一份坏了"在日志里直接看得见。
+	 *
+	 * <p>⚠️ 本轮删掉了两类行（都随被删功能一起消失，不变量本身没放松）：
+	 * ① 任务头的 {@code loop=} / {@code loopN=} —— 任务级循环删除后这两个键会**报错**
+	 *   （"task 头里不认识这个键"），留在语料里这一份就"编译不过"，整条不变量②跟着红；
+	 * ② 那行已删除操作的关键字 —— 那个关键字现在会报"未知操作"（这正是**期望行为**：
+	 *   用户明确不要向后兼容），所以语料里不能再留它。
 	 */
 	private static final Map<String, String> SCRIPT_CORPUS = scriptCorpus();
 
 	private static Map<String, String> scriptCorpus() {
 		Map<String, String> corpus = new LinkedHashMap<>();
 		corpus.put("全部操作", """
-			task 主任务 loop=count loopN=3
+			task 主任务
 			  take      1 0 0 count=3 delay=10
 			  deposit   0 0 2
 			  unload    0 0 2 repeat=until_empty amount=max
@@ -7577,12 +8095,22 @@ public class SequencedArmSelfTest {
 			  use       10 64 -3 face=east
 			  use_sneak 10 64 -3 face=west
 			  wait      5s
-			  wait_redstone on
 			  signal    recv on freq=iron_ingot + copper_ingot
 			  call      子任务 repeat=2
 			  break
-			task 子任务 loop=until_fail
+			task 子任务
 			  throw     "没材料了"
+			""");
+		// 个数模式（用户本轮口径：等于 / 小于等于，取出与放入共用）。三行各钉一种写法：
+		// ① 取出 · 等于 + 非 1 个数 ⇒ `count=` 与 `countmode=exact` 两个键都要写、且要读回同一种模式；
+		// ② 放入 · 等于 + **个数 1** ⇒ 只写 `countmode=exact`（这一行就是"不写模式就丢语义"的反证：
+		//    把 ScriptDecompiler 里 `if (entry.countIsExact())` 删掉 ⇒ 不变量①报「个数模式变了」）；
+		// ③ 手写 `countmode=atmost` 是默认值 ⇒ 反编译器**不写**它（规范形式里应当只剩 `count=5`）。
+		corpus.put("个数模式", """
+			task 主任务
+			  take 1 0 0 count=3 countmode=exact
+			  deposit 0 0 2 count=1 countmode=exact
+			  take 0 0 -2 count=5 countmode=atmost
 			""");
 		// 调用次数的两个端点（用户第四十轮：0 = 无限循环、上限 64）—— 这两个值进文本再出来必须一字不变
 		corpus.put("调用次数端点", """
@@ -7608,10 +8136,19 @@ public class SequencedArmSelfTest {
 		//    所以它的规范形式里没有 `place=`，而手写 `place=` 现在会被解析器**明确报错**
 		//    （留在语料里会让这一份"编译不过"，整条不变量②跟着红）。
 		corpus.put("收发信号三种模式", """
-			task main loop=forever
+			task main
 			  signal recv on freq=iron_ingot + copper_ingot
 			  signal send_on place=0t freq=iron_ingot + copper_ingot
 			  signal send_off freq=redstone_torch + {}
+			""");
+		// 「接收距离」（用户口径：距离只约束「收」，0 = 只有同一格才算收到）：
+		// ① 收 + range=16 ⇒ 规范形式必须**写出来**（不写就等于静默变成"只能同格"）；
+		// ② 收 + 没写 range ⇒ 默认 0，规范形式里也**不该出现** range=（默认值不进文本）。
+		// 反证：把 ScriptDecompiler 那段 `if (entry.hasSignalRange())` 删掉 ⇒ ① 的不变量①报"接收距离变了"。
+		corpus.put("接收距离", """
+			task main
+			  signal recv on range=16 freq=iron_ingot + copper_ingot
+			  signal recv on freq=iron_ingot + copper_ingot
 			""");
 		corpus.put("单位与时间", """
 			task main

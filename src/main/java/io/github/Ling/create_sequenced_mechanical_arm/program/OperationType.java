@@ -48,7 +48,7 @@ public enum OperationType {
 	 * 过滤：拿一份物品去比"幽灵过滤器物品"，按 Create 本体那套过滤规则判符合 / 不符合。
 	 *
 	 * <p><b>为什么 {@code requiresTarget} 是 false</b>（用户口径：过滤是<b>控制类</b>操作，
-	 * "判断过滤是一瞬间的事情，不需要动力臂伸过去判断"，跟「等红石 / 收信号」一样<b>没有动作</b>）：
+	 * "判断过滤是一瞬间的事情，不需要动力臂伸过去判断"，跟「收发信号」一样<b>没有动作</b>）：
 	 * 它<b>不移动手臂</b>、不做任何动作，只是一次纯判断 —— 所以这里的 false 就是
 	 * "臂不要伸过去"那个判据（{@code ArmProgramEntry.movesArm()} 直接转发它）。
 	 *
@@ -60,12 +60,11 @@ public enum OperationType {
 	 * <b>两件事、两处判据</b>（一个问"要不要伸过去"、一个问"有没有坐标"），混用就会让臂先飞过去。
 	 *
 	 * <p>⚠️ 也正是因为这个 false，它<b>不会</b>出现在 {@link #recordable()}（世界里录进卡的操作）里 ——
-	 * 过滤是纯判断、不对世界做动作，跟"等红石"一样属于"在编辑器里加"的操作；
+	 * 过滤是纯判断、不对世界做动作，属于"在编辑器里加"的操作；
 	 * 外部容器的坐标在编辑器第二行填。
 	 */
 	FILTER(false),
 	WAIT(false),
-	WAIT_REDSTONE(false),
 	/**
 	 * 收发信号：等到绑定的红石链接频率通电（或断电）为止 —— 频率从任务搬到了这里。
 	 *
@@ -76,7 +75,7 @@ public enum OperationType {
 	SIGNAL(false, true),
 	/** 调用另一个任务；被调任务跑完（或退出）后回到下一条。 */
 	CALL(false),
-	/** 立即结束当前任务：跳出循环、跳过剩余条目，回到调用方（主任务则是收工）。 */
+	/** 立即结束当前任务：跳过剩余条目，回到调用方；在**主任务**里 = 收工停机（不重来）。 */
 	BREAK(false),
 	/** 立即结束当前任务并**失败**：调用方走"失败后"，主任务则停机报错。 */
 	THROW(false);
@@ -112,6 +111,20 @@ public enum OperationType {
 	/** 这个操作是否**收发共用同一对频率**（目前只有 {@link #SIGNAL}）。 */
 	public boolean usesSignalPair() {
 		return this == SIGNAL;
+	}
+
+	/**
+	 * 这个操作有没有「个数」参数（取出 / 放入）—— <b>这一个判据的唯一定义处</b>。
+	 *
+	 * <p>用户本轮口径：个数属性<b>同时服务于取出与放入</b>（放入以前是"整摞都塞"，现在也受个数约束）。
+	 * 之所以收在枚举上而不是各处写 {@code op == TAKE || op == DEPOSIT}：它同时决定
+	 * 编辑器属性表要不要列出这一项（{@code ArmProgramScreen.entryProps}）、卡片胶囊要不要显示
+	 * （{@code ArmEntryText.props}，判据 {@code ArmProgramEntry.countIsSet()}）、
+	 * 脚本 {@code count=} / {@code countmode=} 允不允许出现（{@code ScriptParser} / {@code ScriptDecompiler}）、
+	 * 以及 {@code describe()} 报不报它 —— 五处各写一遍必然有一天只有四处改到。
+	 */
+	public boolean hasCount() {
+		return this == TAKE || this == DEPOSIT;
 	}
 
 	/**
@@ -169,7 +182,7 @@ public enum OperationType {
 	 * 中间插一次"收回"反而会在连续两条目标之间多绕一趟。
 	 */
 	public boolean isWait() {
-		return this == WAIT || this == WAIT_REDSTONE || this == SIGNAL;
+		return this == WAIT || this == SIGNAL;
 	}
 
 	/** 宽松解析：未知名字回落到 {@code fallback}，不让坏数据把存档读崩。 */

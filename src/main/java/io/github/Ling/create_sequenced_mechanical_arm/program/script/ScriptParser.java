@@ -19,7 +19,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
@@ -50,16 +49,16 @@ import net.minecraft.world.item.component.DyedItemColor;
  * <p>语言面（也是玩家可见错误的用词口径）：
  * <pre>
  *   &ast;/文件头注释 = 程序备注&ast;/
- *   task 名字 loop=forever loopN=3 icon=minecraft:diamond
+ *   task 名字 icon=minecraft:diamond
  *     take     10 64 -3 count=3 delay=10            &ast;/ 放铲子 &ast;/
- *     deposit  0 0 0
+ *     deposit  0 0 0 count=3 countmode=exact        &ast;/ 目标必须吃下恰好 3 个 &ast;/
  *     unload   0 0 2 repeat=until_empty amount=max
  *     attack   0 0 0 face=up ok=goto 清理 fail=skip timeout=5s
  *     wait     5s
- *     wait_redstone on
  *     signal   recv on freq=iron_ingot + copper_ingot
+ *     signal   recv on range=16 freq=iron_ingot + copper_ingot   &ast;/ 只收 16 格内的来源（含边界） &ast;/
  *     signal   send_on place=0t freq=iron_ingot + copper_ingot
- *     signal   send_off freq=iron_ingot + copper_ingot   &ast;/ 中断：立刻清除，**没有** place= &ast;/
+ *     signal   send_off freq=iron_ingot + copper_ingot   &ast;/ 中断：立刻清除，**没有** place= / range= &ast;/
  *     call     "搬一趟" repeat=3 shift=1,0,0
  *     break
  *     throw    "没材料"
@@ -91,7 +90,10 @@ public final class ScriptParser {
 	 * 定义成常量而不是散落的字面量：解析与自检都要写它，两处各打一遍就会漂移（决策 68/85）。
 	 */
 	public static final String HEADER = "@origin";
-	/** TAKE 的个数范围（§12.3：{@code count 1..64}）。 */
+	/**
+	 * 个数的范围（§12.3：{@code count 1..64}）—— <b>取值范围只有这一处来源</b>：
+	 * 取出 / 放入共用它，编辑器控件（{@code ArmProgramScreen}）与自检都从这里取。
+	 */
 	public static final int COUNT_MIN = 1;
 	public static final int COUNT_MAX = 64;
 	/** 时间**数值**上限：与编辑器里的等待 / 持续控件一致（0–120 × t/s/m）。 */
@@ -691,7 +693,10 @@ public final class ScriptParser {
 		ctx.entry = null;
 		ctx.owner = Ctx.Owner.TASK;
 
-		// task 头的参数：loop=… / loopN=… / icon=…
+		// task 头的参数：只剩 icon=…
+		// ★ **任务级循环的 `loop=` / `loopN=` 已删除**（用户口径：循环次数不需要了，主任务恒为无限循环）。
+		//   这里**不做兼容读取**：老文本里的这两个键现在会当成"不认识的键"报错（"未知操作"那类错误同理）——
+		//   这是**期望行为**，别为它加迁就分支（用户明确不要向后兼容）。
 		List<Token> rest = new ArrayList<>(tokens.subList(2, tokens.size()));
 		int index = 0;
 		while (index < rest.size()) {
@@ -702,23 +707,6 @@ public final class ScriptParser {
 				return;
 			}
 			switch (key) {
-				case "loop" -> {
-					LoopType parsed = loopType(valueOf(token));
-					if (parsed == null) {
-						error(token.line(),
-							"未知循环方式：" + valueOf(token) + "（可用 none / count / forever / until_fail）");
-						return;
-					}
-					task.loop = parsed;
-					index++;
-				}
-				case "loopN" -> {
-					Integer n = intValue(token, 1, ArmProgramTask.MAX_LOOP_COUNT, "循环次数");
-					if (n == null)
-						return;
-					task.loopCount = n;
-					index++;
-				}
 				case "icon" -> {
 					ItemStack icon = item(valueOf(token), token.line());
 					if (icon == null)
@@ -727,7 +715,7 @@ public final class ScriptParser {
 					index++;
 				}
 				default -> {
-					error(token.line(), "task 头里不认识这个键：" + key + "（可用 loop / loopN / icon）");
+					error(token.line(), "task 头里不认识这个键：" + key + "（可用 icon）");
 					return;
 				}
 			}
@@ -759,7 +747,7 @@ public final class ScriptParser {
 			//   这一点是必须的：条目坐标只能有一种读法（写两份判据必然分叉，决策 68/85）。
 			optionalPosition(rest, parsed);
 		} else if (looksLikePosition(rest)) {
-			// ★ 其余"不需要坐标"的操作（等待 / 等红石 / 信号 / 调用 / 退出 / 抛错）**不接受**坐标。
+			// ★ 其余"不需要坐标"的操作（等待 / 信号 / 调用 / 退出 / 抛错）**不接受**坐标。
 			//   它们以前被 optionalPosition 静默吃下（那时 NBT 的 `off` 是无条件写的，于是"非零偏移"
 			//   也能往返）—— 用户第四十一轮正是被这个问住的：脚本里 `call 任务` 后面那串 `-3 0 -1`
 			//   在运行时既不移动、也没有目标，纯是老数据留下的噪声。
@@ -801,10 +789,12 @@ public final class ScriptParser {
 		entry.onTimeout = parsed.onTimeout;
 		entry.timeoutTarget = parsed.timeoutTarget;
 		entry.count = parsed.count;
+		entry.countMode = parsed.countMode;
 		entry.waitAmount = parsed.waitAmount;
 		entry.waitUnit = parsed.waitUnit;
 		entry.waitForPowered = parsed.powered;
 		entry.signalMode = parsed.mode;
+		entry.signalRange = ArmProgramEntry.clampSignalRange(parsed.range);
 		entry.callTarget = parsed.callTarget;
 		entry.callRepeat = parsed.callRepeat;
 		entry.callShift = parsed.callShift;
@@ -831,6 +821,16 @@ public final class ScriptParser {
 		}
 		if (entry.frequency != null)
 			warnFrequencyComponents(parsed);
+		// ★ 「接收距离」**只对「收」有意义**（用户口径：距离只约束收；发送 / 中断运行时不读它）。
+		//   写在这一步（`signal` 的模式与全部后缀都读完了）才问得准：`range=` 与模式顺序无关，
+		//   将来多一种写法也不会漏判。**报错而不是静默丢弃** —— 静默收下会让玩家以为
+		//   "这条发送只发 16 格内的"，而运行时是**不带位置**地发。
+		//   ⚠️ 报了错要把那个值**清回 0**（模型的不变量：发送 / 中断的 signalRange 恒为 0），
+		//   与上面"手持过滤写了坐标"那一段同一条纪律：带上错误、但值自愈，条目本身留着（§17.10）。
+		if (parsed.range != 0 && parsed.mode != SignalMode.RECEIVE) {
+			error(line, "range 只对收信号有意义（发送 / 中断不读距离）");
+			entry.signalRange = 0;
+		}
 		if (parsed.quotedNote != null) {
 			// 与块注释走**同一条**备注路径（§12.3a 第 6 条：两块合并成一个备注）——
 			// 一行里同时写了 `/* … */`（上面的 attachComment 已经写过）与 `note="…"` 时，
@@ -869,22 +869,6 @@ public final class ScriptParser {
 					return false;
 				parsed.waitAmount = time.amount;
 				parsed.waitUnit = time.unit;
-				rest.remove(0);
-			}
-			case WAIT_REDSTONE -> {
-				if (rest.isEmpty()) {
-					error(parsed.line, "wait_redstone 后面要跟 on 或 off");
-					return false;
-				}
-				Boolean polarity = polarity(rest.get(0)
-					.text());
-				if (polarity == null) {
-					error(rest.get(0)
-						.line(), "wait_redstone 只认 on / off，收到：" + rest.get(0)
-							.text());
-					return false;
-				}
-				parsed.powered = polarity;
 				rest.remove(0);
 			}
 			case SIGNAL -> {
@@ -982,14 +966,36 @@ public final class ScriptParser {
 					index++;
 				}
 				case "count" -> {
-					if (parsed.op != OperationType.TAKE) {
-						error(token.line(), "count 只对 take 有意义");
+					// 用户本轮口径：个数**取出 / 放入都行**（以前只有 take 认它）。
+					// 判据是 OperationType.hasCount()（那一个方法的唯一定义处见枚举里）。
+					if (!parsed.op.hasCount()) {
+						error(token.line(), "count 只对 take / deposit 有意义");
 						return false;
 					}
 					Integer n = intValue(token, COUNT_MIN, COUNT_MAX, "count");
 					if (n == null)
 						return false;
 					parsed.count = n;
+					index++;
+				}
+				// 个数的**模式**（用户本轮口径：等于 / 小于等于）：`countmode=exact|atmost`。
+				// 语义：exact = 必须凑出恰好 count 个才动手；atmost（默认）= 有多少动多少、上限 count。
+				// 反编译器**只写非默认**（atmost 一个字都不写）⇒ 手写省略时读回来必须落在同一个默认值上。
+				case "countmode" -> {
+					if (!parsed.op.hasCount()) {
+						error(token.line(), "countmode 只对 take / deposit 有意义");
+						return false;
+					}
+					ArmProgramEntry.CountMode countMode = switch (value.toLowerCase(Locale.ROOT)) {
+						case "exact" -> ArmProgramEntry.CountMode.EXACT;
+						case "atmost" -> ArmProgramEntry.CountMode.ATMOST;
+						default -> null;
+					};
+					if (countMode == null) {
+						error(token.line(), "未知个数模式：" + value + "（可用 exact / atmost）");
+						return false;
+					}
+					parsed.countMode = countMode;
 					index++;
 				}
 				case "repeat" -> {
@@ -1074,6 +1080,25 @@ public final class ScriptParser {
 					}
 					parsed.amount = amount;
 					parsed.sawAmount = true;
+					index++;
+				}
+				// 「接收距离」（用户口径：距离**只约束收** —— 我只接受半径内的来源，发出去不管）。
+				// 语法：`range=16`（0..256，整数格）。反编译器**只在「收」且非 0 时**写它，
+				// 所以手写省略时读回来必须是默认的 0（= 只有同一格才算收到）。
+				case "range" -> {
+					if (parsed.op != OperationType.SIGNAL) {
+						error(token.line(), "range 只对 signal 有意义");
+						return false;
+					}
+					if (parsed.sawRange) {
+						error(token.line(), "接收距离只能写一次（range=）");
+						return false;
+					}
+					parsed.sawRange = true;
+					Integer n = intValue(token, 0, ArmProgramEntry.SIGNAL_RANGE_MAX, "range");
+					if (n == null)
+						return false;
+					parsed.range = n;
 					index++;
 				}
 				case "place" -> {
@@ -1568,17 +1593,6 @@ public final class ScriptParser {
 		};
 	}
 
-	@Nullable
-	private static LoopType loopType(String text) {
-		return switch (text.toLowerCase(Locale.ROOT)) {
-			case "none" -> LoopType.NONE;
-			case "count" -> LoopType.COUNT;
-			case "forever" -> LoopType.FOREVER;
-			case "until_fail" -> LoopType.UNTIL_FAIL;
-			default -> null;
-		};
-	}
-
 	/** 复数形式：*_count 在模型里，但文本面用 `count=`（更短、也是草案里的写法）。 */
 	private static String operationNames() {
 		StringBuilder sb = new StringBuilder();
@@ -1749,10 +1763,15 @@ public final class ScriptParser {
 		SkipAction onTimeout = SkipAction.NONE;
 		String timeoutTarget = "";
 		int count = 1;
+		/** 个数的模式（TAKE / DEPOSIT）：缺省 ATMOST = "有多少动多少"，`countmode=exact` 才要求恰好 count 个。 */
+		ArmProgramEntry.CountMode countMode = ArmProgramEntry.CountMode.ATMOST;
 		int waitAmount = 20;
 		WaitUnit waitUnit = WaitUnit.TICK;
 		boolean powered = true;
 		SignalMode mode = SignalMode.RECEIVE;
+		/** SIGNAL 的**接收半径**（`range=`，0..{@link ArmProgramEntry#SIGNAL_RANGE_MAX}）与"这个键见过没有"。 */
+		int range;
+		boolean sawRange;
 		String callTarget = "";
 		int callRepeat = 1;
 		/** CALL 的调用偏移（Δ）与"这个键见过没有"（重复写要报错，见 suffixes）。 */
@@ -1780,6 +1799,11 @@ public final class ScriptParser {
 		Parsed(OperationType op, int line) {
 			this.op = op;
 			this.line = line;
+			// 「个数」的默认值**按操作给**（取出 1 / 放入 64，见 ArmProgramEntry.defaultCount）：
+			// 脚本里没写 `count=` 时必须落在这个初值上 —— 否则 `deposit` 省掉 count 会变成
+			// "一次只放 1 个"，与旧行为（整摞）和编辑器显示都对不上。
+			// ⚠️ 别在这里写死 1 / 64：默认值的唯一定义处是 defaultCount()。
+			this.count = ArmProgramEntry.defaultCount(op);
 		}
 	}
 

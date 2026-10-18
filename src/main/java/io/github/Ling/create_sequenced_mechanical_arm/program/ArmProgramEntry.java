@@ -58,7 +58,7 @@ public class ArmProgramEntry {
 	 *
 	 * <p>★ 对「过滤」这是**有意**的（用户口径：过滤是控制类操作、失败默认 retry）：过滤是**控制类操作** ——
 	 * 一瞬间的判断，臂不移动、不做任何动作，因此没有"做错了"这回事；不匹配只意味着"时机还没到"
-	 * （容器里还是上一批货 / 手上那份还没被取货条目换掉），与「等红石 / 收信号」是**同一类**。
+	 * （容器里还是上一批货 / 手上那份还没被取货条目换掉），与「收信号」是**同一类**。
 	 * 所以过滤默认重试，要让它"不匹配就改道"必须自己把时限与「失败后」的去向设出来 ——
 	 * 而不是像上一版那样一不匹配就直接走失败出口。判据见 {@link #hasRetryWindow()}。
 	 */
@@ -182,8 +182,91 @@ public class ArmProgramEntry {
 		CONTAINER
 	}
 
-	/** TAKE 的数量。 */
+	/**
+	 * TAKE / DEPOSIT 的**个数上限**（1..64）。
+	 *
+	 * <p>它的**语义**由 {@link #countMode} 决定，两个字段是一件事的两半：
+	 * <ul>
+	 *   <li>{@link CountMode#ATMOST}（默认）：<b>有多少动多少，上限 N</b> —— 不足 N 也算成功；</li>
+	 *   <li>{@link CountMode#EXACT}：<b>必须能凑出恰好 N 个</b>才动手，凑不出就走「失败后」那条既有出口
+	 *       （默认重试，时限 / 去向照旧）。</li>
+	 * </ul>
+	 *
+	 * <p>也就是：这条属性**同时服务于「取出」与「放入」**。取值范围（1..64）只有一处来源：
+	 * {@code ScriptParser.COUNT_MIN} / {@code COUNT_MAX}（编辑器控件与自检都问那里）。
+	 */
 	public int count = 1;
+
+	/**
+	 * 「个数」的<b>默认值按操作给</b>：取出 = 1、放入 = 64（用户口径）。
+	 *
+	 * <p><b>为什么放入的默认是 64 而不是 1</b>：改造前「放入」根本不读 {@code count}，
+	 * 它把手上那<b>整摞</b>塞给目标 —— 也就是实际行为是"一次一摞"。若沿用 1，
+	 * 所有既有卡片里的放入会静默变成"一次只放 1 个"（一晚上也搬不完一箱）。
+	 * 64 = 一摞（{@code COUNT_MAX}）= 与改造前**完全一致**的行为；
+	 * 想少放再自己调小。取出侧保持 1（与改造前一致）。
+	 *
+	 * <p>★ 这个方法是"默认值"的<b>唯一定义处</b>：{@link #countIsSet()}（胶囊 / 属性表要不要显示）、
+	 * {@code ScriptParser}（脚本没写 {@code count=} 时的初值）、{@code ScriptDecompiler}
+	 * （默认值不写进文本）、编辑器新建 / 换操作时的初值，全都问它 —— 各写一份"是不是默认"
+	 * 就会出现"界面显示未设置、脚本里写 count=64、读回来又变成未设置"的三方分叉。
+	 */
+	public static int defaultCount(OperationType op) {
+		return op == OperationType.DEPOSIT ? 64 : 1;
+	}
+
+	/**
+	 * 个数的**模式**（用户本轮口径：等于 / 小于等于）。
+	 *
+	 * <p><b>默认 {@link CountMode#ATMOST} 是有意的</b>：它正好等于“取出”改造前的行为
+	 * （{@code Math.min(可用, N)}，有多少拿多少、上限 N），所以老卡 / 老脚本读进来
+	 * <b>一个字都不用迁移</b>；要“必须够数才动”才显式切到 EXACT。
+	 * 枚举顺序即界面选择框的选中下标（{@code ordinal}）：ATMOST 在前 = 默认项。
+	 *
+	 * <p>★ 判据<b>只此一处</b>（{@link #countIsExact()}）：运行时（前置检查 / 取出 / 放入）、
+	 * 编辑器第二行的模式框、卡片胶囊、{@code describe()}、脚本的写出与解析全都问那一个方法。
+	 * <br>NBT 键 {@code cmode}，<b>默认值（ATMOST）不写</b> —— 与 sigmode / fsrc / coff 同一手法：
+	 * 只写在小于等于模式下的老卡存取前后 NBT 逐字节不变。
+	 */
+	public CountMode countMode = CountMode.ATMOST;
+
+	/**
+	 * 个数模式：小于等于（默认）/ 等于。
+	 *
+	 * <p>⚠️ 顺序有意义：{@code ordinal} 就是编辑器里那个模式选择框的选中下标（ATMOST 在前 = 默认项），
+	 * 而 NBT / 脚本写的是**枚举名字**（不是 ordinal）—— 增删项不会把老数据读成另一种模式。
+	 */
+	public enum CountMode {
+		/** 有多少动多少，上限 {@link #count}；不足 N <b>不算失败</b>（= 取出操作改造前的行为）。 */
+		ATMOST,
+		/** 必须能凑出恰好 {@link #count} 个才动手；凑不出走「失败后」的重试窗口（默认重试）。 */
+		EXACT
+	}
+
+	/**
+	 * <b>等于 / 小于等于的唯一判据</b>：真 = 必须恰好 N 个。
+	 *
+	 * <p>为什么要收成一个方法：这条判据的消费方有六处（前置检查、{@code take}、{@code deposit}、
+	 * 编辑器的模式框、卡片胶囊与 {@code describe()} 的文案、脚本的写出 / 解析）。
+	 * 各写一个 {@code countMode == EXACT} 的话，界面说“等于”、运行时按“小于等于”跑这种分裂
+	 * 只有在实机里丢过 / 取错过物品之后才看得出来。
+	 */
+	public boolean countIsExact() {
+		return countMode == CountMode.EXACT;
+	}
+
+	/**
+	 * 「个数」这个属性算不算<b>偏离默认值</b> —— 胶囊要不要占位、编辑器属性表要不要把它算作“已加”。
+	 *
+	 * <p>⚠️ 判据不能只是 {@code count != 1}：{@code count == 1 && EXACT}（“必须恰好 1 个”）与
+	 * {@code count == 1 && ATMOST}（“最多 1 个”）<b>行为不同</b>，藏起来就等于静默改掉语义。
+	 * 也不能只跟 1 比：放入的默认是 64（见 {@link #defaultCount(OperationType)}），
+	 * 拿 1 当基准会让每条默认的放入都顶着"最多 64 个"的胶囊。
+	 */
+	public boolean countIsSet() {
+		return count != defaultCount(op) || countIsExact();
+	}
+
 	/**
 	 * WAIT 的等待时长：<b>数值 × 单位</b>（用户要求"时间能选 tick / s / min，数值 0–120"）。
 	 *
@@ -193,8 +276,12 @@ public class ArmProgramEntry {
 	public int waitAmount = 20;
 	public WaitUnit waitUnit = WaitUnit.TICK;
 	/**
-	 * WAIT_REDSTONE / SIGNAL：极性（"通电"那一侧）。收：等通电（true）/ 等断电（false）；
+	 * SIGNAL：极性（"通电"那一侧）。收：等通电（true）/ 等断电（false）；
 	 * 发：发通电 15（true）/ 发断电 0（false）—— 同一字段、同一含义方向（§7.16b 三）。
+	 *
+	 * <p>★ 这个字段**只剩「收发信号」在用**（用户口径：「我现在倾向于移除那个按相邻红石等待的操作，
+	 * 因为我们有更好的无线信号系统可以使用」）：它只描述**红石链接频率**那一侧的电平，
+	 * 与相邻方块的普通红石电无关。
 	 */
 	public boolean waitForPowered = true;
 	/**
@@ -209,10 +296,54 @@ public class ArmProgramEntry {
 	 */
 	public SignalMode signalMode = SignalMode.RECEIVE;
 	/**
+	 * SIGNAL（收发信号）的<b>接收半径</b>（格，0..{@link #SIGNAL_RANGE_MAX}）—— <b>只约束「收」</b>。
+	 *
+	 * <p><b>语义</b>（用户口径："设置收发信号的时候再加一个距离属性，默认为 0（只能自己接收发送），
+	 * 范围是 0~256 格"；与宿主确认的方案是<b>距离只管收</b>）：我只接受<b>半径内</b>的来源，
+	 * <b>发出去不管</b>（谁收到由收方自己的距离决定）。所以{@code 发送 / 中断一个字都不读它}。
+	 *
+	 * <p><b>{@code 0} 的含义</b>：只有"来源与本臂<b>同一格</b>"才算收到 —— 也就是自己发、自己收的那条
+	 * <b>自环</b>，正是用户说的"只能自己接收发送"。判据是<b>方块欧氏距离</b>
+	 * {@code dx² + dy² + dz² <= N²}（<b>含边界</b>）：{@code N = 0} 时只有 {@code distSqr == 0}
+	 * 成立，所以判定处必须写成 {@code <=} 而不是 {@code <}（改成 {@code <} ⇒ 自检的边界那条变红）。
+	 *
+	 * <p>⚠️ 只有 {@code signalMode == RECEIVE} 时它才有意义（发送 / 中断的编辑器不给这个属性、
+	 * 脚本也不写它）。判据<b>只此一处</b>：{@link #hasSignalRange()} —— 胶囊 / 编辑器 / 反编译器 /
+	 * 运行时都问那一个方法，别在各处再写一遍 {@code signalMode == RECEIVE && signalRange > 0}。
+	 *
+	 * <p>NBT 键 {@code range}，<b>0（默认）不写</b> —— 与 {@code cmode} / {@code coff} / {@code sigmode}
+	 * 同一手法：只含收信号、没设过距离的老卡存取前后 NBT 逐字节不变。
+	 */
+	public int signalRange = 0;
+
+	/** 接收半径的上限（格）：用户定的 0..256。 */
+	public static final int SIGNAL_RANGE_MAX = 256;
+
+	/**
+	 * 把任意整数夹进接收半径的合法区间（0..{@link #SIGNAL_RANGE_MAX}）—— <b>唯一的夹取处</b>
+	 * （读盘兜底、编辑器控件、脚本解析都走它，三处各写一个 {@code Math.max/min} 迟早写出三个不同的区间）。
+	 */
+	public static int clampSignalRange(int raw) {
+		return Math.max(0, Math.min(SIGNAL_RANGE_MAX, raw));
+	}
+
+	/**
+	 * <b>这一条有没有"接收半径"</b>（= 收模式<b>且</b>半径 &gt; 0）—— 胶囊要不要占位、编辑器属性表要不要
+	 * 把它算作"已加"、脚本要不要写 {@code range=}、运行时要不要按距离筛，全都问这一个方法。
+	 *
+	 * <p>⚠️ 别在四处各写一遍 {@code signalMode == RECEIVE && signalRange > 0}：那种分裂的症状是
+	 * "卡片上有「距离 16」、运行时却按不限距离收"（或反过来），两边都看不出来谁对。
+	 * 发送 / 中断那一侧恒假 —— 距离只约束收，用户口径已经定死。
+	 */
+	public boolean hasSignalRange() {
+		return isSignalReceive() && signalRange > 0;
+	}
+
+	/**
 	 * SIGNAL（收 / 发）要用的红石链接频率（两个物品，与 Create 的链接频率一致）。
 	 *
 	 * <p>从 {@link ArmProgramTask} 搬过来 —— 用户要求"把频率功能单独拆出来"，于是
-	 * "这个任务要通电才跑"变成任务开头的第一条等待信号条目，而任务只剩循环设置。
+	 * "这个任务要通电才跑"变成任务开头的第一条 `signal recv` 条目，而任务上不再有频率设置。
 	 */
 	@Nullable
 	public Couple<Frequency> frequency;
@@ -221,7 +352,7 @@ public class ArmProgramEntry {
 	/**
 	 * CALL（调用任务）：调用次数（轮次）的上限。
 	 *
-	 * <p>原来是 {@link ArmProgramTask#MAX_LOOP_COUNT}（1..1024）借着用，用户第四十轮改成自己的
+	 * <p>原来是任务级循环次数的上限（1..1024）借着用，用户第四十轮改成自己的
 	 * 区间：<b>0..64</b>，缺省 1，{@link #CALL_REPEAT_INFINITE}（= 0）= 无限循环。
 	 * 1024 轮在游戏里既没人等得起、又和"不限次"这个真正想要的东西差一层，所以拆出独立上限。
 	 */
@@ -239,8 +370,8 @@ public class ArmProgramEntry {
 	 * {@code 0} = 无限循环）。
 	 *
 	 * <p><b>用户第二十七轮定的：循环次数归调用点</b> —— "把循环次数放在调用上"。
-	 * 于是子任务的轮次完全由这里决定（子任务自身的 {@code loop} 只对主任务有意义，
-	 * 编辑器也不给子任务显示循环设置），避免"调用 ×3 × 子任务自己循环 ×2"这种要相乘、
+	 * 于是子任务的轮次完全由这里决定（任务级的循环设置在用户后来的口径里**整体删除**了：
+	 * 主任务恒为无限循环、子任务跑完就返回调用方），避免"调用 ×3 × 子任务自己循环 ×2"这种要相乘、
 	 * 谁都算不清的组合。
 	 */
 	public int callRepeat = 1;
@@ -258,7 +389,7 @@ public class ArmProgramEntry {
 	 * B 里条目的 = Δ1；回到调用方时恢复（调用方的条目不受子任务那边影响）。
 	 * 没人调的任务（主任务 / 被「跳转」过去而不是被调用的任务）生效偏移 = 0。
 	 *
-	 * <p>只影响**需要坐标**的条目：等待 / 等红石 / 信号 / 退出 / 抛错没有目标，原样不动。
+	 * <p>只影响**需要坐标**的条目：等待 / 信号 / 退出 / 抛错没有目标，原样不动。
 	 *
 	 * <p>★ <b>卡级「坐标偏移」（{@link ArmProgram#shiftAllOffsets}）有意不搬这个字段</b>：
 	 * 它是**相对量**，整套平移时子任务自己的 {@code offset} 已经跟着搬过一次了，这里再搬一次
@@ -366,7 +497,7 @@ public class ArmProgramEntry {
 	 * 这条操作失败时是"<b>重试到时限</b>"吗 —— 即它有没有一个**重试窗口**
 	 * （从 {@code OperationType} 的类型级谓词搬来，按**条目**判定：§7.16b 一.2、决策 73）。
 	 *
-	 * <p>取 / 放 / 卸 / 组装 / 等红石 / **过滤**：不成功就是"还没成功"，会原地重试到「失败后」的时限，
+	 * <p>取 / 放 / 卸 / 组装 / **过滤**：不成功就是"还没成功"，会原地重试到「失败后」的时限，
 	 * 时限到了才走去向。没有重试窗口、但有失败出口的（攻击 / 调用）失败是**立刻有结论**的 ——
 	 * 挖不动、被领地保护、子任务抛错，等下去不会有任何变化。
 	 *
@@ -382,11 +513,11 @@ public class ArmProgramEntry {
 	 *
 	 * <p>★ {@code FILTER} 在这一列（用户口径：过滤是控制类操作、**失败默认 retry**）：
 	 * 它不匹配（含"没有物品可比"）时走的必须是 {@code handleFailure} 那条既有路 ——
-	 * 在重试窗口内反复判断，窗口到了才走「失败后」，与「等红石 / 收信号」一字不差。
+	 * 在重试窗口内反复判断，窗口到了才走「失败后」，与「收信号」一字不差。
 	 */
 	public boolean hasRetryWindow() {
 		return switch (op) {
-			case TAKE, DEPOSIT, UNLOAD, DEPLOY, WAIT_REDSTONE, FILTER -> true;
+			case TAKE, DEPOSIT, UNLOAD, DEPLOY, FILTER -> true;
 			case SIGNAL -> signalMode == SignalMode.RECEIVE;
 			default -> false;
 		};
@@ -429,7 +560,7 @@ public class ArmProgramEntry {
 	 * <b>这一条要不要让手臂移动过去</b>（= 运行时"伸过去 / 进入移动状态"唯一的判据）。
 	 *
 	 * <p><b>为什么必须是类型级、不能问 {@link #needsTarget()}</b>（用户口径）：过滤是**控制类操作** ——
-	 * "判断过滤是一瞬间的事情，不需要动力臂伸过去判断"，它跟「等红石 / 收信号」一样**没有动作**。
+	 * "判断过滤是一瞬间的事情，不需要动力臂伸过去判断"，它跟「收发信号」一样**没有动作**。
 	 * 容器模式的坐标只是"**读哪个**方块"的数据参数，不是"伸过去的目标"。
 	 * 拿 {@code needsTarget()} 当这条判据就会让臂先飞过去 —— 那是上一版的错。
 	 *
@@ -498,6 +629,10 @@ public class ArmProgramEntry {
 		tag.putString("tot", timeoutTarget);
 		tag.putString("note", note);
 		tag.putInt("count", count);
+		// 个数模式：**默认（ATMOST）不写这个键** —— 与 sigmode / fsrc / coff 同一手法：
+		// 老卡（只有 count、没有模式）存取前后 NBT 逐字节不变。写枚举**名字**，不用 ordinal。
+		if (countMode != CountMode.ATMOST)
+			tag.putString("cmode", countMode.name());
 		tag.putInt("waitt", waitAmount);
 		tag.putString("wunit", waitUnit.name());
 		tag.putBoolean("redpow", waitForPowered);
@@ -507,6 +642,10 @@ public class ArmProgramEntry {
 		if (frequency != null)
 			tag.put("freq", frequency.serializeEach(f -> (CompoundTag) f.getStack()
 				.saveOptional(registries)));
+		// 接收半径：**0（默认）不写这个键** —— 与 sigmode / cmode / coff 同一手法：只含收信号、
+		// 没设过距离的老卡存取前后 NBT 逐字节不变（相容性清单：不许静默扰动老数据）。
+		if (signalRange != 0)
+			tag.putInt("range", signalRange);
 		tag.putString("call", callTarget);
 		tag.putInt("calln", callRepeat);
 		// 调用偏移：**缺省（0,0,0）不写这个键** —— 与 sigmode / fsrc 同一手法：没设过偏移的老卡
@@ -545,6 +684,16 @@ public class ArmProgramEntry {
 		// 下次发送时让编码器抛异常（见 NOTE_MAX 的说明）。这是**兜底**，正常路径不会触发。
 		entry.note = clipNote(tag.getString("note"));
 		entry.count = Math.max(1, tag.getInt("count"));
+		// 个数模式：**缺键（老卡）= ATMOST** ⇒ 语义与改造前完全一致（“有多少拿多少、上限 count”）。
+		// 用 enumOf 而不是 ordinal：枚举增删项不会把老数据读成另一种模式（与 op / sigmode 同一惯例）。
+		entry.countMode = enumOf(CountMode.class, tag.getString("cmode"), CountMode.ATMOST);
+		// ★ 「放入」的个数：改造前这个字段**运行时根本不读**（整摞塞），所以老卡里那个 1 是
+		//   "字段初始值"，不是玩家选的数 —— 它必须迁成 64（= 整摞 = 旧行为，见 defaultCount）。
+		//   ⚠️ 判据要带上 `cmode` 键：EXACT 一定写过它，所以"放入 + 等于模式 + 恰好 1 个"
+		//   （玩家真的选了 1）不会被这条迁移改成 64。小于等于 + 1 的放入则会变 64 —— 这是
+		//   有意的取舍：旧数据里它无法与"没设过"区分，而"一次只放 1 个"几乎必然是误伤。
+		if (entry.op == OperationType.DEPOSIT && entry.count == 1 && !tag.contains("cmode"))
+			entry.count = defaultCount(OperationType.DEPOSIT);
 		// waitt 以前是"ticks"，现在带单位：老卡片没有 wunit → 数值就是 tick 数，语义不变
 		entry.waitAmount = Math.max(0, tag.getInt("waitt"));
 		entry.waitUnit = enumOf(WaitUnit.class, tag.getString("wunit"), WaitUnit.TICK);
@@ -552,6 +701,9 @@ public class ArmProgramEntry {
 		// sigmode 缺键（老卡）= RECEIVE ⇒ 行为不变（兼容清单 2）；写的是**字符串**而不是 ordinal，
 		// 以后枚举增删项不会把老卡的"发"变成"收"（与 op/onok/timeout/urep 同一惯例）
 		entry.signalMode = enumOf(SignalMode.class, tag.getString("sigmode"), SignalMode.RECEIVE);
+		// 接收半径：**缺键（老卡 / 没设过）= 0**（= 只有同一格才算收到）；读到什么都夹进 0..256 ——
+		// 手改过的卡 / 将来的上限变化不该让半径变成负数或上万格（夹取只有 clampSignalRange 一处）。
+		entry.signalRange = clampSignalRange(tag.getInt("range"));
 		// **有持续时间**的信号（只有「发送通电」）的持续**数值**夹进与 WAIT 相同的 0..120
 		//（真正的 ticks = 数值 × 单位，见 signalTicks()）。判据是 hasSignalDuration() 而不是
 		// isSignalSend()：中断 / 接收那两种模式的 waitt 是**空参数**（文本面不写、运行时也不读），
@@ -578,7 +730,7 @@ public class ArmProgramEntry {
 			entry.filterItem = ItemStack.parseOptional(registries, tag.getCompound("fitem"));
 
 		// ★ 自愈：**不需要坐标的条目，offset 归零**（用户第四十一轮）。
-		//   这类操作（等待 / 等红石 / 信号 / 调用 / 退出 / 抛错 / 手持过滤）的坐标对运行时没有任何意义
+		//   这类操作（等待 / 信号 / 调用 / 退出 / 抛错 / 手持过滤）的坐标对运行时没有任何意义
 		//   ——「调用」是控制类操作，既不移动、也没有目标，运行时**根本不读** {@link #offset}。
 		//   老卡 / 老文本里那串数字只是"这条曾经是别的操作"（或老版本"新建条目取你正看的方块"）
 		//   留下的残留：读进来就清掉，**下一次保存它就消失了**，脚本里也不会再冒出来
@@ -660,7 +812,7 @@ public class ArmProgramEntry {
 			sb.append(" wait=")
 				.append(waitAmount)
 				.append(waitUnit);
-		if (op == OperationType.WAIT_REDSTONE || op == OperationType.SIGNAL)
+		if (op == OperationType.SIGNAL)
 			sb.append(" redstone=")
 				.append(waitForPowered ? "on" : "off");
 		if (op == OperationType.SIGNAL)
@@ -690,6 +842,15 @@ public class ArmProgramEntry {
 		if (op == OperationType.THROW)
 			sb.append(" error=")
 				.append(errorMessage);
+		// 个数（取出 / 放入）：与 shift= 同一手法 —— **非默认才报**。默认是"小于等于、1 个"，
+		// 那时报个数只是给每一条取放拖一段 noise；而"等于"（非默认模式）必须露出来，
+		// 否则护目镜那行看起来与"有多少拿多少"一模一样。
+		if (op.hasCount() && countIsSet()) {
+			sb.append(" count=")
+				.append(count);
+			if (countIsExact())
+				sb.append(" exact");
+		}
 		if (failAmount >= 0)
 			sb.append(" failAfter=")
 				.append(failAmount)

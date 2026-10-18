@@ -10,7 +10,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Sk
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadAmount;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
@@ -24,6 +23,10 @@ import net.minecraft.world.item.Items;
  * 阶段 2 的开发预设操作表（卡片与 GUI 在阶段 3 取代它们）。
  *
  * <p>坐标一律是<b>相对手臂</b>的偏移，方便把手臂挪到任何地方测试。
+ *
+ * <p>★ <b>任务级循环已经删除</b>（用户口径："任务循环次数已经不需要了，因为只有一个主任务有这个属性，
+ * 但是主任务是不断循环的"）⇒ 这里的预设**都不再写循环**：主任务恒为无限循环（一轮跑完从头再来），
+ * 要"跑固定几轮"只能靠「调用」的 {@code callRepeat}（见 {@link #loop3()}）。
  */
 public final class DevPresets {
 
@@ -51,27 +54,42 @@ public final class DevPresets {
 
 	// ————————————————————————— 预设 —————————————————————————
 
-	/** 取 (+2,0,0) 的置物台，放到 (0,0,2)；一直搬（循环直到失败）。 */
+	/** 取 (+2,0,0) 的置物台，放到 (0,0,2)；一直搬（主任务恒循环，一轮跑完自动从头再来）。 */
 	public static ArmProgram depotAB() {
-		ArmProgramTask task = task("depot_ab", LoopType.UNTIL_FAIL);
+		ArmProgramTask task = task("depot_ab");
 		task.entries.add(entry(OperationType.TAKE, 2, 0, 0));
 		task.entries.add(entry(OperationType.DEPOSIT, 0, 0, 2));
 		return single(task);
 	}
 
-	/** 同上，循环 3 次。 */
+	/**
+	 * 同上，但**只跑 3 轮**。
+	 *
+	 * <p>★ 「跑 N 轮」现在只能由**调用点**表达：任务级的循环设置已删除，
+	 * 所以这里改成"主任务调一次「搬」，{@code callRepeat = 3}"——
+	 * 子任务跑完一轮返回调用方，调用点再让它跑一轮，正是原来的 COUNT=3 语义。
+	 */
 	public static ArmProgram loop3() {
-		ArmProgramTask task = task("loop3", LoopType.COUNT);
-		task.loopCount = 3;
-		task.entries.add(entry(OperationType.TAKE, 2, 0, 0));
-		task.entries.add(entry(OperationType.DEPOSIT, 0, 0, 2));
-		return single(task);
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask main = task("loop3");
+		ArmProgramEntry call = new ArmProgramEntry();
+		call.op = OperationType.CALL;
+		call.callTarget = "搬";
+		call.callRepeat = 3;
+		call.note = "跑 3 轮（轮次归调用点）";
+		main.entries.add(call);
+		program.tasks.add(main);
+
+		ArmProgramTask body = task("搬");
+		body.entries.add(entry(OperationType.TAKE, 2, 0, 0));
+		body.entries.add(entry(OperationType.DEPOSIT, 0, 0, 2));
+		program.tasks.add(body);
+		return program;
 	}
 
 	/** 取 → 等待 200t → 放。 */
 	public static ArmProgram waitThenPlace() {
-		ArmProgramTask task = task("wait", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("wait");
 		task.entries.add(entry(OperationType.TAKE, 2, 0, 0));
 
 		ArmProgramEntry wait = new ArmProgramEntry();
@@ -87,7 +105,7 @@ public final class DevPresets {
 
 	/** 扁平 if/else（§7.7 v3）：取 A 等 100t 还没成 → 跳到第 1 条去取 B，最后都放到 (0,0,2)。 */
 	public static ArmProgram takeAOrB() {
-		ArmProgramTask task = task("take_or", LoopType.UNTIL_FAIL);
+		ArmProgramTask task = task("take_or");
 
 		ArmProgramEntry a = entry(OperationType.TAKE, 2, 0, 0);
 		a.failAmount = 5;
@@ -107,8 +125,7 @@ public final class DevPresets {
 
 	/** 把溢出全部卸进 (0,0,2)：卸到空 + 每次尽可能多 + 时限 600t 到点后跳过。 */
 	public static ArmProgram unload() {
-		ArmProgramTask task = task("unload", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("unload");
 		ArmProgramEntry entry = entry(OperationType.UNLOAD, 0, 0, 2);
 		entry.unloadRepeat = UnloadRepeat.UNTIL_EMPTY;
 		entry.unloadAmount = UnloadAmount.MAX;
@@ -124,8 +141,7 @@ public final class DevPresets {
 	 * （用 {@code /sma hold} 把主手物品放进臂里），载具上放被加工物。
 	 */
 	public static ArmProgram deploy() {
-		ArmProgramTask task = task("deploy", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("deploy");
 		ArmProgramEntry entry = entry(OperationType.DEPLOY, 2, 0, 0);
 		entry.failAmount = 5;
 		entry.failUnit = ArmProgramEntry.WaitUnit.SECOND;
@@ -136,32 +152,28 @@ public final class DevPresets {
 
 	/** 挖掘：破坏 (2,0,0) 的方块。注意<b>空手也允许</b>（按决策，与原版机械手刻意不同）。 */
 	public static ArmProgram mine() {
-		ArmProgramTask task = task("mine", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("mine");
 		task.entries.add(entry(OperationType.MINE, 2, 0, 0));
 		return single(task);
 	}
 
 	/** 攻击：对 (2,0,0) 挥一击（打那一格里的实体；不判断有没有，挥空也算完成）。 */
 	public static ArmProgram attack() {
-		ArmProgramTask task = task("attack", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("attack");
 		task.entries.add(entry(OperationType.ATTACK, 2, 0, 0));
 		return single(task);
 	}
 
 	/** 右键：对 (2,0,0) 右键一次（例如给机器塞物品、开阀门）。 */
 	public static ArmProgram use() {
-		ArmProgramTask task = task("use", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("use");
 		task.entries.add(entry(OperationType.USE, 2, 0, 0));
 		return single(task);
 	}
 
 	/** 右键的潜行变体：某些交互必须潜行才生效。 */
 	public static ArmProgram useSneak() {
-		ArmProgramTask task = task("use_sneak", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("use_sneak");
 		task.entries.add(entry(OperationType.USE_SNEAK, 2, 0, 0));
 		return single(task);
 	}
@@ -169,20 +181,23 @@ public final class DevPresets {
 	/**
 	 * 调用系统演示（§7.6 v4）：<b>主任务 + 子任务 + 调用栈 + 退出 + 抛错</b>。
 	 *
-	 * <p>主任务（列表第一个）是个无限主循环：等信号 → 调用「清溢出」→ 调用「搬一趟」→ 等 1 秒再进下一轮。
+	 * <p>主任务（列表第一个）**恒为无限循环**（模型自带语义，不需要设置）：等信号 → 调用「清溢出」×3 →
+	 * 调用「搬一趟」→ 等 1 秒，然后回到第 1 条进下一轮。
 	 * "空闲时干什么"由此完全由你自己写，而不是由调度器替你决定。
 	 */
 	public static ArmProgram mainWithSubTasks() {
 		ArmProgram program = new ArmProgram();
 
-		ArmProgramTask main = task("主任务", LoopType.FOREVER);
+		ArmProgramTask main = task("主任务");
 		ArmProgramEntry gate = new ArmProgramEntry();
 		gate.op = OperationType.SIGNAL;
 		gate.frequency = demoFrequency();
 		gate.waitForPowered = true;
 		gate.note = "通电才跑这一轮";
 		main.entries.add(gate);
-		main.entries.add(call("清溢出"));
+		ArmProgramEntry clear = call("清溢出");
+		clear.callRepeat = 3; // 轮次归**调用点**（任务级循环已删）：让「清溢出」跑 3 轮
+		main.entries.add(clear);
 		ArmProgramEntry work = call("搬一趟");
 		work.onTimeout = SkipAction.CONTINUE; // 子任务失败 → 跳过继续（调用失败没有时限，立刻生效）
 		work.note = "失败就跳过";
@@ -195,9 +210,9 @@ public final class DevPresets {
 		main.entries.add(rest);
 		program.tasks.add(main);
 
-		// 子任务 1：循环 3 轮，中途「退出」——演示"不只是固定次数"
-		ArmProgramTask unloadTask = task("清溢出", LoopType.COUNT);
-		unloadTask.loopCount = 3;
+		// 子任务 1：跑 3 轮，中途「退出」——演示"不只是固定次数"
+		// ⚠️ 轮次归**调用点**（任务级循环已删）：这里就是 main 里那条 `call 清溢出` 的 callRepeat。
+		ArmProgramTask unloadTask = task("清溢出");
 		unloadTask.entries.add(entry(OperationType.UNLOAD, 0, 0, 2));
 		ArmProgramEntry stopEarly = new ArmProgramEntry();
 		stopEarly.op = OperationType.BREAK;
@@ -206,7 +221,7 @@ public final class DevPresets {
 		program.tasks.add(unloadTask);
 
 		// 子任务 2：取不到就抛错 —— 失败会冒泡到调用方的「失败后」
-		ArmProgramTask moveTask = task("搬一趟", LoopType.NONE);
+		ArmProgramTask moveTask = task("搬一趟");
 		ArmProgramEntry take = entry(OperationType.TAKE, 4, 0, 0);
 		take.failAmount = 5;
 		take.failUnit = ArmProgramEntry.WaitUnit.SECOND;
@@ -222,7 +237,7 @@ public final class DevPresets {
 
 	/** 频率门控演示（§7.6 v4）：门控现在是任务开头的「收发信号（收）」条目。 */
 	public static ArmProgram frequency() {
-		ArmProgramTask task = task("freq", LoopType.UNTIL_FAIL);
+		ArmProgramTask task = task("freq");
 		ArmProgramEntry gate = new ArmProgramEntry();
 		gate.op = OperationType.SIGNAL;
 		gate.frequency = demoFrequency();
@@ -244,8 +259,7 @@ public final class DevPresets {
 	 * 但它发的是**电平 0**（{@code waitForPowered = false}）—— 0 是合法的发送值，那正是"发断电"。
 	 */
 	public static ArmProgram signalSend() {
-		ArmProgramTask task = task("signal_send", LoopType.COUNT);
-		task.loopCount = 1;
+		ArmProgramTask task = task("signal_send");
 
 		ArmProgramEntry occupy = new ArmProgramEntry();
 		occupy.op = OperationType.SIGNAL;
@@ -293,7 +307,7 @@ public final class DevPresets {
 
 	/** 只取不放：用来观察"臂内满仓后掉落正常落地"的行为（PLAN.md §7.4）。 */
 	public static ArmProgram holdOnly() {
-		ArmProgramTask task = task("hold", LoopType.UNTIL_FAIL);
+		ArmProgramTask task = task("hold");
 		ArmProgramEntry take = entry(OperationType.TAKE, 2, 0, 0);
 		take.count = 64;
 		take.failAmount = 10;
@@ -305,10 +319,16 @@ public final class DevPresets {
 
 	// ————————————————————————— 构造辅助 —————————————————————————
 
-	private static ArmProgramTask task(String name, LoopType loop) {
+	/**
+	 * 一个任务：名字（+ 若干条目由调用方 add）。
+	 *
+	 * <p>★ 原来这里还带一个"循环方式"参数、写进任务里 —— 任务级循环删除后那个字段已经不存在，
+	 * 循环只剩"主任务恒为无限循环"这一条铁律（要跑固定几轮用「调用」的
+	 * {@code callRepeat}，见 {@link #loop3()}）。
+	 */
+	private static ArmProgramTask task(String name) {
 		ArmProgramTask task = new ArmProgramTask();
 		task.name = name;
-		task.loop = loop;
 		return task;
 	}
 
@@ -316,6 +336,12 @@ public final class DevPresets {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = op;
 		entry.offset = new BlockPos(x, y, z);
+		// ★ 「个数」的默认值**按操作给**（取出 1 / 放入 64，唯一来源 ArmProgramEntry.defaultCount）：
+		//   代码里 new 出来的条目拿的是字段初始值 1，而「放入」的默认必须是 64（= 整摞 = 改造前行为）。
+		//   不补这一句，预设存读就会不对称 —— load() 里那条"老卡的放入 count==1 且没写过 cmode ⇒ 64"
+		//   的迁移会把预设里的放入从 1 改成 64，`preset … nbtRoundTrip` 当场变红（就是这条）。
+		//   ⚠️ 别的"代码里直接造条目"的地方同理，一律走 defaultCount，别写死 1 / 64。
+		entry.count = ArmProgramEntry.defaultCount(op);
 		return entry;
 	}
 

@@ -66,8 +66,6 @@ public final class ArmEntryText {
 			case WAIT -> suffix.append("  ")
 				.append(entry.waitAmount)
 				.append(unitSuffix(entry.waitUnit));
-			case WAIT_REDSTONE -> suffix.append("  ")
-				.append(tr(entry.waitForPowered ? "on" : "off").getString());
 			case SIGNAL -> {
 				// 短语本身随模式变（接收信号 / 发送信号 / 中断信号，见 signalHeadText），所以这里只补**尾巴**：
 				// 发 + 持续 > 0 → 时长（1s）；收 + 老卡 redpow=false → 等断电（界面不给开关，
@@ -95,12 +93,11 @@ public final class ArmEntryText {
 				else if (entry.callRepeat > 1)
 					suffix.append("  ×")
 						.append(entry.callRepeat);
-				// 调用偏移（Δ）：**非零才补一段**（默认值不显示，与"默认值不占胶囊位"一致）。
-				// ★ 它是**这个调用点**的相对量，不是子任务的坐标 —— 文案里别写成"子任务被移动到 x,y,z"。
-				if (entry.hasCallShift())
-					suffix.append("  ")
-						.append(callShiftText(entry)
-							.getString());
+				// ★ 调用偏移（Δ）**不再写进第一行**（用户："调用偏移不显示在第一行"）：它只在第二行的
+				//   胶囊里出现（见 {@link #callShiftText} 与编辑器的属性表）。
+				//   理由：第一行是"操作 + 必要属性"，而偏移是**可选**属性 —— 混进标题芯片里会让
+				//   "调用 搬一趟 ×2 +偏移 1,0,0" 读起来像三个必填项，卡片也就这么宽了。
+				//   ⚠️ 反证：把这几行加回来 ⇒ 自检 checkSignalRange/B3 的那条"第一行不含偏移"立刻变红。
 			}
 			case FILTER -> {
 				// 过滤的必需信息 = 过滤位置（用户口径：必要输入为"幽灵物品 + 过滤位置"）。
@@ -248,8 +245,10 @@ public final class ArmEntryText {
 				out.add(failureText(entry));
 		}
 		switch (entry.op) {
-			case TAKE -> {
-				if (entry.count != 1)
+			case TAKE, DEPOSIT -> {
+				// 判据是 countIsSet()（= count != 1 **或** 等于模式）：count == 1 && EXACT 也必须显示 ——
+				// "必须恰好 1 个"与"最多 1 个"行为不同，藏起来就等于静默改掉语义。
+				if (entry.countIsSet())
 					out.add(countText(entry));
 			}
 			case UNLOAD -> {
@@ -257,6 +256,13 @@ public final class ArmEntryText {
 					out.add(unloadRepeatText(entry));
 				if (entry.unloadAmount != UnloadAmount.ONE_STACK)
 					out.add(unloadAmountText(entry));
+			}
+			case SIGNAL -> {
+				// 「距离」（用户口径：距离只约束「收」）：判据只有 hasSignalRange()
+				// —— 收模式 + 半径 > 0 才占胶囊位；发送 / 中断、以及默认的 0 都不显示
+				//（0 = 只有同一格才算收到，那是"只能自己接收发送"的默认语义，不是信息）。
+				if (entry.hasSignalRange())
+					out.add(signalRangeText(entry));
 			}
 			default -> {
 			}
@@ -310,8 +316,19 @@ public final class ArmEntryText {
 		});
 	}
 
+	/**
+	 * 「个数」胶囊 = <b>模式 + 数值</b>（用户本轮口径：小于等于写“最多 N”、等于写“等于 N”）。
+	 *
+	 * <p>⚠️ 两个模式必须写成**两句不同的话**：它们的行为不同（一个“有多少动多少、不足不算失败”，
+	 * 一个“凑不出 N 个就走失败后”），共用一句“个数 N”会让玩家看不出这条到底会不会等。
+	 * 文案走 lang（{@code chip.count_atmost} / {@code chip.count_exact}），不硬编码中文。
+	 *
+	 * <p>这也是“界面显示的写法 = 卡片胶囊的写法 = 脚本写出的写法”三处同源的那一处：
+	 * 编辑器属性表的 chip、卡片胶囊、护目镜都从这里取（脚本那一侧写的是
+	 * {@code count=} + {@code countmode=}，语义判据同样是 {@link ArmProgramEntry#countIsExact()}）。
+	 */
 	public static Component countText(ArmProgramEntry entry) {
-		return tr("chip.count", entry.count);
+		return entry.countIsExact() ? tr("chip.count_exact", entry.count) : tr("chip.count_atmost", entry.count);
 	}
 
 	/**
@@ -327,11 +344,23 @@ public final class ArmEntryText {
 	 * 「调用偏移」胶囊：{@code +偏移 1,0,0}（零偏移时不该出现在卡片上，判据是
 	 * {@link ArmProgramEntry#hasCallShift()}）。
 	 *
-	 * <p><b>两个地方共用这一句</b>：标题芯片上那条尾巴（{@link #base}）与属性行上的胶囊
-	 * —— 文案只有一处实现，两边说法不会分叉（本类开头的理由）。
+	 * <p>★ <b>只有一处消费方：编辑器属性表里的那枚胶囊</b>（{@code ArmProgramScreen.entryProps}）。
+	 * 标题芯片（{@link #base}）里**有意不写它** —— 用户口径："调用偏移不显示在第一行"：
+	 * 第一行是"操作 + 必要属性"，偏移是可选项，只在第二行的胶囊里出现。
+	 * （{@code describe()} 里的 {@code shift=} 与脚本里的 {@code shift=} 都不是"第一行"，照旧保留。）
 	 */
 	public static Component callShiftText(ArmProgramEntry entry) {
 		return tr("chip.call_shift", entry.callShift.getX() + "," + entry.callShift.getY() + "," + entry.callShift.getZ());
+	}
+
+	/**
+	 * 「接收距离」胶囊：{@code 距离 16}（用户口径：距离只约束「收」）。
+	 *
+	 * <p>判据只有 {@link ArmProgramEntry#hasSignalRange()}（收模式且半径 &gt; 0）；胶囊文案与编辑器里
+	 * 那枚胶囊同源，两边说法不会分叉。键 {@code chip.signal_range}。
+	 */
+	public static Component signalRangeText(ArmProgramEntry entry) {
+		return tr("chip.signal_range", entry.signalRange);
 	}
 
 	public static Component unloadRepeatText(ArmProgramEntry entry) {
@@ -479,6 +508,78 @@ public final class ArmEntryText {
 		if (failureText(hardPunch).getString()
 			.equals(retryForever))
 			return "「攻击」的「失败后 停下」被写成了「一直重试」—— 硬失败没有重试窗口";
+
+		// ★ 个数模式（用户本轮口径）：count == 1 且「等于」必须**显示**出来
+		//（“必须恰好 1 个”与“最多 1 个”行为不同，藏起来就是静默改语义）；
+		// 而 count == 1 且「小于等于」仍然不占胶囊位（那就是默认值）。
+		// 反证：把 props() 里的判据改回 `entry.count != 1` ⇒ 第一条立刻红。
+		ArmProgramEntry exactOne = new ArmProgramEntry();
+		exactOne.op = OperationType.TAKE;
+		exactOne.count = 1;
+		exactOne.countMode = ArmProgramEntry.CountMode.EXACT;
+		List<Component> exactProps = props(exactOne);
+		if (exactProps.size() != 1
+			|| !exactProps.get(0)
+				.getString()
+				.equals(tr("chip.count_exact", 1).getString()))
+			return "个数=1 且「等于」模式的胶囊没显示（或写成了别的模式）：" + exactProps;
+		// 「放入」也要有这一枚（用户口径：这条属性同时服务取出与放入）。
+		ArmProgramEntry atMostTwo = new ArmProgramEntry();
+		atMostTwo.op = OperationType.DEPOSIT;
+		atMostTwo.count = 2;
+		List<Component> atMostProps = props(atMostTwo);
+		if (atMostProps.size() != 1
+			|| !atMostProps.get(0)
+				.getString()
+				.equals(tr("chip.count_atmost", 2).getString()))
+			return "「放入」的个数胶囊没有按「小于等于」写出来：" + atMostProps;
+
+		// ★ 「距离」只对**收信号**有意义（用户口径：距离只约束收；"中断信号不需要这个属性"）：
+		//   ① 收 + 半径 16 ⇒ 胶囊里必须有一句（文案走 chip.signal_range，不写死中文）；
+		//   ② 收 + 半径 0（默认）⇒ 不占胶囊位（0 = 只有同一格才算收到，是默认语义、不是信息）；
+		//   ③ 发 / 中断 + 半径非 0 ⇒ **也不显示**（那份值运行时不读，显示出来等于骗人）。
+		//   反证：把 props() 里那一支的判据从 hasSignalRange() 改成 signalRange != 0 ⇒ ③ 立刻红。
+		ArmProgramEntry recvRange = new ArmProgramEntry();
+		recvRange.op = OperationType.SIGNAL;
+		recvRange.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
+		recvRange.signalRange = 16;
+		String rangeChip = tr("chip.signal_range", 16).getString();
+		List<Component> rangeProps = props(recvRange);
+		if (rangeProps.size() != 1
+			|| !rangeProps.get(0)
+				.getString()
+				.equals(rangeChip))
+			return "收信号 + 距离 16 的胶囊没出现（或文案不对）：" + rangeProps;
+		ArmProgramEntry recvNoRange = new ArmProgramEntry();
+		recvNoRange.op = OperationType.SIGNAL;
+		if (!props(recvNoRange).isEmpty())
+			return "收信号 + 距离 0（默认）不该占胶囊位：" + props(recvNoRange);
+		ArmProgramEntry sendRange = new ArmProgramEntry();
+		sendRange.op = OperationType.SIGNAL;
+		sendRange.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
+		sendRange.signalRange = 16;
+		if (!props(sendRange).isEmpty())
+			return "「发送」不该显示距离（距离只约束收）：" + props(sendRange);
+
+		// ★ 调用偏移**不进第一行**（用户："调用偏移不显示在第一行"，它只在第二行的胶囊里）：
+		//   第一行只写"操作 + 必要属性"（→ 任务名 / ×N），偏移由 {@link #callShiftText} 那枚胶囊负责。
+		//   反证：把 base() 里那段 `if (entry.hasCallShift()) suffix.append(callShiftText(...))`
+		//   加回去 ⇒ 这条立刻变红（数字 9,8,7 会出现在第一行里）。
+		ArmProgramEntry shiftedCall = new ArmProgramEntry();
+		shiftedCall.op = OperationType.CALL;
+		shiftedCall.callTarget = "收尾";
+		shiftedCall.callRepeat = 2;
+		shiftedCall.callShift = new net.minecraft.core.BlockPos(9, 8, 7);
+		String shiftedBase = base(shiftedCall).getString();
+		if (shiftedBase.contains("9,8,7"))
+			return "调用偏移被写进了第一行（它只该出现在第二行的胶囊里）：" + shiftedBase;
+		if (!base(shiftedCall).getString()
+			.contains("收尾"))
+			return "第一行丢了调用目标（→ 任务名 那条不该被动）：" + shiftedBase;
+		// 胶囊那一侧必须还在（否则"删掉第一行"会变成"偏移彻底看不见了"）
+		if (!callShiftText(shiftedCall).getString()
+			.contains("9,8,7"))
+			return "调用偏移的胶囊文案里没有坐标：" + callShiftText(shiftedCall).getString();
 
 		return "OK(默认1行 / 设了3个属性=4行)";
 	}

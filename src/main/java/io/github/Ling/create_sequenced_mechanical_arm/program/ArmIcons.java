@@ -47,7 +47,6 @@ public final class ArmIcons {
 			// 查不到（Create 被换版本/改名）就退回漏斗：图标只是显示，绝不该让界面炸掉。
 			case FILTER -> of("create:filter", Items.HOPPER);
 			case WAIT -> of("minecraft:clock", Items.CLOCK);
-			case WAIT_REDSTONE -> of("minecraft:redstone_torch", Items.REDSTONE_TORCH);
 			// 控制类（§7.6 v4）
 			case SIGNAL -> of("create:redstone_link", Items.REDSTONE);
 			case CALL -> of("create:schematic_and_quill", Items.WRITTEN_BOOK);

@@ -1121,9 +1121,8 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		goggleLine().translate("gui.arm.task", hud.taskName)
 			.style(ChatFormatting.GRAY)
 			.forGoggles(tooltip, 1);
-		goggleLine().translate("gui.arm.loop", hud.loopCounter, hud.loopMax)
-			.style(ChatFormatting.DARK_GRAY)
-			.forGoggles(tooltip, 1);
+		// ⚠️ 这里原来还有一行「循环：%s / %s」（摘要里那两个循环计数字段）。用户把任务级循环
+		// 整体删掉了（主任务恒为无限循环）⇒ 那个数不再有答案，行、字段与语言键一起删除。
 
 		// 当前步骤 —— 用户第三轮定稿的结构：**先"操作 + 必要属性"，再一行一个可选属性**。
 		//   步骤 10/19：使用  +-2,1,0  上
@@ -1411,15 +1410,16 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 *   <li><b>收</b>：{@link #signalFlashTicks} {@code > 0} —— <b>刚刚真的收到</b>了一路<b>无线</b>信号
 	 *       （「收发信号」的**接收**模式等到那一路红石链接频率通电），由 {@code ProgramRuntime.tickWait}
 	 *       在判定成功那一刻调 {@link #flashSignalReceived()} 置上的短脉冲。
-	 *       ⚠️ <b>「等红石」不算</b>（用户口径：「这个只与无线信号有关，与接收红石信号无关」）——
-	 *       它等的是相邻方块的红石电，`tickWait` 的成功分支里已经按 `op == SIGNAL && isSignalReceive()`
-	 *       把它挡在 {@code flashSignalReceived()} 之外了；别在这里"顺手"加回来。</li>
+	 *       ⚠️ <b>只认无线信号</b>（用户口径：「这个只与无线信号有关，与接收红石信号无关」）——
+	 *       相邻方块的红石电（`hasNeighborSignal()` / {@code redstoneLocked}）与发光无关，
+	 *       它只表示"通电即暂停"。曾经有一条"等相邻红石"的操作，已按用户口径整体删除；
+	 *       现在 {@code tickWait} 里那层 `op == SIGNAL && isSignalReceive()` 仍然守着同一条区分。</li>
 	 * </ol>
 	 *
 	 * <p><b>本轮被推翻的两条旧判据（用户原话：「接收信号发光的时候<b>必须成功接收</b>信号才发光，
 	 * 尝试接收但是没有就不会发光」）</b>：
 	 * <ul>
-	 *   <li>~~程序正停在「等红石 / 等信号」上~~ —— 那只是"在听"，<b>没收到就不该亮</b>。
+	 *   <li>~~程序正停在「等待」上~~ —— 那只是"在听"，<b>没收到就不该亮</b>。
 	 *       当初加上它是因为怕"真收到"的窗口是零时长、收信号那一侧永远不亮；现在由上面的短脉冲解决，
 	 *       这个替代品必须删掉（它会把"一直在等、一直没信号"画成常亮，正是用户这次反馈的现象）；</li>
 	 *   <li>~~{@link #redstoneLocked}（相邻红石把臂点亮）~~ —— 那只是"通电即暂停"，不是"收到信号"，
@@ -1443,8 +1443,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 *
 	 * <p>⚠️ <b>调用方只有一处、且带判据</b>：{@code tickWait} 里那一句写成
 	 * {@code if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())} ——
-	 * 用户口径「这个只与无线信号有关，与接收红石信号无关」：「等红石」成功**不调**这里
-	 * （相邻红石的通电不是无线信号）。所以别在别处"补一次"调用，那会把红石电也算成发光。
+	 * 用户口径「这个只与无线信号有关，与接收红石信号无关」：只有"经红石链接频率收到的信号"算数
+	 * （相邻方块的红石电不算；等它的那条操作已删除）。所以别在别处"补一次"调用，
+	 * 那会把红石电也算成发光。
 	 *
 	 * <p>⚠️ 这里**不推包**：{@link #signalActive} 的翻转检测统一在 {@link #tickSignalActive()} 里做
 	 * （{@code tick()} 每 tick 调它一次），这样"收到即亮"在任何 tick 内都只会有一处口径翻转、一次同步 ——

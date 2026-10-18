@@ -29,8 +29,12 @@ public class ArmProgramView {
 	 * 也比"服务端拼好字符串发过来"正确（那样没法本地化、也没法跟卡片共用文案）。
 	 */
 	public ArmProgramEntry entry;
-	public int loopCounter;
-	public int loopMax;
+	/**
+	 * ⚠️ 这里原来还有两个"循环计数"字段（护目镜上那行"循环 2 / 3"）。
+	 * 用户把**任务级循环整体删掉**了（主任务恒为无限循环）⇒ 那两个数不再有意义，
+	 * 字段与它们在 NBT 里的两个键一起删除，护目镜那一行也跟着没了。
+	 * <b>不要把"第几轮 / 共几轮"加回来</b>：恒循环之下它没有答案。
+	 */
 	public String state = "IDLE";
 	public String failure = "";
 	public boolean halted;
@@ -49,10 +53,8 @@ public class ArmProgramView {
 		if (task != null) {
 			view.taskName = task.name;
 			view.entryCount = task.entries.size();
-			view.loopMax = task.loopCount;
 		}
 		view.entryIndex = runtime.entryIndex;
-		view.loopCounter = runtime.loopCounter;
 		if (task != null && runtime.entryIndex >= 0 && runtime.entryIndex < task.entries.size()) {
 			ArmProgramEntry current = task.entries.get(runtime.entryIndex);
 			view.entry = current;
@@ -70,8 +72,6 @@ public class ArmProgramView {
 		tag.putString("et", entryText);
 		if (entry != null)
 			tag.put("e", entry.save(registries));
-		tag.putInt("lc", loopCounter);
-		tag.putInt("lm", loopMax);
 		tag.putString("st", state);
 		tag.putString("fl", failure);
 		tag.putBoolean("ha", halted);
@@ -86,8 +86,6 @@ public class ArmProgramView {
 		entryCount = tag.getInt("ec");
 		entryText = tag.getString("et");
 		entry = tag.contains("e") ? ArmProgramEntry.load(tag.getCompound("e"), registries) : null;
-		loopCounter = tag.getInt("lc");
-		loopMax = tag.getInt("lm");
 		state = tag.contains("st") ? tag.getString("st") : "IDLE";
 		failure = tag.getString("fl");
 		halted = tag.getBoolean("ha");

@@ -10,7 +10,6 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask.LoopType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
@@ -44,7 +43,7 @@ import net.minecraft.world.item.ItemStack;
  *   <li>物品：{@code stack.getComponents().isEmpty()} ⇒ 只写 id；唯一组件是染色 ⇒ {@code #RRGGBB}；
  *       其余 ⇒ 完整 SNBT（键顺序由原版 codec 决定，是确定的）；空栈 ⇒ {@code {}}；</li>
  *   <li>坐标：<b>只有 {@link ArmProgramEntry#needsTarget()} 的操作才写</b> {@code x y z}（三个整数，相对
- *       **执行这条程序的那条臂** —— §19.7 起不再有任何空间记号）；不需要坐标的操作（等待 / 等红石 /
+ *       **执行这条程序的那条臂** —— §19.7 起不再有任何空间记号）；不需要坐标的操作（等待 /
  *       信号 / 调用 / 退出 / 抛错）**一个数都不写** —— 它们的 {@code offset} 对运行时没有任何意义
  *       （用户第四十一轮就是被脚本里 {@code call 任务} 后面那串 {@code -3 0 -1} 问住的：那是残留噪声）。
  *       注意「过滤」的**容器模式**需要坐标（它是"读哪个容器"的**数据参数**），所以判据是条目级的；</li>
@@ -100,15 +99,8 @@ public final class ScriptDecompiler {
 	private void writeTask(ArmProgramTask task) {
 		out.append("task ")
 			.append(name(task.name));
-		if (task.loop != LoopType.NONE)
-			out.append(" loop=")
-				.append(task.loop.name()
-					.toLowerCase(Locale.ROOT));
-		// loopN 只在"它会影响行为"或"它不是默认值"时写：
-		// 运行时只有 COUNT 会读它，但极端情况下 1024 轮的 FOREVER 改成 COUNT 就会变意思，所以非 1 一律保留。
-		if (task.loop == LoopType.COUNT || task.loopCount != 1)
-			out.append(" loopN=")
-				.append(task.loopCount);
+		// ★ 任务头**不再写循环**（`loop=` / `loopN=` 已随任务级循环一起删除）：主任务恒为无限循环，
+		//   子任务的轮次归**调用点**的 `repeat=`。所以任务头只剩 icon= 与备注。
 		if (!task.icon.isEmpty())
 			out.append(" icon=")
 				.append(item(task.icon));
@@ -134,7 +126,7 @@ public final class ScriptDecompiler {
 		OperationType op = entry.op;
 		// ★ 坐标**只有需要目标的操作才写**（判据是**条目级**的 needsTarget()：过滤的容器模式需要坐标
 		//   —— 那是"读哪个容器"的数据参数，必须永远写；手持模式不需要）。
-		//   不需要坐标的操作（等待 / 等红石 / 信号 / 调用 / 退出 / 抛错）**一个数都不写**：
+		//   不需要坐标的操作（等待 / 信号 / 调用 / 退出 / 抛错）**一个数都不写**：
 		//   这里原来还有一支"offset 非零也写出来"的写法，那是老口径（那会儿"新建条目默认取你正看着
 		//   的方块"，于是每条都带着一串坐标）。用户第四十一轮正是被这个问住的 —— 脚本里
 		//   `call 任务` 后面跟着 `-3 0 -1`，而「调用」是控制类操作：既不移动、也没有目标，
@@ -150,8 +142,6 @@ public final class ScriptDecompiler {
 		switch (op) {
 			case WAIT -> out.append(' ')
 				.append(time(entry.waitAmount, entry.waitUnit));
-			case WAIT_REDSTONE -> out.append(' ')
-				.append(entry.waitForPowered ? "on" : "off");
 			// 过滤：本体操作数 = **过滤位置**（held / container）。位置的规范写法只有本源，
 			// 所以它必须永远写出来（手写省略会让"容器模式"静默读回手持 —— 那是另一种语义）。
 			case FILTER -> out.append(" source=")
@@ -198,10 +188,19 @@ public final class ScriptDecompiler {
 				.append(entry.face.getName()
 					.toLowerCase(Locale.ROOT));
 		switch (entry.op) {
-			case TAKE -> {
-				if (entry.count != 1)
+			case TAKE, DEPOSIT -> {
+				// 个数（取出 / 放入共用）：**本操作的默认值不写**（与 repeat=1 同一惯例）。
+				// ⚠️ 默认值按操作给：取出 1 / **放入 64**（= 整摞 = 改造前行为，见 defaultCount）。
+				//   所以判据必须问 defaultCount(op)，不能写死 `!= 1` —— 否则每条默认的放入
+				//   都会被强制写成 `count=64`，而省略 count 的放入读回来又是 64，往返依然一致
+				//   但文本里全是噪声；反过来若这里写死 1、解析侧默认 64，往返就会静默改数。
+				// ⚠️ 模式却**只要非默认就必须写**，哪怕 count 还是默认值 —— "必须恰好 N 个"与"最多 N 个"
+				// 是两种行为，不写就把语义丢了（而往返不变量①正是盯着这种静默丢失）。
+				if (entry.count != ArmProgramEntry.defaultCount(entry.op))
 					out.append(" count=")
 						.append(entry.count);
+				if (entry.countIsExact())
+					out.append(" countmode=exact");
 			}
 			case UNLOAD -> {
 				out.append(" repeat=")
@@ -230,6 +229,13 @@ public final class ScriptDecompiler {
 					.append(item(frequencyStack(entry, true)))
 					.append(" + ")
 					.append(item(frequencyStack(entry, false)));
+				// 「接收距离」：**只有「收」且非 0 才写**（用户口径：距离只约束「收」，发出去不管）。
+				// 0 = 只有同一格才算收到 —— 那是默认值，与 count=1 / repeat=1 同一惯例不进文本。
+				// ⚠️ 判据只看 hasSignalRange()（= 收模式且 > 0）：发送 / 中断即使模型里残留一个非 0 值
+				//   也**一个字都不写**（解析侧对它们写了 range= 是明确报错，见 ScriptParser）。
+				if (entry.hasSignalRange())
+					out.append(" range=")
+						.append(entry.signalRange);
 			}
 			// 过滤的**幽灵过滤器物品**：复用 icon=/freq= 那套物品写法（简写 id / #RRGGBB / 完整 SNBT），
 			// 所以"列表过滤器"（create:filter 带 FILTER_ITEMS 组件）会写成完整 SNBT，
