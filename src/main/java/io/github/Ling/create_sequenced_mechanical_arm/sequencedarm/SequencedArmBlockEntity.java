@@ -123,14 +123,36 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	/**
 	 * 臂此刻是否处于「信号活动」（= 客户端该用 {@code base_powered} 而不是 {@code base} 底座的唯一判据）。
 	 *
-	 * <p><b>为什么是"存下来的字段"而不是客户端现算</b>：口径要读程序本体（当前条目是不是
-	 * 「等红石 / 等信号」）与链接表（{@link #getArmLinkLevel()}），而这两样在客户端<b>要么没有</b>
-	 * （程序本体从不同步）、<b>要么只有自己发的那份</b>（客户端不入网）。所以由服务端每 tick 重算
-	 * （{@link #refreshSignalActive()}）、随既有同步包下发（{@code "SignalActive"} 键），
+	 * <p><b>为什么是"存下来的字段"而不是客户端现算</b>：口径要读链接表（{@link #getArmLinkLevel()}）
+	 * 与"刚收到信号"的脉冲计时器（{@link #signalFlashTicks}），而这两样在客户端<b>要么没有</b>、
+	 * <b>要么只有自己发的那份</b>（客户端不入网）。所以由服务端每 tick 重算
+	 * （{@link #tickSignalActive()}）、随既有同步包下发（{@code "SignalActive"} 键），
 	 * 渲染器只读 {@link #isSignalActive()}。判据本身**不允许写第二份**（客户端没有那些数据，
 	 * 写两份迟早两边不一致 —— 改口径只改 {@link #computeSignalActive()}）。
 	 */
 	private boolean signalActive;
+
+	/**
+	 * 「刚真的收到一路信号」的短脉冲长度（tick）。
+	 *
+	 * <p><b>为什么需要这个数</b>：用户口径（本轮）—— receiving 必须<b>真的收到</b>才点亮底座，
+	 * "尝试接收但没收到"不亮。可是"收到"这件事在状态机里是<b>零时长</b>的：
+	 * {@code ProgramRuntime.tickWait} 一旦发现极性吻合就在<b>同一个 tick</b> 里 {@code succeed}
+	 * 把条目走掉，臂身上没有任何"我正在收"的持续状态可以拿来当判据。
+	 * 于是用一个短脉冲把"这一下真收到了"变成<b>看得见</b>的东西。
+	 *
+	 * <p><b>为什么是 10 tick = 0.5 秒</b>：1 tick 的窗口人眼看不见（那正是当初误加"正在等也算"的原因，
+	 * 见 {@link #computeSignalActive()}）；0.5 秒是"能看清、又不至于像常亮"的量。**要改手感只改这一处**。
+	 */
+	public static final int SIGNAL_FLASH_TICKS = 10;
+
+	/**
+	 * 短脉冲的剩余 tick 数（{@code > 0} = 刚收到信号，底座该亮）。
+	 *
+	 * <p>由 {@link #flashSignalReceived()} 置满、每 tick 递减（{@link #tickSignalActive()}）。
+	 * <b>不存盘、也不单独同步</b>：客户端只认 {@link #isSignalActive()} 这个结果（不重复一份判据）。
+	 */
+	private int signalFlashTicks;
 
 	/**
 	 * 每次 {@link #beginMove} 自增，并同步给客户端。
@@ -1228,10 +1250,12 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 				return;
 		}
 		runtime.tick(this);
-		// 底座模型切换（信号活动）每 tick 重算一次：电平会被脉冲计时器归零、红石锁会变、
-		// 程序会把条目推进到 / 走完「等红石」「等信号」—— 每一种都能让口径翻转。
-		// 只在翻转时推包：这个字段只决定"画哪个底座"，不该每 tick 一个同步包。
-		if (refreshSignalActive())
+		// 底座模型切换（信号活动）每 tick 一次：**先让"刚收到信号"的短脉冲倒计时走一格**，再重算口径。
+		// 顺序很重要：ProgramRuntime 在**同一 tick** 里置上的脉冲（flashSignalReceived）会在这里被
+		// 第一次递减并立刻参与重算 ⇒ "收到信号"与"底座亮起来"落在同一个 tick，窗口不会漏一帧。
+		// 只在翻转时推包：这个字段只决定"画哪个底座"，不该每 tick 一个同步包；
+		// 而脉冲**结束**那一下同样是一次翻转 ⇒ 灭灯也一定会发包（不会把客户端留在常亮态）。
+		if (tickSignalActive())
 			sendData();
 	}
 
@@ -1354,7 +1378,9 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		if (blockPowered == redstoneLocked)
 			return;
 		redstoneLocked = blockPowered;
-		// 口径里含"被红石点亮" ⇒ 先重算再推包：客户端在**同一个**包里就能拿到新的底座状态（不额外发包）
+		// ⚠️ 「信号活动」口径**不再**含 redstoneLocked（用户要求：通电即暂停不是"收到信号"），
+		// 所以这里重算其实不会因红石翻转；仍然算一次是为了让同一个同步包里的两个字段永远一致
+		// （例如恰好在这一刻"发出去的脉冲到点"了），并保持"红石翻转 ⇒ 一包发完"的老纪律。
 		refreshSignalActive();
 		sendData();
 	}
@@ -1377,21 +1403,25 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 * 的时候，使用这个模型替代原本的 {@code base.json}，没有接收或发出信号的时候再用 {@code base.json}」。
 	 * 所以这条判据只回答一件事：<b>臂现在是不是正在跟红石信号打交道</b>。
 	 *
-	 * <p><b>口径 = 下面三条任一为真</b>：
+	 * <p><b>口径 = 下面两条任一为真</b>（用户第十九轮口径，本轮按反馈收紧）：
 	 * <ol>
 	 *   <li><b>发</b>：{@link #getArmLinkLevel()} {@code > 0} —— 此刻真的有一路链接被我们维持在电平 &gt; 0。
 	 *       <b>「曾经发过」不算</b>：脉冲到点后电平归 0、条目却按设计留在表里
 	 *       （见 {@link #tickArmLink()} 的注释），那种情况这里必须是 {@code false}；</li>
-	 *   <li><b>收（被红石点亮）</b>：{@link #redstoneLocked} —— 方块正被相邻红石信号点亮
-	 *       （{@link #redstoneUpdate()} 每次翻转都会 {@code sendData()}）；</li>
-	 *   <li><b>收（正在等）</b>：程序此刻停在 {@code WAIT_REDSTONE}，或 {@code SIGNAL} 的 {@code RECEIVE} 模式上
-	 *       —— 也就是臂正守着那根红石线 / 那一路频率在听。</li>
+	 *   <li><b>收</b>：{@link #signalFlashTicks} {@code > 0} —— <b>刚刚真的收到</b>了一路信号
+	 *       （等红石等到通电 / 等信号等到极性吻合），由 {@code ProgramRuntime.tickWait} 在判定成功那一刻
+	 *       调 {@link #flashSignalReceived()} 置上的短脉冲。</li>
 	 * </ol>
 	 *
-	 * <p><b>为什么第 3 条要把"等"也算进来</b>：{@code RECEIVE} 的成功窗口是<b>零时长</b> ——
-	 * {@code ProgramRuntime.tickWait} 一发现该频率通电就在<b>同一个 tick</b> 里 {@code succeed} 走掉。
-	 * 只认"真的收到了"的话，收信号这一侧<b>永远不会亮</b>；"正在等"才是臂上与收信号有关、而且看得见的那个时段。
-	 * （{@code WAIT_REDSTONE} 的"等通电/等断电"同样适用：它本来就是红石活动。）
+	 * <p><b>本轮被推翻的两条旧判据（用户原话：「接收信号发光的时候<b>必须成功接收</b>信号才发光，
+	 * 尝试接收但是没有就不会发光」）</b>：
+	 * <ul>
+	 *   <li>~~程序正停在「等红石 / 等信号」上~~ —— 那只是"在听"，<b>没收到就不该亮</b>。
+	 *       当初加上它是因为怕"真收到"的窗口是零时长、收信号那一侧永远不亮；现在由上面的短脉冲解决，
+	 *       这个替代品必须删掉（它会把"一直在等、一直没信号"画成常亮，正是用户这次反馈的现象）；</li>
+	 *   <li>~~{@link #redstoneLocked}（相邻红石把臂点亮）~~ —— 那只是"通电即暂停"，不是"收到信号"，
+	 *       按用户口径也算"没收到"。</li>
+	 * </ul>
 	 *
 	 * <p>⚠️ 只认<b>当前</b>活动：等完了继续跑、或者只是曾经发过一轮，都不算。
 	 */
@@ -1399,34 +1429,59 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		return signalActive;
 	}
 
+	/** 短脉冲剩余 tick 数（{@code 0} = 没在闪）。护目镜与自检读它，判据本身仍然只有 {@link #isSignalActive()}。 */
+	public int signalFlashTicks() {
+		return signalFlashTicks;
+	}
+
 	/**
-	 * {@link #isSignalActive()} 的口径本体。**只在服务端调用**（要读程序本体与链接表）。
+	 * <b>真的收到一路信号</b>的那一刻由 {@code ProgramRuntime} 调用（{@code tickWait} 里极性判定的成功分支）：
+	 * 给底座一个看得见的短脉冲（{@link #SIGNAL_FLASH_TICKS}）。
+	 *
+	 * <p>⚠️ 这里**不推包**：{@link #signalActive} 的翻转检测统一在 {@link #tickSignalActive()} 里做
+	 * （{@code tick()} 每 tick 调它一次），这样"收到即亮"在任何 tick 内都只会有一处口径翻转、一次同步 ——
+	 * 判定与同步各只有一处，不会出现"这里发了包、那里又翻了一次"。
+	 */
+	public void flashSignalReceived() {
+		signalFlashTicks = SIGNAL_FLASH_TICKS;
+	}
+
+	/**
+	 * 每 tick 推进一次「信号活动」：先让短脉冲倒计时走一格，再重算口径并检测翻转。
+	 *
+	 * <p><b>为什么"翻转才推包"由调用方决定</b>：这个值只影响"画哪个底座"，每 tick 都 {@code sendData()}
+	 * 会把同步包刷成每 tick 一个；而它变化的每一种原因（电平改、脉冲到点、刚收到信号的短脉冲开始与结束）
+	 * 都已经在各自的路径上发过包，这里只补"口径真的翻了、但上面那些包没带上"的那一次。
+	 *
+	 * <p>抽成方法而不是塞在 {@code tick()} 里，是因为自检<b>不跑运动学</b>（{@code arm.tick()} 要真实动力网络，
+	 * 见 {@code checkOverflowStackAndExchange} 的同样处理），需要拿这个方法来驱动"每 tick 走一格"。
+	 *
+	 * @return 口径是否翻转（{@code true} = 调用方该推一次同步包）
+	 */
+	public boolean tickSignalActive() {
+		if (signalFlashTicks > 0)
+			signalFlashTicks--;
+		return refreshSignalActive();
+	}
+
+	/**
+	 * {@link #isSignalActive()} 的口径本体。**只在服务端调用**（要读链接表与脉冲计时器）。
 	 */
 	private boolean computeSignalActive() {
 		// ① 发：此刻真的有电平 > 0 的链接（"曾经发过、现在归 0"不算）
 		if (getArmLinkLevel() > 0)
 			return true;
-		// ② 收：被相邻红石点亮
-		if (redstoneLocked)
-			return true;
-		// ③ 收：正停在"等红石 / 等信号"这类条目上
-		if (runtime.state != ProgramRuntime.EntryState.WAITING)
-			return false;
-		ArmProgramTask task = program.task(runtime.taskIndex);
-		if (task == null || runtime.entryIndex < 0 || runtime.entryIndex >= task.entries.size())
-			return false;
-		ArmProgramEntry entry = task.entries.get(runtime.entryIndex);
-		if (entry.op == OperationType.WAIT_REDSTONE)
-			return true;
-		return entry.op == OperationType.SIGNAL && entry.isSignalReceive();
+		// ② 收：**刚刚真的收到**（用户要求：必须成功接收才发光，尝试接收不算）
+		return signalFlashTicks > 0;
 	}
 
 	/**
 	 * 重算口径并记到 {@link #signalActive}。
 	 *
 	 * <p><b>为什么"翻转才推包"由调用方决定</b>：这个值只影响"画哪个底座"，每 tick 都 {@code sendData()}
-	 * 会把同步包刷成每 tick 一个；而它变化的每一种原因（电平改、脉冲到点、红石锁变、条目推进到等待）
-	 * 都已经在各自的路径上发过包，这里只补"口径真的翻了、但上面那些包没带上"的那一次。
+	 * 会把同步包刷成每 tick 一个；而它变化的每一种原因（电平改、发出去的脉冲到点、
+	 * {@link #flashSignalReceived()} 置上的短脉冲开始与结束）都已经在各自的路径上发过包，
+	 * 这里只补"口径真的翻了、但上面那些包没带上"的那一次。
 	 *
 	 * @return 口径是否翻转（{@code true} = 调用方该推一次同步包）
 	 */
@@ -1885,7 +1940,7 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		super.write(tag, registries, clientPacket);
 		tag.putBoolean("Powered", redstoneLocked);
 		// 「信号活动」（底座模型切换，见 isSignalActive）：派生值，但客户端算不出来（没有程序本体与链接网络表），
-		// 所以服务端算好后**跟着既有同步包**一起发；不另造网络包。翻转时由 refreshSignalActive 触发 sendData。
+		// 所以服务端算好后**跟着既有同步包**一起发；不另造网络包。翻转时由 tickSignalActive 触发 sendData。
 		tag.putBoolean("SignalActive", signalActive);
 		tag.putBoolean("Goggles", goggles);
 		tag.putInt("Phase2", phase.ordinal());

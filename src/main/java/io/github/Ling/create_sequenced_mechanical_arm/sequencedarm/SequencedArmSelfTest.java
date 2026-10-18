@@ -193,6 +193,7 @@ public class SequencedArmSelfTest {
 		checkUsePlacesOnAir(server);
 		checkSignalSendReceive(server);
 		checkSignalCutHasNoDuration(server);
+		checkSignalActiveModel(server);
 		checkEntryPredicates();
 		checkSignalSendPreset();
 		checkArmPointClassification(server);
@@ -3270,6 +3271,221 @@ public class SequencedArmSelfTest {
 		if (!pulseCancelled)
 			LOGGER.error(
 				"[selftest] 「中断」没有立即清除该频率（用户口径：无论是否无限或有剩余时间，当场电平 0 + 退网 + 取消未到期脉冲）");
+	}
+
+	// ——————————————— 底座 base_powered 的判据（用户第十九轮反馈，本轮收紧） ———————————————
+
+	/**
+	 * 断言 ①–④：客户端该画 {@code base} 还是 {@code base_powered} ——
+	 * {@code SequencedArmBlockEntity.isSignalActive()} 的完整口径。
+	 *
+	 * <p><b>用户口径（本轮原话）</b>：「base_powered 的模型接收信号发光的时候<b>必须成功接收信号</b>才发光，
+	 * <b>尝试接收但是没有就不会发光</b>」。旧口径把"正在等红石 / 正在等信号"和"被相邻红石点亮"
+	 * 也算成"收到" ⇒ "一直在等、一直没信号"的臂**常亮** —— 那正是这次反馈的现象，两条旧判据已删。
+	 *
+	 * <p><b>每条断言"改哪一行会变红"</b>：
+	 * <ol>
+	 *   <li>{@code 正在等但没信号 ⇒ false}（用户这次反馈的字面场景）：把"正在等"那条判据加回
+	 *       {@code computeSignalActive()}（{@code runtime.state == WAITING} 且当前条目是等红石 / 收信号），
+	 *       或者在"开始等"时就调 {@code flashSignalReceived()} ⇒ 本次日志里的
+	 *       {@code ① 等红石没通电时不亮} / {@code ① 收信号没通电时不亮} 变 false；</li>
+	 *   <li>{@code 真的收到 ⇒ 亮，约 10 tick 后灭}：删掉 {@code ProgramRuntime.tickWait} 里那行
+	 *       {@code arm.flashSignalReceived();} ⇒ {@code ② 收到即亮} 变 false；把
+	 *       {@code SIGNAL_FLASH_TICKS} 改到 8 以外（如 1）⇒ ② 的 {@code 亮了几拍} 越界变红；
+	 *       删掉 {@code tickSignalActive()} 里的 {@code signalFlashTicks--} ⇒ 一直不灭，
+	 *       倒计时循环撞上 60 的护栏 ⇒ ② 变红；</li>
+	 *   <li>{@code 正在发 ⇒ 亮；脉冲到点归零后 ⇒ 灭}：把 {@code getArmLinkLevel() > 0} 从
+	 *       {@code computeSignalActive()} 删掉 ⇒ {@code ③ 发时亮} 变 false；让 {@code tickArmLink()}
+	 *       到点不把电平归 0 ⇒ {@code ③ 归零后灭} 变 false；</li>
+	 *   <li>{@code 被红石点亮（redstoneLocked）⇒ false}（旧口径已被用户推翻）：把
+	 *       {@code if (redstoneLocked) return true;} 加回 {@code computeSignalActive()} ⇒
+	 *       {@code ④ 红石点亮不亮} 变红。</li>
+	 * </ol>
+	 *
+	 * <p><b>驱动方式</b>：自检<b>不跑 {@code arm.tick()}</b>（运动学要真实动力网络，见
+	 * {@link #checkOverflowStackAndExchange}），逐 tick 调的是 {@code arm.tick()} 里同样那一句
+	 * {@link SequencedArmBlockEntity#tickSignalActive()}（脉冲倒计时 + 口径重算 + 翻转检测）与
+	 * {@code runtime.tick(arm)}；「等红石 / 等信号」两条只有真跑解释器才会走到，**不伪造**运行时状态。
+	 */
+	private static void checkSignalActiveModel(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		// 与上面两条信号自检（+52 / +64）用同一片空地，但不重叠
+		BlockPos armPos = new BlockPos(spawn.getX() + 76, 201, spawn.getZ() + 60);
+		BlockPos senderPos = armPos.offset(0, 0, 3);
+		BlockPos powerPos = armPos.offset(-1, 0, 0); // **紧邻**（红石信号只给邻居）
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldSender = level.getBlockState(senderPos);
+		BlockState oldPower = level.getBlockState(powerPos);
+		Couple<Frequency> recvFreq = testFrequency(Items.GOLD_INGOT, Items.COPPER_INGOT);
+		Couple<Frequency> sendFreq = testFrequency(Items.QUARTZ, Items.FLINT);
+
+		boolean placed = false;
+		boolean waitRedstoneReached = false;
+		boolean neighborQuiet = false;
+		boolean waitingNoSignalDark = false; // ①（等红石）
+		boolean recvReachedWaiting = false;
+		boolean freqIdle = false;
+		boolean recvWaitingDark = false; // ①（收信号）
+		boolean litOnReceive = false; // ②
+		int flashRemainingOnLight = -1;
+		boolean fadedAfterFlash = false;
+		int flashLasted = -1;
+		boolean sendLit = false; // ③
+		boolean sendDarkAfterPulse = false;
+		boolean lockEngaged = false; // ④
+		boolean lockDark = false;
+		try {
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 信号活动 这条断言的前提不成立：臂的方块实体没建出来");
+			} else {
+				placed = true;
+				arm.setSpeed(32); // 转速为 0 时解释器整 tick 跳过（与原版一致）
+
+				// ——— ① 正在等红石、**没有**通电 ⇒ 不亮 ———
+				ArmProgramEntry waitRedstone = new ArmProgramEntry();
+				waitRedstone.op = OperationType.WAIT_REDSTONE;
+				waitRedstone.waitForPowered = true; // 等通电
+				arm.setProgram(oneEntryProgram("waitr", waitRedstone));
+				arm.runtime.resetToStart(arm);
+				// 连跑十几拍：真进 WAITING 之后还要让 tickWait 真跑几拍（"在等、但一直没有"要持续可见）
+				for (int i = 0; i < 14; i++) {
+					arm.runtime.tick(arm);
+					arm.tickSignalActive(); // = arm.tick() 里那一句
+					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
+						waitRedstoneReached = true;
+				}
+				waitingNoSignalDark = waitRedstoneReached && !arm.hasNeighborSignal() && !arm.isSignalActive();
+				neighborQuiet = !arm.hasNeighborSignal();
+
+				// ——— ① 正在等一路频率、但那一路**没通电** ⇒ 也不亮 ———
+				ArmProgramEntry recv = new ArmProgramEntry();
+				recv.op = OperationType.SIGNAL;
+				recv.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
+				recv.waitForPowered = true;
+				recv.frequency = recvFreq;
+				arm.setProgram(oneEntryProgram("recv", recv));
+				arm.runtime.resetToStart(arm);
+				for (int i = 0; i < 14; i++) {
+					arm.runtime.tick(arm);
+					arm.tickSignalActive();
+					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
+						recvReachedWaiting = true;
+				}
+				// 前提（现场对照）：那一路频率此刻**确实没电**，否则"没收到"与"收到了"就分不清了
+				freqIdle = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(recvFreq);
+				recvWaitingDark = recvReachedWaiting && freqIdle && !arm.isSignalActive();
+
+				// ——— ② 真的收到了 ⇒ 当场亮，约 10 tick 后灭 ———
+				level.setBlockAndUpdate(senderPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+					.defaultBlockState());
+				if (!(level.getBlockEntity(senderPos) instanceof SequencedArmBlockEntity sender)) {
+					LOGGER.error("[selftest] 信号活动 发端臂没建出来：②（收到即亮）没法验证");
+				} else {
+					sender.emitSignal(recvFreq, 15, 0); // 15 = 通电、ticks=0 = 一直保持
+					boolean networkPowered = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(recvFreq);
+					if (!networkPowered) {
+						LOGGER.error("[selftest] 信号活动 发端没让那一路频率通电（②的对照组成立不了）");
+					} else {
+						// 收到 = tickWait 在这一拍发现极性吻合（同一拍 succeed ⇒ 只有短脉冲能证明"收到过"）
+						for (int i = 0; i < 12; i++) {
+							arm.runtime.tick(arm);
+							arm.tickSignalActive();
+							if (arm.isSignalActive()) {
+								litOnReceive = true;
+								flashRemainingOnLight = arm.signalFlashTicks(); // 亮起来那一刻还剩几拍（服务端真值）
+								break;
+							}
+						}
+						// 数"还亮了几拍"：脉冲到点必须自己灭（护栏 60 = 永不灭时撞上去变红）
+						int extra = 0;
+						while (arm.isSignalActive() && extra < 60) {
+							arm.tickSignalActive();
+							extra++;
+						}
+						flashLasted = litOnReceive ? 1 + extra : -1;
+						fadedAfterFlash = litOnReceive && !arm.isSignalActive() && flashLasted >= 8
+							&& flashLasted <= 12;
+					}
+					sender.clearTransmissions(); // 先收干净，再撤方块（拆块也会清，这里留双重保险）
+				}
+				level.setBlockAndUpdate(senderPos, oldSender); // 发端撤掉（BE 被移除 ⇒ 退网）
+
+				// ——— ③ 正在发 ⇒ 亮；发出去的脉冲到点电平归零 ⇒ 灭 ———
+				arm.setProgram(new ArmProgram()); // 判据只看电平，不需要程序
+				arm.clearTransmissions();
+				arm.emitSignal(sendFreq, 15, 0); // 15 = 通电、ticks=0 = 一直保持
+				arm.tickSignalActive();
+				sendLit = arm.getArmLinkLevel() > 0 && arm.isSignalActive();
+				// 换成 3 tick 的脉冲：让它在计时器上真的"到点归 0"（主循环里同一个调用）
+				arm.emitSignal(sendFreq, 15, 3);
+				for (int i = 0; i < 10 && arm.getArmLinkLevel() > 0; i++) {
+					arm.runtime.tickArmLinkTimers(arm);
+					arm.tickSignalActive();
+				}
+				sendDarkAfterPulse = arm.getArmLinkLevel() == 0 && !arm.isSignalActive();
+				arm.clearTransmissions();
+
+				// ——— ④ 被相邻红石点亮（redstoneLocked）⇒ **仍然不亮**（旧的"点亮就亮天线"已被用户推翻） ———
+				level.setBlockAndUpdate(powerPos, Blocks.REDSTONE_BLOCK.defaultBlockState());
+				arm.redstoneUpdate(); // 方块变化本身也会调它（SequencedArmBlock.neighborChanged），这里显式确认
+				lockEngaged = arm.isRedstoneLocked() && arm.hasNeighborSignal();
+				arm.tickSignalActive();
+				lockDark = lockEngaged && !arm.isSignalActive() && arm.getArmLinkLevel() == 0;
+			}
+		} catch (Throwable t) {
+			LOGGER.error("[selftest] 信号活动 行为自检异常：{}", t.toString());
+		} finally {
+			level.setBlockAndUpdate(powerPos, oldPower);
+			level.setBlockAndUpdate(senderPos, oldSender);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 信号活动 ① 等红石没通电时不亮: 进等待={} 相邻无红石={} 亮={} ; "
+			+ "① 收信号没通电时不亮: 进等待={} 该频率无电={} 亮={}", waitRedstoneReached, neighborQuiet,
+			waitingNoSignalDark, recvReachedWaiting, freqIdle, recvWaitingDark);
+		LOGGER.info("[selftest] 信号活动 ② 收到即亮={} 亮起时脉冲剩余={} 亮了几拍={} 到点自己灭={}", litOnReceive,
+			flashRemainingOnLight, flashLasted, fadedAfterFlash);
+		LOGGER.info("[selftest] 信号活动 ③ 发时亮={} 归零后灭={}", sendLit, sendDarkAfterPulse);
+		LOGGER.info("[selftest] 信号活动 ④ 红石点亮不亮: 锁已生效={} 亮={}", lockEngaged, lockDark);
+		if (!placed)
+			LOGGER.error("[selftest] 信号活动 自检没跑起来（臂没建成）—— 下面四条断言等于没验");
+		if (!waitRedstoneReached || !recvReachedWaiting)
+			LOGGER.error("[selftest] 信号活动 ① 的对照组不成立：程序没停在「等红石 / 收信号」的 WAITING 上"
+				+ "（那两条\"正在等也不亮\"的断言就是测了空气）");
+		if (!freqIdle)
+			LOGGER.error("[selftest] 信号活动 ① 的对照组不成立：还没发信号，那一路频率就已经有电了");
+		// ① 用户这次反馈的字面场景：尝试接收但没收到 ⇒ **不亮**
+		if (!waitingNoSignalDark || !recvWaitingDark)
+			LOGGER.error("[selftest] 信号活动 ① 「正在等但没收到信号」把底座点亮了"
+				+ "（用户口径：必须成功接收才发光，尝试接收不算）—— 查 computeSignalActive() 里是不是又把\"正在等\"算进去了");
+		// ② 收到的那一刻起亮，且看得见、会自己灭
+		if (!litOnReceive)
+			LOGGER.error("[selftest] 信号活动 ② 真的收到了却没有点亮"
+				+ "（查 ProgramRuntime.tickWait 里那行 arm.flashSignalReceived()，以及 computeSignalActive() 里的 signalFlashTicks）");
+		if (!fadedAfterFlash)
+			LOGGER.error("[selftest] 信号活动 ② 短脉冲没有在约 {} tick 后熄灭（实际 {} 拍）—— 查 SIGNAL_FLASH_TICKS 与 tickSignalActive() 的递减",
+				SequencedArmBlockEntity.SIGNAL_FLASH_TICKS, flashLasted);
+		// ③ 发：电平 > 0 就亮，归零就灭
+		if (!sendLit)
+			LOGGER.error("[selftest] 信号活动 ③ 正在发信号却没有点亮（computeSignalActive() 里的 getArmLinkLevel() 那条丢了）");
+		if (!sendDarkAfterPulse)
+			LOGGER.error("[selftest] 信号活动 ③ 发出去的脉冲到点电平归零后还亮着（\"曾经发过\"不算）");
+		// ④ 旧口径已被推翻：被红石点亮 ≠ 收到信号
+		if (!lockEngaged)
+			LOGGER.error("[selftest] 信号活动 ④ 的对照组不成立：红石锁没生效（相邻红石没点亮这条臂）");
+		else if (!lockDark)
+			LOGGER.error("[selftest] 信号活动 ④ 被相邻红石点亮就把底座点亮了"
+				+ "（用户口径：那只是\"通电即暂停\"，不是收到信号 —— 查 computeSignalActive() 里是不是又把 redstoneLocked 加回去了）");
+	}
+
+	/** 一份只含一个任务的程序（每份程序至少一个任务，否则解释器没有可跑的入口）。 */
+	private static ArmProgram oneEntryProgram(String taskName, ArmProgramEntry entry) {
+		ArmProgram program = new ArmProgram();
+		program.tasks.add(namedTask(taskName, entry));
+		return program;
 	}
 
 	/**

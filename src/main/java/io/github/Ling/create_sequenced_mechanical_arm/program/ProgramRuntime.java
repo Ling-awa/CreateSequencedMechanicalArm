@@ -1072,6 +1072,16 @@ public class ProgramRuntime {
 		boolean powered = entry.op.usesSignalPair() ? isSignalPowered(entry)
 			: arm.hasNeighborSignal();
 		if (waitSatisfied(powered, entry.waitForPowered)) {
+			// ★ 用户在本轮把「收信号发光」的判据收紧了：**必须成功接收**才点亮底座，
+			//   "尝试接收但没有"不算（原话：「base_powered 的模型接收信号发光的时候必须成功接收信号才发光，
+			//   尝试接收但是没有就不会发光」）。
+			//   而"收到"这件事在状态机里是**零时长**的 —— 这里一旦极性吻合就同 tick `succeed` 走掉，
+			//   臂身上没有"我正在收"的持续状态可当判据 ⇒ 用臂上那个短脉冲把它变成看得见的东西
+			//   （10 tick = 0.5 秒，常量在 SequencedArmBlockEntity.SIGNAL_FLASH_TICKS）。
+			//   两处"真的收到了"都汇到这一行（WAIT 在方法开头就 return 了，到不了这里）：
+			//   a) SIGNAL 处于**接收**模式且频率通电（usesSignalPair ⇒ 走 isSignalPowered）；
+			//   b) WAIT_REDSTONE 等到相邻红石的通电状态与"等通电 / 等断电"吻合。
+			arm.flashSignalReceived();
 			succeed(arm, task, entry);
 			return;
 		}
