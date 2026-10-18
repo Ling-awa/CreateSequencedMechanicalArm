@@ -3287,8 +3287,8 @@ public class SequencedArmSelfTest {
 	 * <ol>
 	 *   <li>{@code 正在等但没信号 ⇒ false}（用户这次反馈的字面场景）：把"正在等"那条判据加回
 	 *       {@code computeSignalActive()}（{@code runtime.state == WAITING} 且当前条目是等红石 / 收信号），
-	 *       或者在"开始等"时就调 {@code flashSignalReceived()} ⇒ 本次日志里的
-	 *       {@code ① 等红石没通电时不亮} / {@code ① 收信号没通电时不亮} 变 false；</li>
+	 *       或者在"开始等"时就调 {@code flashSignalReceived()} ⇒ 本次日志里两条 ① 的
+	 *       {@code 亮=} 变 true、{@code 不亮成立=} 变 false；</li>
 	 *   <li>{@code 真的收到 ⇒ 亮，约 10 tick 后灭}：删掉 {@code ProgramRuntime.tickWait} 里那行
 	 *       {@code arm.flashSignalReceived();} ⇒ {@code ② 收到即亮} 变 false；把
 	 *       {@code SIGNAL_FLASH_TICKS} 改到 8 以外（如 1）⇒ ② 的 {@code 亮了几拍} 越界变红；
@@ -3306,6 +3306,17 @@ public class SequencedArmSelfTest {
 	 * {@link #checkOverflowStackAndExchange}），逐 tick 调的是 {@code arm.tick()} 里同样那一句
 	 * {@link SequencedArmBlockEntity#tickSignalActive()}（脉冲倒计时 + 口径重算 + 翻转检测）与
 	 * {@code runtime.tick(arm)}；「等红石 / 等信号」两条只有真跑解释器才会走到，**不伪造**运行时状态。
+	 *
+	 * <p><b>夹具隔离（本轮新增）</b>：四段断言**共用同一条臂**（同一个方块实体实例 ⇒ 同一张
+	 * {@code heldSignals} 表），而「发」出去的信号是**持久状态** —— {@code emitSignal(..., ticks = 0)}
+	 * 就是"一直保持"，只有「中断」/ 换卡 / 拆方块才断。所以每段起跑前都走
+	 * {@link #quietArm(SequencedArmBlockEntity)} 显式清干净，并把"确实清干净了"当成前提断言出来：
+	 * 上一段漏过来的 15 电平只会红在**前提**上，不会伪装成 ① / ④ 的判据错。
+	 *
+	 * <p><b>日志字段口径（本轮修正）</b>：{@code 亮=} 印的是 {@code isSignalActive()} 的**真实**值，
+	 * 断言值另外用 {@code 不亮成立=} 印。旧日志把断言值挂在 {@code 亮=} 后面，于是"确实不亮"（断言成立）
+	 * 被读成 {@code 亮=true}（"本该不亮却亮了"）—— 那次 {@code run/logs/latest.log} 的 ① / ④ 就是这样被
+	 * 误读成红，实际上一条 {@code ERROR} 都没有。
 	 */
 	private static void checkSignalActiveModel(MinecraftServer server) {
 		ServerLevel level = server.overworld();
@@ -3321,11 +3332,28 @@ public class SequencedArmSelfTest {
 		Couple<Frequency> sendFreq = testFrequency(Items.QUARTZ, Items.FLINT);
 
 		boolean placed = false;
+		// —— 夹具隔离的前提（true = 进那一段之前这条臂身上**没有被持有的信号、没有未到期的短脉冲**）——
+		// 为什么每条都要断言：见 quietArm() 的注释（四段共用同一个方块实体实例 + 信号是持久状态）。
+		boolean quietBeforeWait = false;
+		boolean quietBeforeRecv = false;
+		boolean quietBeforeSend = false;
+		boolean quietBeforeLock = false;
 		boolean waitRedstoneReached = false;
 		boolean neighborQuiet = false;
+		// ⚠️ 日志字段口径（本轮修的就是这个）：`litIn*` 是**真实的亮灭**（isSignalActive() 的现场值），
+		//   `*Dark` 才是断言（true = "不亮"成立）。旧日志把**断言值**印在 `亮=` 后面 ⇒
+		//   断过的时候日志读作 `亮=true`，看着像"本该不亮却亮了"（run/logs/latest.log 的 ① / ④ 就是
+		//   这样被误读成三处红的，其实那次一条 ERROR 都没有）。电平 / 脉冲一起印出来，
+		//   下次真泄漏时能当场看出是"表里那 15 漏过来了"还是"脉冲没到期"。
+		boolean litInWaitRedstone = false;
+		int levelAtWait = -1;
+		int flashAtWait = -1;
 		boolean waitingNoSignalDark = false; // ①（等红石）
 		boolean recvReachedWaiting = false;
 		boolean freqIdle = false;
+		boolean litInRecvWait = false;
+		int levelAtRecv = -1;
+		int flashAtRecv = -1;
 		boolean recvWaitingDark = false; // ①（收信号）
 		boolean litOnReceive = false; // ②
 		int flashRemainingOnLight = -1;
@@ -3334,6 +3362,9 @@ public class SequencedArmSelfTest {
 		boolean sendLit = false; // ③
 		boolean sendDarkAfterPulse = false;
 		boolean lockEngaged = false; // ④
+		boolean litWhileLocked = false;
+		int levelAtLock = -1;
+		int flashAtLock = -1;
 		boolean lockDark = false;
 		try {
 			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
@@ -3350,6 +3381,9 @@ public class SequencedArmSelfTest {
 				waitRedstone.waitForPowered = true; // 等通电
 				arm.setProgram(oneEntryProgram("waitr", waitRedstone));
 				arm.runtime.resetToStart(arm);
+				// 进 ① 之前先保证这条臂**没有任何被持有的信号**，并把这件事本身断言出来
+				// （`setProgram` / `resetToStart` 只清"发"，不清也许还在的短脉冲 ⇒ 仍然要 quietArm）。
+				quietBeforeWait = quietArm(arm);
 				// 连跑十几拍：真进 WAITING 之后还要让 tickWait 真跑几拍（"在等、但一直没有"要持续可见）
 				for (int i = 0; i < 14; i++) {
 					arm.runtime.tick(arm);
@@ -3357,8 +3391,11 @@ public class SequencedArmSelfTest {
 					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
 						waitRedstoneReached = true;
 				}
-				waitingNoSignalDark = waitRedstoneReached && !arm.hasNeighborSignal() && !arm.isSignalActive();
 				neighborQuiet = !arm.hasNeighborSignal();
+				litInWaitRedstone = arm.isSignalActive();
+				levelAtWait = arm.getArmLinkLevel();
+				flashAtWait = arm.signalFlashTicks();
+				waitingNoSignalDark = waitRedstoneReached && neighborQuiet && !litInWaitRedstone;
 
 				// ——— ① 正在等一路频率、但那一路**没通电** ⇒ 也不亮 ———
 				ArmProgramEntry recv = new ArmProgramEntry();
@@ -3368,6 +3405,7 @@ public class SequencedArmSelfTest {
 				recv.frequency = recvFreq;
 				arm.setProgram(oneEntryProgram("recv", recv));
 				arm.runtime.resetToStart(arm);
+				quietBeforeRecv = quietArm(arm); // 同上：这一段也必须从"手上没有任何信号"起跑
 				for (int i = 0; i < 14; i++) {
 					arm.runtime.tick(arm);
 					arm.tickSignalActive();
@@ -3376,7 +3414,10 @@ public class SequencedArmSelfTest {
 				}
 				// 前提（现场对照）：那一路频率此刻**确实没电**，否则"没收到"与"收到了"就分不清了
 				freqIdle = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(recvFreq);
-				recvWaitingDark = recvReachedWaiting && freqIdle && !arm.isSignalActive();
+				litInRecvWait = arm.isSignalActive();
+				levelAtRecv = arm.getArmLinkLevel();
+				flashAtRecv = arm.signalFlashTicks();
+				recvWaitingDark = recvReachedWaiting && freqIdle && !litInRecvWait;
 
 				// ——— ② 真的收到了 ⇒ 当场亮，约 10 tick 后灭 ———
 				level.setBlockAndUpdate(senderPos, SequencedArmRegistration.SEQUENCED_ARM.get()
@@ -3415,7 +3456,9 @@ public class SequencedArmSelfTest {
 
 				// ——— ③ 正在发 ⇒ 亮；发出去的脉冲到点电平归零 ⇒ 灭 ———
 				arm.setProgram(new ArmProgram()); // 判据只看电平，不需要程序
-				arm.clearTransmissions();
+				// ③ 自己也从"干净"起跑：上一段 ② 是**收**，收完之后 pulse 可能还剩几拍，
+				// 带着它进 ③ 会让 `sendLit` 变成"脉冲借来的亮"（测了空气）。
+				quietBeforeSend = quietArm(arm);
 				arm.emitSignal(sendFreq, 15, 0); // 15 = 通电、ticks=0 = 一直保持
 				arm.tickSignalActive();
 				sendLit = arm.getArmLinkLevel() > 0 && arm.isSignalActive();
@@ -3426,14 +3469,23 @@ public class SequencedArmSelfTest {
 					arm.tickSignalActive();
 				}
 				sendDarkAfterPulse = arm.getArmLinkLevel() == 0 && !arm.isSignalActive();
+				// ③ 用完就把那个"一直保持"的 15 断掉：它是**持久状态**，不清就跨到 ④ 去
+				//（下面 ④ 还会再用 quietArm 兜一次 —— 双保险，因为这条最容易被后来的改动绕过）。
 				arm.clearTransmissions();
+				arm.tickSignalActive(); // 让口径按"已清空"重算，别把 ③ 的旧值带进 ④
 
 				// ——— ④ 被相邻红石点亮（redstoneLocked）⇒ **仍然不亮**（旧的"点亮就亮天线"已被用户推翻） ———
+				// 前提自证：进 ④ 前 `getArmLinkLevel() == 0`。少了这一条，③ 漏出来的 15 会让
+				// computeSignalActive() 恒真，④ 的"不亮"就假红成"运行时把 redstoneLocked 加回去了"。
+				quietBeforeLock = quietArm(arm);
 				level.setBlockAndUpdate(powerPos, Blocks.REDSTONE_BLOCK.defaultBlockState());
 				arm.redstoneUpdate(); // 方块变化本身也会调它（SequencedArmBlock.neighborChanged），这里显式确认
 				lockEngaged = arm.isRedstoneLocked() && arm.hasNeighborSignal();
 				arm.tickSignalActive();
-				lockDark = lockEngaged && !arm.isSignalActive() && arm.getArmLinkLevel() == 0;
+				litWhileLocked = arm.isSignalActive();
+				levelAtLock = arm.getArmLinkLevel();
+				flashAtLock = arm.signalFlashTicks();
+				lockDark = lockEngaged && !litWhileLocked && levelAtLock == 0;
 			}
 		} catch (Throwable t) {
 			LOGGER.error("[selftest] 信号活动 行为自检异常：{}", t.toString());
@@ -3443,15 +3495,28 @@ public class SequencedArmSelfTest {
 			level.setBlockAndUpdate(armPos, oldArm);
 		}
 
-		LOGGER.info("[selftest] 信号活动 ① 等红石没通电时不亮: 进等待={} 相邻无红石={} 亮={} ; "
-			+ "① 收信号没通电时不亮: 进等待={} 该频率无电={} 亮={}", waitRedstoneReached, neighborQuiet,
-			waitingNoSignalDark, recvReachedWaiting, freqIdle, recvWaitingDark);
+		// ★ 字段口径：`亮=` 印的是**真实亮灭**（isSignalActive()），`不亮成立=` 印的才是断言。
+		//   旧日志只印断言、却挂在 `亮=` 后面 ⇒ 断过（= "确实不亮"）时读作 `亮=true`，
+		//   看上去正好是反的（用户报的"三处红"就是这么来的：那次 run/logs/latest.log 一条 ERROR 都没有）。
+		LOGGER.info("[selftest] 信号活动 ① 等红石没通电时不亮: 前提·无持有信号={} 进等待={} 相邻无红石={} 亮={}（电平={} 脉冲={}）"
+			+ " 不亮成立={} ; ① 收信号没通电时不亮: 前提·无持有信号={} 进等待={} 该频率无电={} 亮={}（电平={} 脉冲={}） 不亮成立={}",
+			quietBeforeWait, waitRedstoneReached, neighborQuiet, litInWaitRedstone, levelAtWait, flashAtWait,
+			waitingNoSignalDark, quietBeforeRecv, recvReachedWaiting, freqIdle, litInRecvWait, levelAtRecv, flashAtRecv,
+			recvWaitingDark);
 		LOGGER.info("[selftest] 信号活动 ② 收到即亮={} 亮起时脉冲剩余={} 亮了几拍={} 到点自己灭={}", litOnReceive,
 			flashRemainingOnLight, flashLasted, fadedAfterFlash);
-		LOGGER.info("[selftest] 信号活动 ③ 发时亮={} 归零后灭={}", sendLit, sendDarkAfterPulse);
-		LOGGER.info("[selftest] 信号活动 ④ 红石点亮不亮: 锁已生效={} 亮={}", lockEngaged, lockDark);
+		LOGGER.info("[selftest] 信号活动 ③ 发时亮={} 归零后灭={}（进 ③ 前无持有信号={}）", sendLit, sendDarkAfterPulse,
+			quietBeforeSend);
+		LOGGER.info("[selftest] 信号活动 ④ 红石点亮不亮: 前提·无持有信号={} 锁已生效={} 亮={}（电平={} 脉冲={}） 不亮成立={}",
+			quietBeforeLock, lockEngaged, litWhileLocked, levelAtLock, flashAtLock, lockDark);
 		if (!placed)
 			LOGGER.error("[selftest] 信号活动 自检没跑起来（臂没建成）—— 下面四条断言等于没验");
+		// 夹具隔离的前提**自己也要红**：下次谁再漏一条"一直保持"的信号进来，会在这里直接报，
+		// 而不是伪装成 ① / ④ 的判据错（那样会把人往 computeSignalActive() 里带）。
+		if (!quietBeforeWait || !quietBeforeRecv || !quietBeforeSend || !quietBeforeLock)
+			LOGGER.error("[selftest] 信号活动 的夹具前提不成立：进 ① / ① / ③ / ④ 之前这条臂上还留着被持有的信号或未到期的短脉冲"
+				+ "（{}/{}/{}/{}）—— 这是夹具没隔离干净（信号是持久状态，只有「中断」/换卡/clearTransmissions 才断），"
+				+ "不是 computeSignalActive() 的错", quietBeforeWait, quietBeforeRecv, quietBeforeSend, quietBeforeLock);
 		if (!waitRedstoneReached || !recvReachedWaiting)
 			LOGGER.error("[selftest] 信号活动 ① 的对照组不成立：程序没停在「等红石 / 收信号」的 WAITING 上"
 				+ "（那两条\"正在等也不亮\"的断言就是测了空气）");
@@ -3479,6 +3544,34 @@ public class SequencedArmSelfTest {
 		else if (!lockDark)
 			LOGGER.error("[selftest] 信号活动 ④ 被相邻红石点亮就把底座点亮了"
 				+ "（用户口径：那只是\"通电即暂停\"，不是收到信号 —— 查 computeSignalActive() 里是不是又把 redstoneLocked 加回去了）");
+	}
+
+	/**
+	 * 夹具隔离：把这条臂上**所有被持有的信号**与未到期的短脉冲清干净，并返回"确实清干净了"。
+	 *
+	 * <p><b>为什么必须显式清（用户这次报的"假红"根因就在这里）</b>：④ 之前那几段断言
+	 * （① 等红石 / ① 收信号 / ② 收到 / ③ 发 / ④ 红石锁）**共用同一个方块实体实例**，
+	 * 而"发"出去的信号是<b>持久状态</b> —— {@code emitSignal(freq, 15, 0)} 的 {@code ticks = 0} 就是
+	 * "一直保持"（§7.16e 用户口径），只有「中断」({@link SequencedArmBlockEntity#releaseSignal})、
+	 * 换卡（{@code setProgram} / {@code resetToStart} 里的
+	 * {@link SequencedArmBlockEntity#clearTransmissions()}）与拆方块才会断。③ 为了验"发时亮"正是发了
+	 * 15 并<b>一直保持</b>；这个 15 一旦漏到 ④（以及任何在它之后写的段落），
+	 * {@link SequencedArmBlockEntity#getArmLinkLevel()} {@code > 0} 会让 {@code computeSignalActive()}
+	 * 恒真 —— 于是 ① / ④ 的"不亮"会假红成"运行时把'在等 / 被红石点亮'也算成收到"，
+	 * 把人往一个根本不存在的运行时 bug 上带。
+	 *
+	 * <p>所以每段起跑前都调这里，并把返回值断言成"前提成立"：下次再泄漏会**先红在前提上**。
+	 *
+	 * <p>前提只查**输入**（表空 + 电平 0 + 脉冲 0），<b>不查</b> {@code isSignalActive()} ——
+	 * 后者正是 ① / ④ 要验的东西，放进前提里就成了自证。
+	 */
+	private static boolean quietArm(SequencedArmBlockEntity arm) {
+		arm.clearTransmissions(); // 持久信号只能这样断（或 releaseSignal(freq) 逐条断）
+		// 短脉冲没有 setter，只能靠"每 tick 递减一格"自然到期（tickSignalActive 与 arm.tick() 同一条路）
+		for (int i = 0; i < SequencedArmBlockEntity.SIGNAL_FLASH_TICKS && arm.signalFlashTicks() > 0; i++)
+			arm.tickSignalActive();
+		arm.tickSignalActive(); // 表已空 ⇒ 顺手把 signalActive 口径按新状态重算一次，别留上段的旧值
+		return arm.heldSignalCount() == 0 && arm.getArmLinkLevel() == 0 && arm.signalFlashTicks() == 0;
 	}
 
 	/** 一份只含一个任务的程序（每份程序至少一个任务，否则解释器没有可跑的入口）。 */
