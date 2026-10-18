@@ -3276,12 +3276,17 @@ public class SequencedArmSelfTest {
 	// ——————————————— 底座 base_powered 的判据（用户第十九轮反馈，本轮收紧） ———————————————
 
 	/**
-	 * 断言 ①–④：客户端该画 {@code base} 还是 {@code base_powered} ——
+	 * 断言 ①–⑤：客户端该画 {@code base} 还是 {@code base_powered} ——
 	 * {@code SequencedArmBlockEntity.isSignalActive()} 的完整口径。
 	 *
 	 * <p><b>用户口径（本轮原话）</b>：「base_powered 的模型接收信号发光的时候<b>必须成功接收信号</b>才发光，
 	 * <b>尝试接收但是没有就不会发光</b>」。旧口径把"正在等红石 / 正在等信号"和"被相邻红石点亮"
 	 * 也算成"收到" ⇒ "一直在等、一直没信号"的臂**常亮** —— 那正是这次反馈的现象，两条旧判据已删。
+	 *
+	 * <p><b>本轮追加的用户口径</b>：「这个只与无线信号有关，与接收红石信号无关。」
+	 * 于是 {@code ProgramRuntime.tickWait} 的成功分支里，{@code flashSignalReceived()} 只留给
+	 * 「收发信号」的**接收**模式（红石链接频率 = 无线信号），「等红石」（相邻方块的红石充能/断电）
+	 * 成功**不点亮**底座 —— 这就是新增的 ⑤（两条极性各一条断言）。
 	 *
 	 * <p><b>每条断言"改哪一行会变红"</b>：
 	 * <ol>
@@ -3300,7 +3305,18 @@ public class SequencedArmSelfTest {
 	 *   <li>{@code 被红石点亮（redstoneLocked）⇒ false}（旧口径已被用户推翻）：把
 	 *       {@code if (redstoneLocked) return true;} 加回 {@code computeSignalActive()} ⇒
 	 *       {@code ④ 红石点亮不亮} 变红。</li>
+	 *   <li>{@code 等红石成功 ⇒ 不亮}（本轮新增，两条极性各一条）：把 {@code ProgramRuntime.tickWait} 里
+	 *       {@code if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())} 这层判据去掉
+	 *       （退回无条件的 {@code arm.flashSignalReceived();}）⇒ {@code ⑤ 等通电 / 等断电} 两条立刻变红
+	 *       （{@code 亮=true 脉冲=9}、{@code 不亮成立=false}）；把 {@code WAIT_REDSTONE} 也放进那个 if
+	 *       （"反正也是信号"）⇒ 同样变红。</li>
 	 * </ol>
+	 *
+	 * <p>⚠️ ⑤ 的驱动有个**特殊之处**：真按 {@code setBlockAndUpdate} 摆红石块，{@code neighborChanged}
+	 * 会把 {@code redstoneLocked} 同步翻真，而 {@code ProgramRuntime.tick()} 在
+	 * {@code if (arm.isRedstoneLocked()) return;} 整 tick 早退 ⇒「等通电」的成功分支根本走不到。
+	 * 所以 ⑤-a 用 {@code Block.UPDATE_CLIENTS} 只改世界、不动锁（并非放宽断言：万一锁也翻了，
+	 * ⑤ 的**前提** {@code 通电而锁仍旧值} 会先红，明确告诉你是"没验到"而不是"判据错"）。
 	 *
 	 * <p><b>驱动方式</b>：自检<b>不跑 {@code arm.tick()}</b>（运动学要真实动力网络，见
 	 * {@link #checkOverflowStackAndExchange}），逐 tick 调的是 {@code arm.tick()} 里同样那一句
@@ -3366,6 +3382,21 @@ public class SequencedArmSelfTest {
 		int levelAtLock = -1;
 		int flashAtLock = -1;
 		boolean lockDark = false;
+		// ⑤（本轮新增）「等红石」**成功**之后 ⇒ 不亮。两条极性各一条：等通电 / 等断电。
+		// ⚠️ 断言量的初值故意取"最坏"（`lit` = true、`flash` = -1），漏跑时日志能一眼看出来。
+		boolean quietBeforeRedstoneWait = false;
+		boolean redstoneOnWaiting = false;
+		boolean redstoneOnSucceeded = false;
+		boolean redstoneOnUnlocked = false; // 前提：世界已通电、而 redstoneLocked 仍是旧值（否则解释器整 tick 早退）
+		boolean litAfterRedstoneOn = true;
+		int flashAfterRedstoneOn = -1;
+		boolean redstoneWaitOnDark = false; // ⑤-a 断言：等通电**成功之后**不亮（isSignalActive() == false && signalFlashTicks() == 0）
+		boolean redstoneOffWaiting = false;
+		boolean redstoneOffUnpowered = false; // 前提：⑤-b 起跑时相邻确实**没有**红石电（否则"等断电"当场吻合、对照组不成立）
+		boolean redstoneOffSucceeded = false;
+		boolean litAfterRedstoneOff = true;
+		int flashAfterRedstoneOff = -1;
+		boolean redstoneWaitOffDark = false; // ⑤-b 断言：等断电**成功之后**不亮（同上）
 		try {
 			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
 				.defaultBlockState());
@@ -3486,6 +3517,87 @@ public class SequencedArmSelfTest {
 				levelAtLock = arm.getArmLinkLevel();
 				flashAtLock = arm.signalFlashTicks();
 				lockDark = lockEngaged && !litWhileLocked && levelAtLock == 0;
+
+				// ——— ⑤ 「等红石」的**成功**那一刻 ⇒ **不亮**（本轮新增，用户口径） ———
+				// 用户原话：「这个只与无线信号有关，与接收红石信号无关。」
+				// 背景：`ProgramRuntime.tickWait` 的成功分支同时服务两种东西 ——
+				//   a)「收发信号」的**接收**模式（Create 的**红石链接频率** = 无线信号）⇒ 亮，正确；
+				//   b)「等红石」（`WAIT_REDSTONE`，相邻方块的红石充能/断电）⇒ **不是无线信号，不该亮**。
+				// 本轮把 `arm.flashSignalReceived()` 收进 `if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())`，
+				// ⑤ 就是"b 被挡掉"的唯一证人：**把那个 `if` 去掉（退回无条件调用）⇒ ⑤ 两条立刻变红**
+				// （`不亮成立=false`、`脉冲=9`）。
+				//
+				// ⚠️ 顺序有讲究：④ 刚把 powerPos 摆成红石块、臂此刻是**通电锁死**的；
+				//   `ProgramRuntime.tick()` 在 `isRedstoneLocked()` 那一行整 tick 早退 ⇒ 不先撤掉的话 ⑤ 一拍都推不动。
+				level.setBlockAndUpdate(powerPos, oldPower);
+				arm.redstoneUpdate();
+
+				// ——— ⑤-a 等**通电**（waitForPowered = true）———
+				ArmProgramEntry waitOn = new ArmProgramEntry();
+				waitOn.op = OperationType.WAIT_REDSTONE;
+				waitOn.waitForPowered = true;
+				arm.setProgram(oneEntryProgram("waitr_on", waitOn));
+				arm.runtime.resetToStart(arm);
+				arm.runtime.state = ProgramRuntime.EntryState.IDLE; // resetToStart 不动 state（上一段可能停在任意态），这里钉死起跑态
+				quietBeforeRedstoneWait = quietArm(arm);
+				// 先进 WAITING（此刻相邻无红石 ⇒ "等通电"等不到）
+				for (int i = 0; i < 6 && !redstoneOnWaiting; i++) {
+					arm.runtime.tick(arm);
+					arm.tickSignalActive();
+					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
+						redstoneOnWaiting = true;
+				}
+				// ★ 红石块只用**客户端更新**的 flag 摆（`Block.UPDATE_CLIENTS`）：`hasNeighborSignal()` 立刻为真，
+				//   但**不触发** `neighborChanged` ⇒ `redstoneLocked` 保持旧值 false。
+				//   为什么非这么放：按 `setBlockAndUpdate` 摆的话，`neighborChanged` 会同步把 `redstoneLocked`
+				//   翻成 true，而 `ProgramRuntime.tick()` 第一件事就是
+				//   `if (arm.isRedstoneLocked()) return;`（常驻门控：通电即暂停）⇒ 解释器**永远走不到**
+				//   「等通电」的成功分支，这条断言就退化成"暂停时也不亮"（恒真、永远不会红 = 测了空气）。
+				//   这一放法只是把这个"成功分支"从门控后面拿出来验，**不改任何产品语义**。
+				level.setBlock(powerPos, Blocks.REDSTONE_BLOCK.defaultBlockState(), Block.UPDATE_CLIENTS);
+				redstoneOnUnlocked = arm.hasNeighborSignal() && !arm.isRedstoneLocked();
+				for (int i = 0; i < 8 && !redstoneOnSucceeded; i++) {
+					arm.runtime.tick(arm);
+					arm.tickSignalActive();
+					// 从 WAITING 走到别的状态 = 极性吻合 ⇒ tickWait 的成功分支**刚刚**在这一拍跑过
+					//（成功那一刻 `succeed` 就把状态挪走了，所以判据只能看"离开 WAITING"）
+					if (redstoneOnWaiting && arm.runtime.state != ProgramRuntime.EntryState.WAITING) {
+						redstoneOnSucceeded = true;
+						litAfterRedstoneOn = arm.isSignalActive();
+						flashAfterRedstoneOn = arm.signalFlashTicks();
+						// 断言本体：**不亮**且**脉冲为 0**（后者是关键 —— 用户口径只否掉"亮"，
+						// 但脉冲留着会让随后 10 tick 里亮起来，所以两条一起断言）
+						redstoneWaitOnDark = !litAfterRedstoneOn && flashAfterRedstoneOn == 0;
+					}
+				}
+				// 撤掉红石块（UPDATE_ALL ⇒ neighborChanged ⇒ redstoneLocked 归 false + 客户端同步）
+				level.setBlockAndUpdate(powerPos, oldPower);
+				arm.redstoneUpdate();
+
+				// ——— ⑤-b 等**断电**（waitForPowered = false）：这一支在正常世界里完全可达 ———
+				ArmProgramEntry waitOff = new ArmProgramEntry();
+				waitOff.op = OperationType.WAIT_REDSTONE;
+				waitOff.waitForPowered = false;
+				arm.setProgram(oneEntryProgram("waitr_off", waitOff));
+				arm.runtime.resetToStart(arm);
+				arm.runtime.state = ProgramRuntime.EntryState.IDLE; // 同上：起跑态钉死
+				redstoneOffUnpowered = !arm.hasNeighborSignal() && !arm.isRedstoneLocked();
+				for (int i = 0; i < 6 && !redstoneOffWaiting; i++) {
+					arm.runtime.tick(arm);
+					arm.tickSignalActive();
+					if (arm.runtime.state == ProgramRuntime.EntryState.WAITING)
+						redstoneOffWaiting = true;
+				}
+				for (int i = 0; i < 8 && !redstoneOffSucceeded; i++) {
+					arm.runtime.tick(arm);
+					arm.tickSignalActive();
+					if (redstoneOffWaiting && arm.runtime.state != ProgramRuntime.EntryState.WAITING) {
+						redstoneOffSucceeded = true;
+						litAfterRedstoneOff = arm.isSignalActive();
+						flashAfterRedstoneOff = arm.signalFlashTicks();
+						redstoneWaitOffDark = !litAfterRedstoneOff && flashAfterRedstoneOff == 0;
+					}
+				}
 			}
 		} catch (Throwable t) {
 			LOGGER.error("[selftest] 信号活动 行为自检异常：{}", t.toString());
@@ -3509,8 +3621,14 @@ public class SequencedArmSelfTest {
 			quietBeforeSend);
 		LOGGER.info("[selftest] 信号活动 ④ 红石点亮不亮: 前提·无持有信号={} 锁已生效={} 亮={}（电平={} 脉冲={}） 不亮成立={}",
 			quietBeforeLock, lockEngaged, litWhileLocked, levelAtLock, flashAtLock, lockDark);
+		// ⑤ 本轮新增（用户口径：「这个只与无线信号有关，与接收红石信号无关」）
+		LOGGER.info("[selftest] 信号活动 ⑤ 等红石成功不亮: 前提·无持有信号={} 通电而锁仍旧值={} | 等通电: 进等待={} 成功={} 亮={} 脉冲={}"
+			+ " 不亮成立={} | 等断电: 相邻无红石电={} 进等待={} 成功={} 亮={} 脉冲={} 不亮成立={}",
+			quietBeforeRedstoneWait, redstoneOnUnlocked, redstoneOnWaiting, redstoneOnSucceeded, litAfterRedstoneOn,
+			flashAfterRedstoneOn, redstoneWaitOnDark, redstoneOffUnpowered, redstoneOffWaiting, redstoneOffSucceeded,
+			litAfterRedstoneOff, flashAfterRedstoneOff, redstoneWaitOffDark);
 		if (!placed)
-			LOGGER.error("[selftest] 信号活动 自检没跑起来（臂没建成）—— 下面四条断言等于没验");
+			LOGGER.error("[selftest] 信号活动 自检没跑起来（臂没建成）—— 下面 ①–⑤ 的断言等于没验");
 		// 夹具隔离的前提**自己也要红**：下次谁再漏一条"一直保持"的信号进来，会在这里直接报，
 		// 而不是伪装成 ① / ④ 的判据错（那样会把人往 computeSignalActive() 里带）。
 		if (!quietBeforeWait || !quietBeforeRecv || !quietBeforeSend || !quietBeforeLock)
@@ -3544,6 +3662,33 @@ public class SequencedArmSelfTest {
 		else if (!lockDark)
 			LOGGER.error("[selftest] 信号活动 ④ 被相邻红石点亮就把底座点亮了"
 				+ "（用户口径：那只是\"通电即暂停\"，不是收到信号 —— 查 computeSignalActive() 里是不是又把 redstoneLocked 加回去了）");
+		// ⑤ 本轮口径：底座发光**只跟无线信号（红石链接频率）有关**，接收相邻红石不算 ⇒
+		//   「等红石」的两条成功路径都必须是"不亮 + 脉冲 0"。
+		//   ⚠️ 变红方式：把 ProgramRuntime.tickWait 里那句
+		//   `if (entry.op == OperationType.SIGNAL && entry.isSignalReceive()) arm.flashSignalReceived();`
+		//   退回成无条件的 `arm.flashSignalReceived();` ⇒ 下面两条立刻红（`亮=true 脉冲=9`）。
+		//   只在"开始等"时闪、或把脉冲算进 computeSignalActive() 的其它写法，也会红在这里。
+		if (!quietBeforeRedstoneWait)
+			LOGGER.error("[selftest] 信号活动 ⑤ 的夹具前提不成立：进「等红石」之前这条臂上还留着被持有的信号或未到期的短脉冲"
+				+ "（那样'成功不亮'可能是脉冲刚好到期借来的，不是判据对）");
+		if (!redstoneOnWaiting || !redstoneOnSucceeded)
+			LOGGER.error("[selftest] 信号活动 ⑤ 的对照组不成立：「等通电」没有先停在 WAITING 再成功"
+				+ "（这条\"等红石成功不亮\"就成了测空气）");
+		if (!redstoneOnUnlocked)
+			LOGGER.error("[selftest] 信号活动 ⑤ 的前提不成立：摆了红石块之后 `hasNeighborSignal()` 与 `redstoneLocked` 是"
+				+ "「通电且已锁」—— 那 `ProgramRuntime.tick()` 会整 tick 早退（通电即暂停），"
+				+ "「等通电」的成功分支根本走不到，这条断言不成立（不是判据错）");
+		else if (!redstoneWaitOnDark)
+			LOGGER.error("[selftest] 信号活动 ⑤ 「等红石·等通电」**成功之后**把底座点亮了"
+				+ "（用户口径：发光只跟无线信号有关，接收相邻红石不算 —— 查 ProgramRuntime.tickWait 里 flashSignalReceived() 的 if 判据）");
+		if (!redstoneOffUnpowered)
+			LOGGER.error("[selftest] 信号活动 ⑤-b 的对照组不成立：起跑时相邻已经有红石电"
+				+ "（那样\"等断电\"一进就吻合，看不出成功那一刻）");
+		if (!redstoneOffWaiting || !redstoneOffSucceeded)
+			LOGGER.error("[selftest] 信号活动 ⑤-b 的对照组不成立：「等断电」没有先停在 WAITING 再成功");
+		else if (!redstoneWaitOffDark)
+			LOGGER.error("[selftest] 信号活动 ⑤ 「等红石·等断电」**成功之后**把底座点亮了"
+				+ "（用户口径：发光只跟无线信号有关，接收相邻红石不算 —— 查 ProgramRuntime.tickWait 里 flashSignalReceived() 的 if 判据）");
 	}
 
 	/**

@@ -1078,10 +1078,21 @@ public class ProgramRuntime {
 			//   而"收到"这件事在状态机里是**零时长**的 —— 这里一旦极性吻合就同 tick `succeed` 走掉，
 			//   臂身上没有"我正在收"的持续状态可当判据 ⇒ 用臂上那个短脉冲把它变成看得见的东西
 			//   （10 tick = 0.5 秒，常量在 SequencedArmBlockEntity.SIGNAL_FLASH_TICKS）。
-			//   两处"真的收到了"都汇到这一行（WAIT 在方法开头就 return 了，到不了这里）：
-			//   a) SIGNAL 处于**接收**模式且频率通电（usesSignalPair ⇒ 走 isSignalPowered）；
-			//   b) WAIT_REDSTONE 等到相邻红石的通电状态与"等通电 / 等断电"吻合。
-			arm.flashSignalReceived();
+			//
+			// ★★ 本轮的修复点（用户口径原话：「这个只与无线信号有关，与接收红石信号无关」）：
+			//   这一行以前是**无条件**的，而它同时服务两条成功分支 ——
+			//     a) SIGNAL 处于**接收**模式、那一路**红石链接频率**通电（无线信号）⇒ **该亮**；
+			//     b) WAIT_REDSTONE 等到**相邻红石**的通电状态与"等通电 / 等断电"吻合 ⇒ **不该亮**：
+			//        那是邻居方块的红石电，不是无线（红石链接频率）信号，按用户口径与发光无关。
+			//   所以闪光只留给 a)：判据是**操作类型 + 模式**（`op == SIGNAL` 且 `isSignalReceive()`），
+			//   不靠 `usesSignalPair()` 之类"似乎等价"的间接量 —— 以后若再多一种用频率的操作，
+			//   这里必须显式再判断一次，而不是被顺手放进来。
+			//   ⚠️ 把这一句 `if` 去掉（或退回无条件调用）⇒ 自检「信号活动 ⑤ 等红石成功不亮」立刻变红。
+			//   ⚠️ 别把 `WAIT_REDSTONE` 也算进来"反正也是信号"：用户的区分正是这一条（相邻红石 ≠ 无线信号）。
+			//   发送侧不在这里 —— 它靠 `getArmLinkLevel() > 0`（见 SequencedArmBlockEntity.computeSignalActive），
+			//   只统计 heldSignals（红石链接频率）的电平，`redstoneLocked` 不参与。
+			if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())
+				arm.flashSignalReceived();
 			succeed(arm, task, entry);
 			return;
 		}

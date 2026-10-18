@@ -1408,9 +1408,12 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 *   <li><b>发</b>：{@link #getArmLinkLevel()} {@code > 0} —— 此刻真的有一路链接被我们维持在电平 &gt; 0。
 	 *       <b>「曾经发过」不算</b>：脉冲到点后电平归 0、条目却按设计留在表里
 	 *       （见 {@link #tickArmLink()} 的注释），那种情况这里必须是 {@code false}；</li>
-	 *   <li><b>收</b>：{@link #signalFlashTicks} {@code > 0} —— <b>刚刚真的收到</b>了一路信号
-	 *       （等红石等到通电 / 等信号等到极性吻合），由 {@code ProgramRuntime.tickWait} 在判定成功那一刻
-	 *       调 {@link #flashSignalReceived()} 置上的短脉冲。</li>
+	 *   <li><b>收</b>：{@link #signalFlashTicks} {@code > 0} —— <b>刚刚真的收到</b>了一路<b>无线</b>信号
+	 *       （「收发信号」的**接收**模式等到那一路红石链接频率通电），由 {@code ProgramRuntime.tickWait}
+	 *       在判定成功那一刻调 {@link #flashSignalReceived()} 置上的短脉冲。
+	 *       ⚠️ <b>「等红石」不算</b>（用户口径：「这个只与无线信号有关，与接收红石信号无关」）——
+	 *       它等的是相邻方块的红石电，`tickWait` 的成功分支里已经按 `op == SIGNAL && isSignalReceive()`
+	 *       把它挡在 {@code flashSignalReceived()} 之外了；别在这里"顺手"加回来。</li>
 	 * </ol>
 	 *
 	 * <p><b>本轮被推翻的两条旧判据（用户原话：「接收信号发光的时候<b>必须成功接收</b>信号才发光，
@@ -1435,8 +1438,13 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	}
 
 	/**
-	 * <b>真的收到一路信号</b>的那一刻由 {@code ProgramRuntime} 调用（{@code tickWait} 里极性判定的成功分支）：
+	 * <b>真的收到一路无线信号</b>的那一刻由 {@code ProgramRuntime} 调用（{@code tickWait} 里极性判定的成功分支）：
 	 * 给底座一个看得见的短脉冲（{@link #SIGNAL_FLASH_TICKS}）。
+	 *
+	 * <p>⚠️ <b>调用方只有一处、且带判据</b>：{@code tickWait} 里那一句写成
+	 * {@code if (entry.op == OperationType.SIGNAL && entry.isSignalReceive())} ——
+	 * 用户口径「这个只与无线信号有关，与接收红石信号无关」：「等红石」成功**不调**这里
+	 * （相邻红石的通电不是无线信号）。所以别在别处"补一次"调用，那会把红石电也算成发光。
 	 *
 	 * <p>⚠️ 这里**不推包**：{@link #signalActive} 的翻转检测统一在 {@link #tickSignalActive()} 里做
 	 * （{@code tick()} 每 tick 调它一次），这样"收到即亮"在任何 tick 内都只会有一处口径翻转、一次同步 ——
