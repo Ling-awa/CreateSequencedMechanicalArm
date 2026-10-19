@@ -620,7 +620,7 @@ public class ProgramRuntime {
 			return;
 		}
 		if (callStack.size() >= MAX_CALL_DEPTH) {
-			lastFailure = "调用太深（>" + MAX_CALL_DEPTH + " 层，疑似递归）：" + target;
+			lastFailure = "调用太深（>" + MAX_CALL_DEPTH + " 层）：" + target;
 			applySkip(arm, caller, entry, entry.onTimeout, lastFailure);
 			return;
 		}
@@ -1055,7 +1055,9 @@ public class ProgramRuntime {
 				//   （`BeltDeployerCallbacks:38-63`，`:58-59` 就是这一条的出处）——
 				//   所以上游根本不存在"产物挡住原料"这个问题。
 				if (!anyProcessable(level, arm, entry, handler, applicator))
-					return "这一格没有可加工的原料（没有匹配 deploying / item_application 配方的物品）";
+					// 一句话就够（用户第八十九轮："非必要不解释"——原来那串
+					// "（没有匹配 deploying / item_application 配方的物品）"在护目镜上占了半行）
+					return "目标无法被加工";
 			}
 			default -> {
 			}
@@ -1596,7 +1598,7 @@ public class ProgramRuntime {
 		RecipeHolder<? extends Recipe<?>> recipe = DeployRecipes.find(level, processed, applicator);
 		if (recipe == null) {
 			returnToCarrier(arm, handler, processed); // 没配方就把物品放回去，别吞掉
-			handleFailure(arm, task, entry, "没有匹配的 deploying / item_application 配方");
+			handleFailure(arm, task, entry, "目标无法被加工");
 			return;
 		}
 
@@ -1680,7 +1682,7 @@ public class ProgramRuntime {
 			});
 		if (!handled[0]) {
 			// 前置检查刚放行的物品在这几 tick 里被别的机器加工/拿走了 ⇒ 按"没配方"重试（不是停机）
-			handleFailure(arm, task, entry, "没有匹配的 deploying / item_application 配方");
+			handleFailure(arm, task, entry, "目标无法被加工");
 			return;
 		}
 		finishDeploy(arm, task, entry, level, recipeRef[0], processedRef[0]);
@@ -1852,7 +1854,7 @@ public class ProgramRuntime {
 			// ⚠️ 也不用 `arm.getMovingHandler()`：臂不为过滤动身，那个缓存指的是**别的**条目那一格。
 			IItemHandler handler = arm.peekContainerHandler(offset);
 			if (handler == null) {
-				handleFailure(arm, task, entry, "过滤：目标不是容器（没有物品能力）");
+				handleFailure(arm, task, entry, "过滤：目标不是容器");
 				return;
 			}
 			int slot = firstNonEmptySlot(handler);
@@ -2187,7 +2189,7 @@ public class ProgramRuntime {
 					arm.markProgramDirty();
 					return;
 				}
-				halt(arm, "跳转序号超范围：" + oneBased + "（本任务共 " + task.entries.size() + " 条，序号从 1 数）");
+				halt(arm, "跳转序号超范围：" + oneBased + "（共 " + task.entries.size() + " 条）");
 				return;
 			} catch (NumberFormatException ignored) {
 				// 不是序号，按任务名找

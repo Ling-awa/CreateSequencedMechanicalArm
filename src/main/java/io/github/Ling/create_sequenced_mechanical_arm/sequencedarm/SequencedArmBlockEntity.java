@@ -1174,11 +1174,11 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		// 保持中的信号（§7.16e：信号是持久变量，玩家得看得见"这条臂现在还按着几路"）。
 		// 只有真的在保持时才多画一行；**超上限被拒的那次也要看得见**（用户：不许静默丢）。
 		if (heldSignalCount() > 0 || armLinkRejectedLastTick > 0) {
-			goggleLine().text("Signals: " + heldSignalCount() + " / " + maxHeldSignals())
+			goggleLine().translate("gui.arm.signals", heldSignalCount(), maxHeldSignals())
 				.style(ChatFormatting.DARK_GRAY)
 				.forGoggles(tooltip, 1);
 			if (armLinkRejectedLastTick > 0)
-				goggleLine().text("Signal rejected (limit " + maxHeldSignals() + ")")
+				goggleLine().translate("gui.arm.signal_rejected", maxHeldSignals())
 					.style(ChatFormatting.RED)
 					.forGoggles(tooltip, 2);
 		}

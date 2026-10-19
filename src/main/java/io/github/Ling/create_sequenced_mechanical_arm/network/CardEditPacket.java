@@ -119,6 +119,20 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 	}
 
 	/**
+	 * 录入时自动建的那个任务叫什么是<b>语言相关</b>的（用户："en_us 下录入模式自动生成的任务名仍是主任务"）。
+	 *
+	 * <p>为什么不能写成 {@code Component.translatable(...).getString()}：任务名是<b>数据</b>
+	 * ——它写进卡上的 NBT、进脚本文本、被 {@code call} / 跳转按名字引用，只在"建它的那一刻"定一次。
+	 * 而服务端的 {@code Language} 永远是 en_us（语言文件在客户端选），翻译组件在这里只会拿到英文，
+	 * 中文玩家反而看到 "Main task"。所以按 {@link ServerPlayer#getLanguage()}（客户端同步上来的语言码）
+	 * 二选一，名字与玩家此刻的界面语言一致。之后改语言也不会变 —— 那是玩家自己的数据，可以自己改。
+	 */
+	private static String defaultMainTaskName(ServerPlayer player) {
+		String lang = player == null ? "" : player.getLanguage();
+		return lang != null && lang.startsWith("zh") ? "主任务" : "Main task";
+	}
+
+	/**
 	 * 录一条到"正在编辑的那个任务"，并把副手清单的**下一行**写成它的备注（PLAN.md §5.5）。
 	 *
 	 * <p>抽成 public static 是为了让**启动自检**能直接跑这条路径（与 {@code ArmProgramEditPacket.applyTo}
@@ -142,7 +156,7 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		// （主任务**恒为无限循环**是模型语义，不再需要写任何循环字段）
 		if (program.tasks.isEmpty()) {
 			ArmProgramTask created = new ArmProgramTask();
-			created.name = "主任务";
+			created.name = defaultMainTaskName(player);
 			program.tasks.add(created);
 		}
 		// §5.1 v5：录进"正在编辑的那个任务"（不再是永远录到最后一条）——

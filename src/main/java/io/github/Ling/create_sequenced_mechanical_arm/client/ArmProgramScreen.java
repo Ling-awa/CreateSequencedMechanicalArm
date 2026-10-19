@@ -512,6 +512,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 上一次命中的热区名字（只给自检用 —— 点击热区是手算的，必须能被自动验证）。 */
 	private String lastHit = "";
 
+	/** 底栏那颗"切页"按钮（留着引用是为了每帧/换任务后刷新它的悬停提示，见 refreshPageButtonTip）。 */
+	@Nullable
+	private IconButton pageButton;
+
 	/**
 	 * 坐标框的**红字警示颜色**（原版聊天框里"命令出错"那种红 = {@code ChatFormatting.RED} 的 ARGB）。
 	 *
@@ -741,7 +745,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 底部三个按钮（位置照样板：21 / 45 / 63，确认键右下）
 		IconButton switchPage = new IconButton(leftPos + 21, topPos + 196, AllIcons.I_VIEW_SCHEDULE);
 		switchPage.withCallback(this::togglePage);
-		switchPage.setToolTip(page == Page.ENTRIES ? tr("btn.task_list") : tr("btn.enter_task"));
+		// 标题栏从"任务 N · 名字的操作"改成固定的「操作列表」之后（用户第八十九轮：标题不该动态），
+		// "我正在哪个任务里"就挂在**这颗按钮的悬停提示**上 —— 提示是问答式的，不是标题，随状态变没关系，
+		// 而且它每帧刷新（{@link #refreshPageButtonTip}），Alt+滚轮换任务后不会留旧名字。
+		pageButton = switchPage;
+		refreshPageButtonTip();
 		addRenderableWidget(switchPage);
 
 		IconButton undo = new IconButton(leftPos + 45, topPos + 196, AllIcons.I_REFRESH);
@@ -1038,6 +1046,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return;
 		currentTask = Mth.clamp(index, 0, program.tasks.size() - 1);
 		pushTaskSelection();
+		refreshPageButtonTip(); // 换任务后那颗按钮的提示要跟着换（标题栏已经不再报任务名了）
 	}
 
 	/**
@@ -1051,19 +1060,38 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		PacketDistributor.sendToServer(new CardUiPacket(CardUiPacket.EDIT, currentTask));
 	}
 
+	/**
+	 * 标题栏文字：**只看当前是哪一页**。
+	 *
+	 * <p>抽成方法是为了让自检（{@link #headingProblem()}）能在不渲染的情况下断言它
+	 * "打开编辑器 / 换属性 / 开弹窗时都不变" —— 那正是用户第八十九轮点名的那条。
+	 */
+	private Component headingText() {
+		return page == Page.TASKS ? tr("title_tasks") : tr("title_entries");
+	}
+
+	/** 那颗"切页"按钮的悬停提示（操作页上顺带报"现在是哪个任务" —— 标题栏不再报它了）。 */
+	private void refreshPageButtonTip() {
+		if (pageButton == null)
+			return;
+		if (page != Page.ENTRIES) {
+			pageButton.setToolTip(tr("btn.enter_task"));
+			return;
+		}
+		ArmProgramTask current = task(currentTask);
+		pageButton.setToolTip(current == null ? tr("btn.task_list") : tr("btn.task_list.current", current.name));
+	}
+
 	@Override
 	protected void renderBg(GuiGraphics graphics, float partialTick, int mouseX, int mouseY) {
 		ModGuiTextures.EDITOR_PANEL.render(graphics, leftPos, topPos);
-		ArmProgramTask current = task(currentTask);
-		Component heading;
-		if (editingDialog != null)
-			heading = editingDialog == Dialog.ORIGIN ? tr("title.origin") : tr("title.shift");
-		else if (editing != null)
-			heading = tr("title_editing", editingProp == null ? tr("edit.op") : editingProp.name);
-		else if (page == Page.TASKS)
-			heading = tr("title_tasks", program.tasks.size());
-		else
-			heading = tr("title_entries", currentTask + 1, current == null ? "?" : current.name);
+		// ★ 标题栏只回答"这是哪一页"，**不随编辑状态 / 属性名 / 任务名 / 条数变**。
+		//   用户第八十九轮：「这里上面的标题完全不需要动态变化，只需要显示『编辑属性』『编辑操作』这种文本
+		//   即可」+「图七的界面的标题会因为其他界面改变，这个也不应该有」。原来它按
+		//   editingDialog / editing / page 三个状态拼四种句子，于是"打开子面板标题就换了一套说法"。
+		//   因此：编辑界面里的固定标题写进**面板自己那一行**（见 renderEditor / renderDialog 的 header），
+		//   标题栏一律只写当前页的名字。
+		Component heading = headingText();
 		int center = leftPos + (ModGuiTextures.EDITOR_PANEL.getWidth() - 8) / 2;
 		graphics.drawString(font, heading, center - font.width(heading) / 2, topPos + 4, 0x505050, false);
 
@@ -2718,18 +2746,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 面板一旦抬高就会把它自己的控件盖住 —— 实测现象是"选择框里没有文字、完成/取消键看不见"。
 	 * 我们编辑时不画卡片列表（不需要盖住谁），所以面板留 z=0，控件自然在它上面。
 	 */
+	/**
+	 * 编辑子面板顶上那一行：**三个固定词**之一 —— 编辑任务 / 编辑操作 / 编辑属性。
+	 *
+	 * <p>不是"正在编辑的属性叫什么"（那是属性选择框自己该显示的东西），更不是一句操作说明。
+	 * 用户第八十九轮：「标题完全不需要动态变化，只需要显示『编辑属性』『编辑操作』这种文本即可」
+	 * —— 原来这里编辑属性时写属性名、编辑动作时写「滚轮选动作；图标槽放物品可自定义图标」，
+	 * 后者在 en_us 下比整个面板还宽（"图六：英文说明过长超出屏幕"）。
+	 */
+	private Component editorHeaderText() {
+		return editing.task ? tr("title_edit_task")
+			: editing.propName() == null ? tr("title_edit_op") : tr("title_edit_prop");
+	}
+
 	private void renderEditor(GuiGraphics graphics) {
 		graphics.fillGradient(0, 0, width, height, -1072689136, -804253680);
 		ModGuiTextures.EDITOR_BODY.render(graphics, leftPos - 2, topPos + 40);
 		AllGuiTextures.PLAYER_INVENTORY.render(graphics, leftPos + 38, topPos + 122);
 		graphics.drawString(font, playerInventoryTitle, leftPos + 46, topPos + 128, 0x505050, false);
-		boolean header = editing == null || editing.propName() == null;
 		// 幽灵槽数量在 init() 里就算好了（updateTargetSlots）—— 那是"布局"信息，不该靠渲染来设：
 		// 原来是写在 renderEditor 里的，于是**没渲染过的那一帧之前**槽位状态是过期的
 		// （自检直接在 init 之后断言就抓到了：应为 2 实际 1）。
-		// 面板顶上的那行字：编辑属性时就是属性名（上游也是"指令编辑器 / 条件编辑器"这样标），
-		// 所以第一行的框里放的都是"值"，不会让人猜自己在改什么。
-		Component hint = editingProp != null ? editingProp.name : header ? tr("editor.hint_op") : tr("editor.hint");
+		// 面板顶上那一行 = **固定**的"在编辑什么"（编辑任务 / 编辑操作 / 编辑属性），
+		// 不是一句操作说明（用户第八十九轮："图六编辑器标题上方的英文说明过长超出屏幕"——
+		// 那行原来是 `editor.hint_op` 那句整句，英文比面板宽，直接画到屏幕外面去了）。
+		Component hint = editorHeaderText();
 		int center = leftPos + (ModGuiTextures.EDITOR_PANEL.getWidth() - 8) / 2;
 		graphics.drawString(font, hint, center - font.width(hint) / 2, topPos + 44, 0x505050, false);
 
@@ -4157,6 +4198,80 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * 自检：**标题不随状态变**（用户第八十九轮两条口径）。
+	 *
+	 * <p>① 标题栏只写页面名 —— 打开动作编辑器 / 属性编辑器 / 原点弹窗，它都必须是同一个词。
+	 * 原来它按 {@code editingDialog / editing / page} 拼四种句子，于是"打开子面板标题就换了一套说法"；
+	 * ② 编辑子面板顶上那行必须是**三个固定词**之一，且**放得进面板**（图六那条"英文说明过长超出屏幕"
+	 * 就是这行原来是一整句 {@code editor.hint_op}，en_us 下比面板还宽 —— 文字不裁剪，直接画到屏幕外）。
+	 *
+	 * <p>反证：把 {@code headingText()} 改回 {@code editing != null ? tr("title_edit_op") : …} ⇒ ① 红；
+	 * 把 {@code editorHeaderText()} 的返回改回 {@code tr("editor.hint_op")}（那句被删掉的整句，
+	 * 换成等长的字面量）⇒ ② 红。
+	 */
+	private String headingProblem(Minecraft mc) {
+		Page savedPage = page;
+		EditTarget savedEditing = editing;
+		Prop savedProp = editingProp;
+		Dialog savedDialog = editingDialog;
+		try {
+			page = Page.ENTRIES;
+			editing = null;
+			editingProp = null;
+			editingDialog = null;
+			String base = headingText().getString();
+			if (!base.equals(tr("title_entries").getString()))
+				return "操作页的标题栏不是「操作列表」的译文：" + base;
+			// ① 四种状态各变一次，标题栏必须一个字都不变
+			editing = new EditTarget(false, 0, 0, null);
+			String op = headingText().getString();
+			editing = new EditTarget(false, 0, 0, "个数");
+			String prop = headingText().getString();
+			editing = new EditTarget(true, 0, -1, null);
+			String task = headingText().getString();
+			editingDialog = Dialog.ORIGIN;
+			String dialog = headingText().getString();
+			if (!base.equals(op) || !base.equals(prop) || !base.equals(task) || !base.equals(dialog))
+				return "标题栏随编辑状态变了（操作页=" + base + " 编辑操作=" + op + " 编辑属性=" + prop
+					+ " 编辑任务=" + task + " 弹窗=" + dialog + "）—— 它只该写页面名";
+			// ② 子面板顶上那行 = 三个固定词，且宽度放得进面板
+			int limit = ModGuiTextures.EDITOR_PANEL.getWidth() - 8;
+			editingDialog = null;
+			editing = new EditTarget(false, 0, 0, null);
+			String opHead = editorHeaderText().getString();
+			editing = new EditTarget(false, 0, 0, "个数");
+			String propHead = editorHeaderText().getString();
+			editing = new EditTarget(true, 0, -1, null);
+			String taskHead = editorHeaderText().getString();
+			if (!opHead.equals(tr("title_edit_op").getString()))
+				return "编辑动作时面板顶上那行不是「编辑操作」：" + opHead;
+			if (!propHead.equals(tr("title_edit_prop").getString()))
+				return "编辑属性时面板顶上那行不是「编辑属性」：" + propHead;
+			if (!taskHead.equals(tr("title_edit_task").getString()))
+				return "编辑任务时面板顶上那行不是「编辑任务」：" + taskHead;
+			for (String head : new String[] { opHead, propHead, taskHead }) {
+				int w = mc.font.width(head);
+				if (w > limit)
+					return "面板顶上那行放不进面板（" + w + " > " + limit + "）：" + head;
+			}
+			page = Page.TASKS;
+			if (!headingText().getString().equals(tr("title_tasks").getString()))
+				return "任务页的标题栏不是「任务列表」的译文：" + headingText().getString();
+			// ③ 标题栏不再报任务名以后，"我在哪个任务里"挂在切页按钮的悬停提示上 ——
+			//   那条新提示也必须有译文（缺键的表现是悬停里显示裸 key，编译与运行都不报错）。
+			String tip = tr("btn.task_list.current", "probe").getString();
+			if (tip.contains("create_sequenced_mechanical_arm"))
+				return "切页按钮的悬停提示缺译文（显示成裸 key：" + tip + "）";
+			return null;
+		} finally {
+			page = savedPage;
+			editing = savedEditing;
+			editingProp = savedProp;
+			editingDialog = savedDialog;
+		}
+	}
+
+	/**
 	 * 自检：**没设原点时新条目的默认偏移必须是 {@code 0,0,0}**，设了原点才是"看向的方块 − 原点"
 	 * （用户 2026-10-19 报的残留 bug：没原点时默认偏移直接变成玩家所在的世界坐标）。
 	 *
@@ -4392,6 +4507,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String coordsRange = screen.coordsRangeProblem(mc);
 			if (coordsRange != null && problem == null)
 				problem = "坐标超范围提示: " + coordsRange;
+			// ★ 标题不随状态变（用户第八十九轮）：标题栏只写页面名，子面板顶上只写固定三个词
+			String heading = screen.headingProblem(mc);
+			if (heading != null && problem == null)
+				problem = "标题: " + heading;
 			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
 			String exitRow = screen.exitRowProblem();
 			if (exitRow != null && problem == null)
