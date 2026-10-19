@@ -779,14 +779,13 @@ public class SequencedArmSelfTest {
 		TakeProbe funnel = takeFailureAt(level, armPos, targetPos, stateOf("create:brass_funnel"));
 		// "跑起来了"与"结论是什么"必须分开判：以前 `packager != null && !contains("只进不出")` 会把
 		// "异常 …" / "方块实体没建出来" 这类**没跑起来**的结果当成通过（因为那些字符串里也没有"只进不出"）。
-		boolean packagerOk = packager.ran()
-			&& (packager.message() == null || !packager.message()
-				.contains("只进不出"));
-		boolean funnelBlocked = funnel.ran() && funnel.message() != null && funnel.message()
-			.contains("只进不出");
+		// ⚠️ 判据是**翻译键**（不是中文子串）：失败文案按玩家语言显示，服务端解析出来是英文
+		//   （见 ProgramRuntime.FailText / getLastFailureKey）。
+		boolean packagerOk = packager.ran() && !"deposit_only".equals(packager.key());
+		boolean funnelBlocked = funnel.ran() && "deposit_only".equals(funnel.key());
 
-		LOGGER.info("[selftest] 「取出」端到端: 打包机→「{}」(跑起来了={}) 漏斗→「{}」(跑起来了={})", text(packager.message()),
-			packager.ran(), text(funnel.message()), funnel.ran());
+		LOGGER.info("[selftest] 「取出」端到端: 打包机→「{}」(键={} 跑起来了={}) 漏斗→「{}」(键={} 跑起来了={})",
+			text(packager.message()), packager.key(), packager.ran(), text(funnel.message()), funnel.key(), funnel.ran());
 		if (!packager.ran())
 			LOGGER.error("[selftest] 打包机那条端到端自检**没跑起来**（{}）—— 等于没测", packager.message());
 		else if (!packagerOk)
@@ -802,14 +801,19 @@ public class SequencedArmSelfTest {
 		return message == null ? "无失败（前置检查放行）" : message;
 	}
 
-	/** 一次「取出」探针的结果：{@code ran} = 臂与程序真的跑起来了（"失败原因"与"压根没跑起来"必须分开）。 */
-	private record TakeProbe(@Nullable String message, boolean ran) {
+	/**
+	 * 一次「取出」探针的结果：{@code ran} = 臂与程序真的跑起来了（"失败原因"与"压根没跑起来"必须分开）。
+	 *
+	 * @param message 服务端解析出来的那句失败文案（{@code null} = 前置检查放行了）
+	 * @param key     那句话的翻译键后缀（{@code null} = 没有失败 / 不可翻译）—— 断言只认它
+	 */
+	private record TakeProbe(@Nullable String message, @Nullable String key, boolean ran) {
 	}
 
 	/** 在 {@code armPos} 放一条臂、在 {@code targetPos} 放目标方块，跑一 tick 一份「取出 2,0,0」的程序，读回失败原因。 */
 	private static TakeProbe takeFailureAt(ServerLevel level, BlockPos armPos, BlockPos targetPos, @Nullable BlockState state) {
 		if (state == null)
-			return new TakeProbe(null, false);
+			return new TakeProbe(null, null, false);
 		BlockState oldArm = level.getBlockState(armPos);
 		BlockState oldTarget = level.getBlockState(targetPos);
 		try {
@@ -817,7 +821,7 @@ public class SequencedArmSelfTest {
 				.defaultBlockState());
 			level.setBlockAndUpdate(targetPos, state);
 			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm))
-				return new TakeProbe("臂的方块实体没建出来", false);
+				return new TakeProbe("臂的方块实体没建出来", null, false);
 			arm.setSpeed(32); // 解释器在转速为 0 时整 tick 跳过（与原版一致）
 			ArmProgram program = new ArmProgram();
 			ArmProgramTask task = new ArmProgramTask();
@@ -829,9 +833,9 @@ public class SequencedArmSelfTest {
 			program.tasks.add(task);
 			arm.setProgram(program);
 			arm.runtime.tick(arm);
-			return new TakeProbe(arm.runtime.getLastFailure(), true);
+			return new TakeProbe(arm.runtime.getLastFailure(), arm.runtime.getLastFailureKey(), true);
 		} catch (Throwable t) {
-			return new TakeProbe("异常 " + t, false);
+			return new TakeProbe("异常 " + t, null, false);
 		} finally {
 			level.setBlockAndUpdate(targetPos, oldTarget);
 			level.setBlockAndUpdate(armPos, oldArm);
@@ -1627,9 +1631,11 @@ public class SequencedArmSelfTest {
 			// 反证：把 EXACT 的"凑不出就失败"删掉（退化成有多少拿多少）⇒ 容器剩 0、臂里 1。
 			clearArm(arm);
 			runCountEntry(arm, takeShortSrc, OperationType.TAKE, 3, ArmProgramEntry.CountMode.EXACT, () -> false, 80);
+			// ⚠️ 判据是**翻译键**（不是中文子串）：失败文案现在按玩家语言显示，
+			//   服务端 getLastFailure() 拿到的是英文，拿中文去比会随语言而红（见 getLastFailureKey）。
 			String takeShortFailure = arm.runtime.getLastFailure();
 			takeExactShort = countIn(level, takeShortSrc) == 1 && armItems(arm) == 0
-				&& takeShortFailure != null && takeShortFailure.contains("数量不足");
+				&& "count_short".equals(arm.runtime.getLastFailureKey());
 
 			// ——— ④ 放入 · 小于等于：手上 5 个、count=3 ⇒ 目标 +3、臂里剩 2 ———
 			// 反证：把 deposit() 的 ATMOST 分支改回"整摞都塞"（`held` 而不是 `copyWithCount(amount)`）⇒ 目标 5、臂里 0；
@@ -1656,7 +1662,7 @@ public class SequencedArmSelfTest {
 			runCountEntry(arm, depShortSink, OperationType.DEPOSIT, 3, ArmProgramEntry.CountMode.EXACT, () -> false, 80);
 			String depShortFailure = arm.runtime.getLastFailure();
 			depositExactShort = countIn(level, depShortSink) == 0 && arm.getHeldItem()
-				.getCount() == 2 && depShortFailure != null && depShortFailure.contains("手上不足");
+				.getCount() == 2 && "hand_short".equals(arm.runtime.getLastFailureKey());
 
 			detail = "源1余=" + countIn(level, takeAtMostSrc) + " 源2余=" + countIn(level, takeExactSrc) + " 源3余="
 				+ countIn(level, takeShortSrc) + " 目标1=" + countIn(level, depAtMostSink) + " 目标2="
@@ -3334,7 +3340,7 @@ public class SequencedArmSelfTest {
 				error = "臂的方块实体没建出来（早退守卫）";
 			} else {
 				// 停机态 + 真走 runtime.tick()（主循环）：脉冲必须照常走完
-				arm.runtime.halt(arm, "自检：停机态脉冲");
+				arm.runtime.halt(arm, ProgramRuntime.FailText.literal("自检：停机态脉冲"));
 				arm.emitSignal(f1, 15, 2);
 				boolean duringPulse = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
 				arm.runtime.tick(arm);
@@ -3358,7 +3364,7 @@ public class SequencedArmSelfTest {
 				multiHold = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
 					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2)
 					&& arm.heldSignalCount() == 2;
-				arm.runtime.halt(arm, "自检");
+				arm.runtime.halt(arm, ProgramRuntime.FailText.literal("自检"));
 				offAfterHalt = Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1)
 					&& Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f2);
 				removedFromNetwork = arm.getArmLinkLevel() == 15;
@@ -5373,7 +5379,7 @@ public class SequencedArmSelfTest {
 				runStashEntry(arm, 3, ArmProgramEntry.CountMode.EXACT, () -> false, 80);
 				String shortFailure = arm.runtime.getLastFailure();
 				exactShortFails = overflowItems(arm) == 0 && arm.getHeldItem()
-					.getCount() == 2 && shortFailure != null && shortFailure.contains("数量不足");
+					.getCount() == 2 && "count_short".equals(arm.runtime.getLastFailureKey());
 				// ③ 手上 5 个、count=3 等于 ⇒ 溢出 +3、手上剩 2
 				clearArm(arm);
 				arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 5));
@@ -5391,12 +5397,12 @@ public class SequencedArmSelfTest {
 				runStashEntry(arm, 3, ArmProgramEntry.CountMode.ATMOST, () -> false, 80);
 				String fullFailure = arm.runtime.getLastFailure();
 				fullFails = arm.getHeldItem()
-					.getCount() == 5 && fullFailure != null && fullFailure.contains("溢出库存已满");
+					.getCount() == 5 && "overflow_full".equals(arm.runtime.getLastFailureKey());
 				// ⑤ 空手 ⇒ 失败
 				clearArm(arm);
 				runStashEntry(arm, 3, ArmProgramEntry.CountMode.ATMOST, () -> false, 80);
 				String emptyFailure = arm.runtime.getLastFailure();
-				emptyHandFails = overflowItems(arm) == 0 && emptyFailure != null && emptyFailure.contains("手上没有物品");
+				emptyHandFails = overflowItems(arm) == 0 && "hand_empty".equals(arm.runtime.getLastFailureKey());
 				// ⑥ 卡片第一行「收存 最多 64 个」：服务端读不到客户端译文（那是 assets 资源），
 				//   所以断的是**送给客户端渲染的那两样东西**：键（chip.count_atmost ⇒ 客户端写「最多」）
 				//   + 参数（defaultCount(STASH) = 64）。两件合起来与"含「最多 64 个」"等价，且与语言无关。
@@ -5843,11 +5849,13 @@ public class SequencedArmSelfTest {
 				String firstPin = posText(arm.runtime.pinOffset(arm));
 
 				// ——— ⑥ 存读不丢：把带偏移的调用栈存下、读回，生效偏移不变 ———
-				CompoundTag stackTag = arm.runtime.save();
+				// ⚠️ save/load 现在要 registries：停机原因那类文案按**组件 JSON** 存
+				//   （护目镜要按玩家语言显示，见 ProgramRuntime.FailText）。
+				CompoundTag stackTag = arm.runtime.save(server.registryAccess());
 				ProgramRuntime restored = new ProgramRuntime();
-				restored.load(stackTag);
+				restored.load(stackTag, server.registryAccess());
 				nbtKeeps = restored.effectiveCallShift()
-					.equals(delta) && restored.save()
+					.equals(delta) && restored.save(server.registryAccess())
 						.equals(stackTag);
 
 				// ——— ③ 返回后调用方不受影响 ———
@@ -6072,8 +6080,7 @@ public class SequencedArmSelfTest {
 		boolean sawSuccessHint = false;
 		for (int i = 0; i < 200 && !arm.runtime.isHalted(); i++) {
 			arm.runtime.tick(arm);
-			String failure = arm.runtime.getLastFailure();
-			if (failure != null && failure.startsWith("成功 → 跳转"))
+			if ("ok_jump".equals(arm.runtime.getLastFailureKey()))
 				sawSuccessHint = true;
 		}
 		String error = arm.runtime.getError();
@@ -6142,8 +6149,7 @@ public class SequencedArmSelfTest {
 			sampleCursor(arm, watchTask, watchEntries, seen, depthAt);
 			arm.runtime.tick(arm);
 			sampleCursor(arm, watchTask, watchEntries, seen, depthAt);
-			String failure = arm.runtime.getLastFailure();
-			if (failure != null && failure.startsWith("成功 → 跳转"))
+			if ("ok_jump".equals(arm.runtime.getLastFailureKey()))
 				sawSuccessHint = true;
 		}
 		String error = arm.runtime.getError();
@@ -7471,9 +7477,8 @@ public class SequencedArmSelfTest {
 			arm.runtime.tick(arm);
 			if (arm.runtime.isHalted())
 				return arm.runtime.entryIndex == 1 ? 1 : -1;
-			// 成功后跳回自己：`succeed` 会写下"成功 → 跳转 1" 并把游标放回下标 0
-			String failure = arm.runtime.getLastFailure();
-			if (failure != null && failure.startsWith("成功") && arm.runtime.entryIndex == 0)
+			// 成功后跳回自己：`applySuccessExit` 会写下 "ok_jump"（原来的"成功 → 跳转 1"）并把游标放回下标 0
+			if ("ok_jump".equals(arm.runtime.getLastFailureKey()) && arm.runtime.entryIndex == 0)
 				return 0;
 		}
 		return -1;

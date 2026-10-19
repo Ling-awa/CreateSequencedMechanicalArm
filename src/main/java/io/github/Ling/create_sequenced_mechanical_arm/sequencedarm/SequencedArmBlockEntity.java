@@ -1154,11 +1154,13 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			.style(stateColor)
 			.forGoggles(tooltip, 1);
 
-		if (!hud.failure.isEmpty())
-			goggleLine().text(hud.failure)
+		// ⚠️ 两行都是 Component（不是拼好的字符串）：客户端渲染时才解析翻译键 ⇒ 按玩家语言显示
+		//   （见 ArmProgramView 的 failure / error 字段与 ProgramRuntime.FailText）。
+		if (hud.failure != null)
+			goggleLine().translate("gui.arm.fail_line", hud.failure)
 				.style(ChatFormatting.YELLOW)
 				.forGoggles(tooltip, 1);
-		if (!hud.error.isEmpty())
+		if (hud.error != null)
 			goggleLine().translate("gui.arm.error", hud.error)
 				.style(ChatFormatting.RED)
 				.forGoggles(tooltip, 1);
@@ -1963,7 +1965,7 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			// `/sma` 命令、编辑器菜单、蓝图 `transform` 都能在 `setProgram` 之后改模型，
 			// 缓存文本迟早会与程序对不上（那种不一致只在重进世界时才现形）。
 			tag.putString("ProgramText", programTextForSave(registries));
-			tag.put("Runtime", runtime.save());
+			tag.put("Runtime", runtime.save(registries));
 		} else {
 			// 客户端拿不到程序本体（最多 256 条，且每次条目切换都会同步，塞进去会刷爆包），
 			// 所以只发护目镜需要的摘要（含**当前这一条**的完整 NBT —— 见 ArmProgramView.entry）。
@@ -2054,12 +2056,12 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 			// 也不该凭空造一个：臂运行时用的是"臂位置 + 偏移"（§19.7），与原点无关。
 			if (loaded != null) {
 				program.tasks.addAll(loaded.tasks);
-				runtime.load(tag.getCompound("Runtime"));
+				runtime.load(tag.getCompound("Runtime"), registries);
 			} else {
 				// 没有程序 / 文本编译不过：运行时状态必须跟着回到起点。
 				// 只复位 runtime（空标签 = 下标 0、IDLE、空调用栈）而**不**调 onProgramReplaced ——
 				// 后者会 clearTransmissions()，而信号表刚在上面读进来，那会把持久变量误删（§7.16e）。
-				runtime.load(new CompoundTag());
+				runtime.load(new CompoundTag(), registries);
 			}
 			// ★ §7.16e：**加载时自动重新入网** —— 区块卸载时只退了网，字段与 NBT 都还在，
 			// 这一步把"断电 / 脉冲"原样接回世界（否则重新加载的臂看起来"发了但没通电"）。

@@ -8,6 +8,7 @@ import com.simibubi.create.AllKeys;
 import com.simibubi.create.foundation.gui.AllGuiTextures;
 
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmIcons;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import net.minecraft.client.DeltaTracker;
@@ -18,6 +19,7 @@ import net.minecraft.client.gui.LayeredDraw;
 import net.minecraft.client.renderer.entity.ItemRenderer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * 「当前操作」选择条 —— 复刻 Create **部署蓝图**时那一条（{@code ToolSelectionScreen} 的画法 +
@@ -123,11 +125,16 @@ public class OperationSelectionOverlay implements LayeredDraw.Layer {
 		int textAlpha = ((int) (toolTipAlpha * 0xFF)) << 24;
 		if (toolTipAlpha > 0.25f) {
 			RenderSystem.setShaderColor(.7f, .7f, .8f, toolTipAlpha);
-			graphics.blit(gray.location, x - 15, y + 33, gray.getStartX(), gray.getStartY(), w, H + 22, gray.getWidth(),
+			// 三行（用户第八十九轮图五口径）：① 白字 = 这个操作做什么（取出 / 放入带数量关系）
+			// ② 现在这条提示（右键方块录入）③ 灰字 = 只在编辑器里才改得到的那件事。
+			graphics.blit(gray.location, x - 15, y + 33, gray.getStartX(), gray.getStartY(), w, H + 34, gray.getWidth(),
 				gray.getHeight());
 			RenderSystem.setShaderColor(1, 1, 1, 1);
-			graphics.drawString(font, desc(selected()), x - 10, y + 38, 0xEEEEEE + textAlpha, false);
+			graphics.drawString(font, firstLine(selected()), x - 10, y + 38, 0xEEEEEE + textAlpha, false);
 			graphics.drawString(font, tr("hud.op_menu.record"), x - 10, y + 50, 0xCCDDFF + textAlpha, false);
+			Component extra = extraLine(selected());
+			if (extra != null)
+				graphics.drawString(font, extra, x - 10, y + 62, 0x99AACC + textAlpha, false);
 		}
 
 		RenderSystem.setShaderColor(1, 1, 1, 1);
@@ -168,8 +175,33 @@ public class OperationSelectionOverlay implements LayeredDraw.Layer {
 		pose.popPose();
 	}
 
-	private static Component desc(OperationType op) {
-		return tr("hud.op." + key(op));
+	/**
+	 * 第一行（白字）：这个操作做什么。
+	 *
+	 * <p>取出 / 放入 / 收存**要带上数量关系**（用户第八十九轮："对于取出放入，第一行白色文本要附带数量关系"）：
+	 * 录进去的条目按 {@link ArmProgramEntry#fresh} 的默认值走 —— 取出 1、放入 64、收存 64，模式是「最多」，
+	 * 所以这里直接把"最多 N 个"接在描述后面，玩家在录之前就知道这一条会搬多少。
+	 */
+	private static Component firstLine(OperationType op) {
+		Component desc = tr("hud.op." + key(op));
+		if (!op.hasCount())
+			return desc;
+		return desc.copy()
+			.append(tr("hud.op_count_atmost", ArmProgramEntry.defaultCount(op)));
+	}
+
+	/**
+	 * 第三行（灰字）：只在编辑器里才改得到的那件事 —— 数量、潜行开关。
+	 *
+	 * <p>没有额外要说的操作返回 {@code null}（那时候只画两行）。
+	 */
+	@Nullable
+	private static Component extraLine(OperationType op) {
+		if (op.hasCount())
+			return tr("hud.op_extra.count");
+		if (op == OperationType.USE)
+			return tr("hud.op_extra.sneak");
+		return null;
 	}
 
 	private static String key(OperationType op) {
@@ -177,8 +209,8 @@ public class OperationSelectionOverlay implements LayeredDraw.Layer {
 			.toLowerCase(java.util.Locale.ROOT);
 	}
 
-	private static Component tr(String key) {
-		return Component.translatable("create_sequenced_mechanical_arm." + key);
+	private static Component tr(String key, Object... args) {
+		return Component.translatable("create_sequenced_mechanical_arm." + key, args);
 	}
 
 	/**
@@ -209,6 +241,28 @@ public class OperationSelectionOverlay implements LayeredDraw.Layer {
 		cycle(1);
 		if (selection != before || !forward)
 			return "滚轮切换没有正确环绕（before=" + before + " now=" + selection + "）";
+		// 三行说明（用户第八十九轮图五）：① 白字描述（取出/放入带数量）② 现在这条提示 ③ 灰字额外说明。
+		// 缺键的表现是**画出一串裸 key**（编译、运行都不报错），所以按"不许出现 key 前缀"断言。
+		for (OperationType op : ops) {
+			String first = firstLine(op).getString();
+			if (first.contains("create_sequenced_mechanical_arm"))
+				return op + " 的第一行说明缺译文：" + first;
+			if (op.hasCount()) {
+				String suffix = tr("hud.op_count_atmost", ArmProgramEntry.defaultCount(op)).getString();
+				if (suffix.contains("create_sequenced_mechanical_arm") || !first.endsWith(suffix))
+					return op + " 的第一行没带数量关系（要 N 个那条文案）：[" + first + "] 期望以 [" + suffix + "] 结尾";
+				Component extra = extraLine(op);
+				if (extra == null || extra.getString()
+					.contains("create_sequenced_mechanical_arm"))
+					return op + " 缺第三行「在编辑模式中编辑数量」";
+			}
+		}
+		Component sneakExtra = extraLine(OperationType.USE);
+		if (sneakExtra == null || sneakExtra.getString()
+			.contains("create_sequenced_mechanical_arm"))
+			return "「使用」缺第三行「在编辑模式中启用潜行」";
+		if (extraLine(OperationType.MINE) != null)
+			return "「挖掘」不该有第三行说明";
 		return "OK(" + ops.size() + "项, 其中方块模型=" + blockModels + "个需要3D光照)";
 	}
 

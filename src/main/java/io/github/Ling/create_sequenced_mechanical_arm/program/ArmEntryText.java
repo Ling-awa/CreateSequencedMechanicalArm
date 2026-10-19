@@ -60,7 +60,12 @@ public final class ArmEntryText {
 		return base(entry, true);
 	}
 
+	/** 「操作名 + 参数」拼成卡片第一行（{@link #entryName} + {@link #suffix}，两半各自也对外）。 */
 	private static Component base(ArmProgramEntry entry, boolean withFrequencyItems) {
+		return tr("chip.entry", entryName(entry), suffix(entry, withFrequencyItems));
+	}
+
+	private static String suffix(ArmProgramEntry entry, boolean withFrequencyItems) {
 		StringBuilder suffix = new StringBuilder();
 		switch (entry.op) {
 			case WAIT -> suffix.append(" ")
@@ -158,17 +163,30 @@ public final class ArmEntryText {
 		if (faceMeaningful)
 			suffix.append(" ")
 				.append(tr("opt." + entry.face.getName()).getString());
-		// 「收发信号」的**操作名**就是随模式变的短语（接收信号 / 发送信号 / 中断信号）——
-		// 与卡片标题芯片同一个方法（决策 43），别写成两份。
-		// ★ 「使用」这一条的名字**随潜行开关变**（用户本轮口径：一个操作 + 一个开关，但卡片要读得出差别）：
-		//   正常 → {@code opt.use}（「右键」/ Right-click）、潜行 → {@code opt.use_sneak}（「潜行右键」）。
-		//   ⚠️ {@code opt.use_sneak} 这个键**保留但改值**：它不再是枚举派生键（枚举里没有 USE_SNEAK 了），
-		//   只由这一处手动查 —— 所以**不要**把它加进 {@code ArmProgramScreen} 那个死键守卫的 dead[]。
-		//   判据只问 {@link ArmProgramEntry#isSneakUse()}（= USE 且 sneaking），别在这里再写一遍。
-		//   反证：把这一支删掉（一律走 opName）⇒ 自检"潜行那条的第一行要以 opt.use_sneak 开头"立刻红。
-		Component name = entry.op == OperationType.SIGNAL ? signalHeadText(entry)
+		return suffix.toString();
+	}
+
+	/**
+	 * 这一条操作的<b>名字</b>（金色那半行）：随模式变的信号短语 / 使用与潜行使用 / 普通操作名。
+	 *
+	 * <p>抽出来是给卡片悬停提示用的（用户第八十九轮图七：一行放不下时，悬停要按
+	 * 「金色操作名 + 白色参数 + 逐行属性 + 备注」重新排版）—— 那一行必须和卡片上**同一个来源**，
+	 * 否则又是一处"两边说法不一致"。
+	 */
+	public static Component entryName(ArmProgramEntry entry) {
+		return entry.op == OperationType.SIGNAL ? signalHeadText(entry)
 			: entry.isSneakUse() ? tr("opt.use_sneak") : opName(entry.op);
-		return tr("chip.entry", name, suffix.toString());
+	}
+
+	/**
+	 * 这一条操作的<b>参数</b>（白色那半行，见 {@link #entryName}）：个数 / 坐标 / 朝向 / 时长 / 频率…
+	 *
+	 * <p>与卡片第一行**同一份**拼接逻辑（{@link #base} 就是 `名字 + 这个`）。返回 String 是因为
+	 * 这段拼接本来就全是已解析的纯文本（见上面那一串 `getString()`）。
+	 */
+	public static String paramsText(ArmProgramEntry entry) {
+		return suffix(entry, false)
+			.trim();
 	}
 
 	/**

@@ -30,10 +30,12 @@ import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmB
 import com.simibubi.create.foundation.recipe.RecipeApplier;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
@@ -72,6 +74,36 @@ import net.neoforged.neoforge.items.ItemHandlerHelper;
  * </ul>
  */
 public class ProgramRuntime {
+
+	/** 失败 / 错误文案的翻译键前缀（{@link FailText#of} 只写后缀，自检也按它把后缀拼成键）。 */
+	public static final String FAIL_PREFIX = "create_sequenced_mechanical_arm.gui.fail.";
+
+	/**
+	 * 一条运行期失败 / 错误文案：<b>护目镜按玩家语言显示</b>（客户端解析翻译键），
+	 * 运行日志与 /sma 用服务端解析出来的文本。
+	 *
+	 * <p>为什么不能只留一个 String：这几句原来全是中文字面量，护目镜上是<b>写死的中文</b>
+	 * （用户口径："护目镜上的报错也要跟着玩家语言走"）。而运行日志 / /sma 是服务端的东西、
+	 * 拿不到玩家语言 ⇒ 同一份文案得装两种形态：能翻译的（{@code key} + 参数）走 Component，
+	 * 没法翻译的（Create 自己给的英文原因、玩家自己写的抛错文本）走字面量（{@code key == null}）。
+	 *
+	 * <p>⚠️ 服务端 {@code Component#getString()} 是安全的（NeoForge 会把模组的 en_us 装进服务端的
+	 * Language，实测解析得出英文），所以日志那一侧照旧拿字符串，不需要另存一份。
+	 *
+	 * @param text 要么是可翻译的一条（发给客户端由它解析），要么是字面量
+	 * @param key  {@code null} = 不可翻译；否则是 {@link #FAIL_PREFIX} 之后的那个后缀
+	 */
+	public record FailText(Component text, @Nullable String key) {
+		/** 可翻译的一条（key 不带前缀，前缀见 {@link #FAIL_PREFIX}）。 */
+		public static FailText of(String key, Object... args) {
+			return new FailText(Component.translatable(FAIL_PREFIX + key, args), key);
+		}
+
+		/** 不可翻译的一条（Create 自己给的英文原因、玩家自己写的抛错文本）。 */
+		public static FailText literal(String text) {
+			return new FailText(Component.literal(text), null);
+		}
+	}
 
 	/**
 	 * 「空转」守卫：连续多少**条**没跟世界打交道就绕回来了。
@@ -310,9 +342,9 @@ public class ProgramRuntime {
 	/** 本 tick 已经走过的**状态机步数**（每次循环迭代 +1，见 {@link #tick}）—— 只服务硬上限 {@link #maxStepsPerTick()}；速率预算另记在 {@link #rateBudget}。 */
 	private int tickBudgetUsed;
 	@Nullable
-	private String lastFailure;
+	private FailText lastFailure;
 	@Nullable
-	private String error;
+	private FailText error;
 	private int errorEntryIndex = -1;
 	/**
 	 * 频率判定的去抖缓存（照抄 Create 时刻表条件的 {@code globalPowerVersion} 手法）。
@@ -350,14 +382,51 @@ public class ProgramRuntime {
 		return arm.tickArmLink();
 	}
 
+	/**
+	 * 停机原因（<b>服务端解析出来的文本</b>：运行日志与 /sma 读的就是这一份）。
+	 *
+	 * <p>护目镜要走 {@link #getErrorText()} —— 那一份是 Component，客户端会按玩家语言解析。
+	 */
 	@Nullable
 	public String getError() {
-		return error;
+		return error == null ? null : error.text()
+			.getString();
 	}
 
+	/** 停机原因那条文案本身（{@code null} = 没停机）—— 给护目镜摘要用。 */
+	@Nullable
+	public Component getErrorText() {
+		return error == null ? null : error.text();
+	}
+
+	/** 停机原因的翻译键后缀（{@code null} = 不可翻译 / 玩家自己写的字面量）。 */
+	@Nullable
+	public String getErrorKey() {
+		return error == null ? null : error.key();
+	}
+
+	/** 最近一次失败的那句话（<b>服务端解析出来的文本</b>；护目镜走 {@link #getLastFailureText()}）。 */
 	@Nullable
 	public String getLastFailure() {
-		return lastFailure;
+		return lastFailure == null ? null : lastFailure.text()
+			.getString();
+	}
+
+	/** 最近一次失败 / 提示的那条文案本身（{@code null} = 现在没有失败）—— 给护目镜摘要用。 */
+	@Nullable
+	public Component getLastFailureText() {
+		return lastFailure == null ? null : lastFailure.text();
+	}
+
+	/**
+	 * 最近一次失败的翻译键后缀（{@code null} = 不可翻译）。
+	 *
+	 * <p>★ 自检拿它断言"失败属于哪一类"：{@link #getLastFailure()} 是<b>服务端语言</b>解析出来的文本
+	 * （专用服务器上是英文），拿中文子串去比会随语言而红 —— 键才是与语言无关的判据。
+	 */
+	@Nullable
+	public String getLastFailureKey() {
+		return lastFailure == null ? null : lastFailure.key();
 	}
 
 	public void clearError() {
@@ -487,8 +556,7 @@ public class ProgramRuntime {
 		if (isPaced(state)) {
 			idleSpins = 0;
 		} else if (++idleSpins > MAX_IDLE_SPINS) {
-			halt(arm, "程序在空转（连续 " + MAX_IDLE_SPINS
-				+ " 条没有移动也没有等待就绕回来了）：检查跳转/调用的目标，或给循环加一条「等待」");
+			halt(arm, FailText.of("idle_spin", MAX_IDLE_SPINS));
 			return;
 		}
 
@@ -586,8 +654,7 @@ public class ProgramRuntime {
 				|| idleSpins > spinsBefore;
 			if (!progressed && state == stateBefore && state == EntryState.IDLE) {
 				if (++idleSpins > MAX_IDLE_SPINS) {
-					halt(arm, "程序在空转（连续 " + MAX_IDLE_SPINS
-						+ " 条没有移动也没有等待就绕回来了）：检查跳转/调用的目标，或给循环加一条「等待」");
+					halt(arm, FailText.of("idle_spin", MAX_IDLE_SPINS));
 					break;
 				}
 			}
@@ -615,13 +682,15 @@ public class ProgramRuntime {
 			}
 		}
 		if (callee == null || callee.entries.isEmpty()) {
-			lastFailure = callee == null ? "调用目标不存在：" + target : "调用目标没有操作：" + target;
-			applySkip(arm, caller, entry, entry.onTimeout, lastFailure);
+			FailText reason = callee == null ? FailText.of("call_missing", target) : FailText.of("call_empty", target);
+			lastFailure = reason;
+			applySkip(arm, caller, entry, entry.onTimeout, reason);
 			return;
 		}
 		if (callStack.size() >= MAX_CALL_DEPTH) {
-			lastFailure = "调用太深（>" + MAX_CALL_DEPTH + " 层）：" + target;
-			applySkip(arm, caller, entry, entry.onTimeout, lastFailure);
+			FailText reason = FailText.of("call_too_deep", MAX_CALL_DEPTH, target);
+			lastFailure = reason;
+			applySkip(arm, caller, entry, entry.onTimeout, reason);
 			return;
 		}
 		callStack.add(new Frame(taskIndex, entryIndex + 1,
@@ -655,7 +724,7 @@ public class ProgramRuntime {
 	private void endTask(SequencedArmBlockEntity arm, boolean failed, @Nullable String reason) {
 		ArmProgram program = arm.getProgram();
 		if (failed && reason != null)
-			lastFailure = reason;
+			lastFailure = FailText.literal(reason);
 		if (!callStack.isEmpty()) {
 			Frame frame = callStack.remove(callStack.size() - 1);
 			int failedTask = taskIndex;
@@ -688,9 +757,9 @@ public class ProgramRuntime {
 					//   （这一轮排查"两层栈深那条断言红在哪"时，正是这条提示最先把人卡住：
 					//    只有靠 "#3" 去反推失败的是哪个任务。）
 					ArmProgramTask failedTaskObj = program.task(failedTask);
-					applySkip(arm, caller, callEntry, callEntry.onTimeout,
-						"被调任务失败（" + (failedTaskObj == null ? "?" : failedTaskObj.name) + " #"
-							+ (failedEntry + 1) + "）：" + reason);
+					// "哪个任务哪一条 + 那句原因"一起塞进同一个 %s：键只有一条，但信息一个都不许丢
+					applySkip(arm, caller, callEntry, callEntry.onTimeout, FailText.of("callee_failed",
+						(failedTaskObj == null ? "?" : failedTaskObj.name) + " #" + (failedEntry + 1) + "：" + reason));
 					return;
 				}
 			} else if (callEntry != null) {
@@ -714,7 +783,7 @@ public class ProgramRuntime {
 		}
 		// ——— 主任务：只有「退出」/「抛错」会走到这里（跑完最后一条走 finishTask 的恒循环）———
 		if (failed) {
-			halt(arm, reason == null ? "程序抛出错误" : reason); // 停机那行由 halt 记
+			halt(arm, reason == null ? FailText.of("thrown") : FailText.literal(reason)); // 停机那行由 halt 记
 			return;
 		}
 		// ★ 记录点⑧：主任务里的「退出」= **收工停机**（用户口径：「退出」不能因为主任务恒循环而失效）。
@@ -726,7 +795,7 @@ public class ProgramRuntime {
 		}
 		// 用 halt 而不是"游标归零"：恒循环之下，归零就等于"从第 1 条重来"，
 		// 「退出」那样就彻底失去意义了。⚠️ §7.16e 的**反转**照旧成立：停机不清信号。
-		halt(arm, reason == null ? "主任务「退出」：收工停机" : reason);
+		halt(arm, reason == null ? FailText.of("break_stop") : FailText.literal(reason));
 	}
 
 	/**
@@ -834,7 +903,7 @@ public class ProgramRuntime {
 		BlockPos offset = offsetOf(arm, entry);
 
 		// 前置检查先跑：不通过就**不伸过去**（空载具时手臂原地待机，用户明确要求的行为）
-		String blocked = preCheckFailure(arm, entry, offset);
+		FailText blocked = preCheckFailure(arm, entry, offset);
 		if (blocked != null) {
 			// ★ **短暂阻塞不收臂**：最常见的短暂阻塞是"我们刚加工出来的产物还占着判定窗口"，
 			//   几 tick 它就走。立刻 `cancelMove()` 的话会变成"收回→再伸出去"的空转，观感就是卡顿
@@ -864,7 +933,7 @@ public class ProgramRuntime {
 		// 取物/组装：从**定下目标的那一刻**就锁住目标上的物品（同一 tick 先锁一次，之后每 tick 续锁）。
 		boolean pinsTarget = entry.op == OperationType.TAKE || entry.op == OperationType.DEPLOY;
 		if (!arm.beginMove(offset, entry.face, pinsTarget)) {
-			handleFailure(arm, task, entry, "目标无效或不属于 Create 交互点");
+			handleFailure(arm, task, entry, FailText.of("target_invalid"));
 			return;
 		}
 		// ★ 记录点②：真的动身了（记录点①在前置检查通过后才轮到这一支，所以"目标为空"那种
@@ -937,10 +1006,10 @@ public class ProgramRuntime {
 	 * 这里只要求那个位置确实有方块 —— 成败交给 {@code RightClickBridge} 判（它本来就能对任意坐标干活）。
 	 */
 	@Nullable
-	private String preCheckFailure(SequencedArmBlockEntity arm, ArmProgramEntry entry, BlockPos offset) {
+	private FailText preCheckFailure(SequencedArmBlockEntity arm, ArmProgramEntry entry, BlockPos offset) {
 		Level level = arm.getLevel();
 		if (level == null)
-			return "世界未加载";
+			return FailText.of("world_unloaded");
 		// ⚠️ `offset` 是**调用方（beginEntry）已经过 offsetOf 的那一份** —— 里面已经含了当前生效的
 		//    调用偏移。这里再 offset(callShift) 一次就是叠两遍（这是"叠加只在 offsetOf 一处"的另一半）。
 		BlockPos target = arm.getBlockPos()
@@ -959,13 +1028,13 @@ public class ProgramRuntime {
 			//   `Math.sqrt` 的钱：纯字符串拼接就够了，而"差多远"用**平方**距离同样回答得了
 			//   （26 > 25 就是"差一点点"），还省掉一次开方。
 			long distSqr = (long) target.distSqr(arm.getBlockPos());
-			return "目标超出臂的范围（距离平方 " + distSqr + " > " + (long) range * range + "，上限 " + range + " 格）";
+			return FailText.of("target_too_far", distSqr, (long) range * range, range);
 		}
 
 		BlockState state = level.getBlockState(target);
 		if (entry.op.needsInteractionPoint()) {
 			if (!ArmInteractionPoint.isInteractable(level, target, state))
-				return "目标无效或不属于 Create 交互点";
+				return FailText.of("target_invalid");
 		}
 		// ★ 这里**不再**对"攻击 / 挖掘"判断"那儿有没有方块"（v27 起）：用户第二十七轮明确要求
 		// "和原本的机械手一模一样 —— 不检测能不能挖动，不检测有没有实体或者方块"。
@@ -981,12 +1050,12 @@ public class ProgramRuntime {
 					// 判定方式与原版一致（`AllArmInteractionPointTypes.DepositOnlyArmInteractionPoint`：
 					// 漏斗 / 烈焰人 / 营火 / 重生锚 / 粉碎轮），所以这里**不能**再写"（漏斗类）"
 					// —— 打包机曾经被误判成只进不出，就是"有 InvManipulationBehaviour 就算漏斗"的旧实现造成的。
-					return "该目标只进不出（这类交互点没有可取的槽位）";
+					return FailText.of("deposit_only");
 				if (handler == null)
-					return "目标没有物品能力";
+					return FailText.of("no_item_handler");
 				int slot = firstNonEmptySlot(handler);
 				if (slot < 0)
-					return "目标为空";
+					return FailText.of("target_empty");
 				// ★ 个数模式 = 等于（判据只有 countIsExact() 一处）：**动身之前**就得能凑出恰好 N 个。
 				//   凑不出就**别伸过去** —— 与"臂内已满"同一个道理：不要为一个必然失败的动作空跑一趟。
 				//   而前置检查是**每 tick** 重跑的（PRECHECK_RETRY_TICKS = 0）⇒"等补货"发生在**原位重试**里
@@ -994,58 +1063,58 @@ public class ProgramRuntime {
 				if (entry.countIsExact()) {
 					int exactSlot = exactTakeSlot(handler, entry.count);
 					if (exactSlot < 0)
-						return "数量不足（需要 " + entry.count + " 个）";
+						return FailText.of("count_short", entry.count);
 					if (!arm.canAccept(handler.extractItem(exactSlot, entry.count, true)))
-						return "臂内已满";
+						return FailText.of("arm_full");
 				} else if (!arm.canAccept(handler.extractItem(slot, 1, true))) {
-					return "臂内已满";
+					return FailText.of("arm_full");
 				}
 			}
 			case DEPOSIT -> {
 				ItemStack held = arm.getHeldItem();
 				if (held.isEmpty())
-					return "手上没有物品";
+					return FailText.of("hand_empty");
 				// ★ 个数模式 = 等于：动身之前"手上够 N 个"与"目标吃得下恰好 N 个"**两条**都要成立。
 				//   报因必须能分辨是哪一条（"手上不足"与"目标放不下"是两种完全不同的补救办法）。
 				//   ATMOST 照旧只看"整摞能不能进去一点"（有多少放多少，不足也不失败）。
 				if (entry.countIsExact()) {
 					if (held.getCount() < entry.count)
-						return "手上不足 " + entry.count + " 个（手上 " + held.getCount() + " 个）";
+						return FailText.of("hand_short", entry.count, held.getCount());
 					TargetInteraction.Insert exactProbe = TargetInteraction.insert(level, target,
 						held.copyWithCount(entry.count), true);
 					if (exactProbe.blockedReason() != null)
-						return exactProbe.blockedReason();
+						return FailText.of("target_refused", exactProbe.blockedReason());
 					if (!exactProbe.remainder()
 						.isEmpty())
-						return "目标放不下 " + entry.count + " 个";
+						return FailText.of("target_full", entry.count);
 				} else {
 					// 用 TargetInteraction 而不是裸能力：漏斗没有通用物品能力，走它自己的行为对象
 					TargetInteraction.Insert probe = TargetInteraction.insert(level, target, held.copy(), true);
 					if (probe.blockedReason() != null)
-						return probe.blockedReason();
+						return FailText.of("target_refused", probe.blockedReason());
 					if (!probe.madeProgress(held))
-						return "目标放不下";
+						return FailText.of("target_full", held.getCount());
 				}
 			}
 			case UNLOAD -> {
 				if (arm.getOverflow()
 					.isEmpty())
-					return "臂内没有可卸出的物品";
+					return FailText.of("nothing_to_unload");
 				TargetInteraction.Insert probe = TargetInteraction.insert(level, target,
 					arm.getOverflow()
 						.get(0)
 						.copyWithCount(1),
 					true);
 				if (probe.blockedReason() != null)
-					return probe.blockedReason();
+					return FailText.of("target_refused", probe.blockedReason());
 			}
 			case DEPLOY -> {
 				IItemHandler handler = arm.peekHandler(offset);
 				if (handler == null)
-					return "目标没有物品能力";
+					return FailText.of("no_item_handler");
 				ItemStack applicator = arm.getHeldItem();
 				if (applicator.isEmpty())
-					return "手上没有应用物";
+					return FailText.of("no_applicator");
 				// ★ **逐件找**，不是"只看第一件"（用户第二十七轮续三十六实测："组装的时候臂会空一轮"）：
 				//   目标格里最靠前的那件往往就是**我们刚加工出来的产物** —— 它当然不匹配配方，
 				//   旧写法于是报"没有匹配的配方"、手臂干脆不伸出去，而它后面那件**能加工的原料**
@@ -1057,7 +1126,7 @@ public class ProgramRuntime {
 				if (!anyProcessable(level, arm, entry, handler, applicator))
 					// 一句话就够（用户第八十九轮："非必要不解释"——原来那串
 					// "（没有匹配 deploying / item_application 配方的物品）"在护目镜上占了半行）
-					return "目标无法被加工";
+					return FailText.of("no_recipe");
 			}
 			default -> {
 			}
@@ -1214,12 +1283,12 @@ public class ProgramRuntime {
 			case CALL -> callTask(arm, task, entry);
 			case BREAK -> endTask(arm, false, null);
 			case THROW -> {
-				String reason = entry.errorMessage == null || entry.errorMessage.isBlank() ? "程序主动抛出错误"
-					: entry.errorMessage;
-				lastFailure = reason;
-				endTask(arm, true, reason);
+				// 玩家自己写的那句是**玩家数据**（不可翻译）；没写就用统一的那一条
+				boolean blank = entry.errorMessage == null || entry.errorMessage.isBlank();
+				lastFailure = blank ? FailText.of("thrown") : FailText.literal(entry.errorMessage);
+				endTask(arm, true, blank ? null : entry.errorMessage);
 			}
-			default -> handleFailure(arm, task, entry, entry.op + " 尚未实现（阶段 2c/2d）");
+			default -> handleFailure(arm, task, entry, FailText.of("not_implemented", entry.op.name()));
 		}
 	}
 
@@ -1275,7 +1344,7 @@ public class ProgramRuntime {
 		waitElapsed++;
 		// 等待类操作把「时限」当作"最多等多久"：到点走「失败后」（§7.7 与其它操作一致）
 		if (entry.timeoutTicks() >= 0 && waitElapsed > entry.timeoutTicks())
-			applySkip(arm, task, entry, entry.onTimeout, "等待信号超时");
+			applySkip(arm, task, entry, entry.onTimeout, FailText.of("signal_timeout"));
 	}
 
 	// ————————————————————————— 各操作 —————————————————————————
@@ -1283,7 +1352,7 @@ public class ProgramRuntime {
 	private void take(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		IItemHandler handler = arm.getMovingHandler();
 		if (handler == null) {
-			handleFailure(arm, task, entry, "目标没有物品能力");
+			handleFailure(arm, task, entry, FailText.of("no_item_handler"));
 			return;
 		}
 		// ★ 个数模式只有一处判据（ArmProgramEntry.countIsExact()）—— 这里不重新解释 countMode。
@@ -1295,11 +1364,11 @@ public class ProgramRuntime {
 			//    玩家看到的就是"报了失败、东西却少了"。
 			int slot = exactTakeSlot(handler, entry.count);
 			if (slot < 0) {
-				handleFailure(arm, task, entry, "数量不足（需要 " + entry.count + " 个）");
+				handleFailure(arm, task, entry, FailText.of("count_short", entry.count));
 				return;
 			}
 			if (!arm.canAccept(handler.extractItem(slot, entry.count, true))) {
-				handleFailure(arm, task, entry, "臂内已满");
+				handleFailure(arm, task, entry, FailText.of("arm_full"));
 				return;
 			}
 			ItemStack taken = handler.extractItem(slot, entry.count, false);
@@ -1308,7 +1377,7 @@ public class ProgramRuntime {
 				// 真发生了也**绝不吞物品** —— 放回原槽再走失败重试（塞进臂里再报失败是另一种怪状态）。
 				if (!taken.isEmpty())
 					handler.insertItem(slot, taken, false);
-				handleFailure(arm, task, entry, "数量不足（需要 " + entry.count + " 个）");
+				handleFailure(arm, task, entry, FailText.of("count_short", entry.count));
 				return;
 			}
 			ItemStack beforeHeld = arm.getHeldItem();
@@ -1324,13 +1393,13 @@ public class ProgramRuntime {
 				continue;
 			// 取前模拟：臂内放得下才动手（放不下就按"还没成功"重试，等臂内腾出位置）
 			if (!arm.canAccept(available)) {
-				handleFailure(arm, task, entry, "臂内已满");
+				handleFailure(arm, task, entry, FailText.of("arm_full"));
 				return;
 			}
 			int amount = Math.min(available.getCount(), entry.count);
 			ItemStack taken = handler.extractItem(slot, amount, false);
 			if (taken.isEmpty()) {
-				handleFailure(arm, task, entry, "取出失败");
+				handleFailure(arm, task, entry, FailText.of("take_failed"));
 				return;
 			}
 			ItemStack beforeHeld = arm.getHeldItem();
@@ -1340,7 +1409,7 @@ public class ProgramRuntime {
 			succeed(arm, task, entry);
 			return;
 		}
-		handleFailure(arm, task, entry, "目标为空");
+		handleFailure(arm, task, entry, FailText.of("target_empty"));
 	}
 
 	/**
@@ -1360,7 +1429,7 @@ public class ProgramRuntime {
 	private void deposit(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		ItemStack held = arm.getHeldItem();
 		if (held.isEmpty()) {
-			handleFailure(arm, task, entry, "手上没有物品");
+			handleFailure(arm, task, entry, FailText.of("hand_empty"));
 			return;
 		}
 		BlockPos target = arm.getBlockPos()
@@ -1370,7 +1439,7 @@ public class ProgramRuntime {
 		int amount;
 		if (exact) {
 			if (held.getCount() < entry.count) {
-				handleFailure(arm, task, entry, "手上不足 " + entry.count + " 个（手上 " + held.getCount() + " 个）");
+				handleFailure(arm, task, entry, FailText.of("hand_short", entry.count, held.getCount()));
 				return;
 			}
 			amount = entry.count;
@@ -1378,12 +1447,12 @@ public class ProgramRuntime {
 			TargetInteraction.Insert probe = TargetInteraction.insert(arm.getLevel(), target,
 				held.copyWithCount(amount), true);
 			if (probe.blockedReason() != null) {
-				handleFailure(arm, task, entry, probe.blockedReason());
+				handleFailure(arm, task, entry, FailText.of("target_refused", probe.blockedReason()));
 				return;
 			}
 			if (!probe.remainder()
 				.isEmpty()) {
-				handleFailure(arm, task, entry, "目标放不下 " + amount + " 个");
+				handleFailure(arm, task, entry, FailText.of("target_full", amount));
 				return;
 			}
 		} else {
@@ -1407,12 +1476,14 @@ public class ProgramRuntime {
 			// 一个都没进去 = 失败。⚠️ 比较基准是**这次搬的 amount**，不是整摞 —— 照抄旧条件
 			// （`remainder.getCount() == held.getCount()`）在只搬 amount 个之后会永远判成功（amount == 1 时
 			// remainder 与 held 的数量本来就不等）或永远判失败（leftOver > 0 时基准变了）。
-			handleFailure(arm, task, entry, result.blockedReason() != null ? result.blockedReason() : "目标放不下");
+			handleFailure(arm, task, entry,
+				result.blockedReason() != null ? FailText.of("target_refused", result.blockedReason())
+					: FailText.of("target_full", amount));
 			return;
 		}
 		// 「等于」要求 N 个**全部**进去：真塞之后还剩下就说明没达成（上面已把剩余还回手上，不丢货）
 		if (exact && inserted < amount) {
-			handleFailure(arm, task, entry, "目标放不下 " + amount + " 个（只进去了 " + inserted + " 个）");
+			handleFailure(arm, task, entry, FailText.of("target_partial", amount, inserted));
 			return;
 		}
 		succeed(arm, task, entry);
@@ -1445,13 +1516,13 @@ public class ProgramRuntime {
 	private void stash(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		ItemStack held = arm.getHeldItem();
 		if (held.isEmpty()) {
-			handleFailure(arm, task, entry, "手上没有物品");
+			handleFailure(arm, task, entry, FailText.of("hand_empty"));
 			return;
 		}
 		int amount;
 		if (entry.countIsExact()) {
 			if (held.getCount() < entry.count) {
-				handleFailure(arm, task, entry, "数量不足（需要 " + entry.count + " 个）");
+				handleFailure(arm, task, entry, FailText.of("count_short", entry.count));
 				return;
 			}
 			amount = entry.count;
@@ -1459,7 +1530,7 @@ public class ProgramRuntime {
 			ItemStack probeLeft = arm.itemHandler()
 				.insertIntoOverflow(held.copyWithCount(amount), true);
 			if (probeLeft.getCount() > 0) {
-				handleFailure(arm, task, entry, "溢出库存放不下 " + amount + " 个");
+				handleFailure(arm, task, entry, FailText.of("overflow_short", amount));
 				return;
 			}
 		} else {
@@ -1469,7 +1540,7 @@ public class ProgramRuntime {
 			.insertIntoOverflow(held.copyWithCount(amount), false);
 		int moved = amount - remainder.getCount();
 		if (moved <= 0) {
-			handleFailure(arm, task, entry, "溢出库存已满");
+			handleFailure(arm, task, entry, FailText.of("overflow_full"));
 			return;
 		}
 		int left = held.getCount() - moved;
@@ -1485,7 +1556,7 @@ public class ProgramRuntime {
 			if (unloadMoved > 0)
 				succeed(arm, task, entry);
 			else
-				handleFailure(arm, task, entry, "臂内没有可卸出的物品");
+				handleFailure(arm, task, entry, FailText.of("nothing_to_unload"));
 			return;
 		}
 
@@ -1495,12 +1566,12 @@ public class ProgramRuntime {
 			if (moved > 0)
 				succeed(arm, task, entry);
 			else
-				handleFailure(arm, task, entry, "目标拒绝接收");
+				handleFailure(arm, task, entry, FailText.of("unload_refused"));
 			return;
 		}
 		// UNTIL_EMPTY：本轮搬完不结束，下一 tick 继续；目标拒绝即失败
 		if (moved == 0)
-			handleFailure(arm, task, entry, "目标拒绝接收（未卸完）");
+			handleFailure(arm, task, entry, FailText.of("unload_partial"));
 	}
 
 	/** 卸一轮：ONE_STACK 只搬一个满组，MAX 在本轮内持续搬直到预算用尽或目标拒绝。 */
@@ -1536,17 +1607,17 @@ public class ProgramRuntime {
 	private void deploy(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		IItemHandler handler = arm.getMovingHandler();
 		if (handler == null) {
-			handleFailure(arm, task, entry, "目标没有物品能力");
+			handleFailure(arm, task, entry, FailText.of("no_item_handler"));
 			return;
 		}
 		ItemStack applicator = arm.getHeldItem();
 		if (applicator.isEmpty()) {
-			handleFailure(arm, task, entry, "手上没有应用物");
+			handleFailure(arm, task, entry, FailText.of("no_applicator"));
 			return;
 		}
 		Level level = arm.getLevel();
 		if (level == null) {
-			handleFailure(arm, task, entry, "世界未加载");
+			handleFailure(arm, task, entry, FailText.of("world_unloaded"));
 			return;
 		}
 
@@ -1590,7 +1661,7 @@ public class ProgramRuntime {
 				break;
 		}
 		if (processed.isEmpty()) {
-			handleFailure(arm, task, entry, "载具上没有可加工的物品");
+			handleFailure(arm, task, entry, FailText.of("carrier_empty"));
 			return;
 		}
 
@@ -1598,7 +1669,7 @@ public class ProgramRuntime {
 		RecipeHolder<? extends Recipe<?>> recipe = DeployRecipes.find(level, processed, applicator);
 		if (recipe == null) {
 			returnToCarrier(arm, handler, processed); // 没配方就把物品放回去，别吞掉
-			handleFailure(arm, task, entry, "目标无法被加工");
+			handleFailure(arm, task, entry, FailText.of("no_recipe"));
 			return;
 		}
 
@@ -1682,7 +1753,7 @@ public class ProgramRuntime {
 			});
 		if (!handled[0]) {
 			// 前置检查刚放行的物品在这几 tick 里被别的机器加工/拿走了 ⇒ 按"没配方"重试（不是停机）
-			handleFailure(arm, task, entry, "目标无法被加工");
+			handleFailure(arm, task, entry, FailText.of("no_recipe"));
 			return;
 		}
 		finishDeploy(arm, task, entry, level, recipeRef[0], processedRef[0]);
@@ -1740,7 +1811,7 @@ public class ProgramRuntime {
 			.offset(offsetOf(arm, entry));
 		RightClickBridge.Result result = arm.rightClick.attack(target, entry.face);
 		switch (result) {
-			case RETRY -> handleFailure(arm, task, entry, "攻击暂不可用：" + describeFailure(arm));
+			case RETRY -> handleFailure(arm, task, entry, FailText.of("attack_unavailable", describeFailure(arm)));
 			// 没有"硬失败"这条路：不筛选、不判断，挥了就完事（HARD_FAIL 理论上到不了，按成功处理更安全）
 			default -> succeed(arm, task, entry);
 		}
@@ -1761,10 +1832,11 @@ public class ProgramRuntime {
 			case SUCCESS -> succeed(arm, task, entry);
 			// 还在挖：重新走一次挥击动画（这是"还没好"，重试是对的）
 			case WAITING -> restartMove(arm, entry);
-			case RETRY -> handleFailure(arm, task, entry, "挖掘暂不可用：" + describeFailure(arm));
+			case RETRY -> handleFailure(arm, task, entry, FailText.of("mine_unavailable", describeFailure(arm)));
 			// **硬失败**（挖不动 / 无权 / 被保护）：立刻走失败出口，绝不原地重试 ——
 			// 否则就是"臂对着基岩永远空挥"，而且阻塞等待时还占着臂。
-			case HARD_FAIL -> applySkip(arm, task, entry, entry.onTimeout, "挖掘做不了：" + describeFailure(arm));
+			case HARD_FAIL ->
+				applySkip(arm, task, entry, entry.onTimeout, FailText.of("mine_impossible", describeFailure(arm)));
 		}
 	}
 
@@ -1788,8 +1860,9 @@ public class ProgramRuntime {
 		RightClickBridge.Result result = arm.rightClick.use(target, entry.face, sneak);
 		switch (result) {
 			// 右键**不幂等**（拉杆会被反复拨、按钮会被反复按），所以硬失败也只能走出口，不能重试
-			case HARD_FAIL -> applySkip(arm, task, entry, entry.onTimeout, "使用做不了：" + describeFailure(arm));
-			case RETRY -> handleFailure(arm, task, entry, "使用暂不可用：" + describeFailure(arm));
+			case HARD_FAIL ->
+				applySkip(arm, task, entry, entry.onTimeout, FailText.of("use_impossible", describeFailure(arm)));
+			case RETRY -> handleFailure(arm, task, entry, FailText.of("use_unavailable", describeFailure(arm)));
 			default -> succeed(arm, task, entry); // SUCCESS（含"交互已尝试"）与 WAITING 都算完成
 		}
 	}
@@ -1832,7 +1905,7 @@ public class ProgramRuntime {
 	private void filter(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		Level level = arm.getLevel();
 		if (level == null) {
-			handleFailure(arm, task, entry, "世界未加载");
+			handleFailure(arm, task, entry, FailText.of("world_unloaded"));
 			return;
 		}
 		ItemStack candidate;
@@ -1841,7 +1914,7 @@ public class ProgramRuntime {
 			//   周边的那一格。走 preCheckFailure 是为了让这条理由与其它操作**同源同文案**
 			//   （对 FILTER 它只做"世界加载 + 臂的范围"两件事，物品能力那一段由下面自己报）。
 			BlockPos offset = offsetOf(arm, entry);
-			String blocked = preCheckFailure(arm, entry, offset);
+			FailText blocked = preCheckFailure(arm, entry, offset);
 			if (blocked != null) {
 				handleFailure(arm, task, entry, blocked);
 				return;
@@ -1854,12 +1927,12 @@ public class ProgramRuntime {
 			// ⚠️ 也不用 `arm.getMovingHandler()`：臂不为过滤动身，那个缓存指的是**别的**条目那一格。
 			IItemHandler handler = arm.peekContainerHandler(offset);
 			if (handler == null) {
-				handleFailure(arm, task, entry, "过滤：目标不是容器");
+				handleFailure(arm, task, entry, FailText.of("filter_not_container"));
 				return;
 			}
 			int slot = firstNonEmptySlot(handler);
 			if (slot < 0) {
-				handleFailure(arm, task, entry, "过滤：容器里没有物品");
+				handleFailure(arm, task, entry, FailText.of("filter_empty_container"));
 				return;
 			}
 			// ★ **只看第一格**（第一个非空槽），不挑"任意一格符合的"（用户选定的口径）。
@@ -1872,7 +1945,8 @@ public class ProgramRuntime {
 		if (candidate.isEmpty()) {
 			// "没有物品可比"也是一种**不满足** —— 与"不匹配"走同一条路（重试窗口内反复判断）。
 			handleFailure(arm, task, entry,
-				entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER ? "过滤：容器里没有物品" : "过滤：手上没有物品");
+				entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER ? FailText.of("filter_empty_container")
+					: FailText.of("filter_empty_hand"));
 			return;
 		}
 		// 幽灵物品 → 包装器：空的、{@code create:filter}、{@code create:attribute_filter}、
@@ -1888,8 +1962,8 @@ public class ProgramRuntime {
 			return;
 		}
 		// 不匹配 = "时机还没到"，不是"做错了"：与等信号一样在重试窗口里反复判断（见方法头注释）。
-		handleFailure(arm, task, entry, "过滤不符：" + candidate.getHoverName()
-			.getString());
+		// 物品名直接给 Component（客户端按玩家语言渲染），服务端 getString() 拿到的是英文名
+		handleFailure(arm, task, entry, FailText.of("filter_mismatch", candidate.getHoverName()));
 	}
 
 	private static String describeFailure(SequencedArmBlockEntity arm) {
@@ -1899,7 +1973,7 @@ public class ProgramRuntime {
 
 	private void restartMove(SequencedArmBlockEntity arm, ArmProgramEntry entry) {
 		if (!arm.beginMove(offsetOf(arm, entry), entry.face)) {
-			halt(arm, "重新移动到目标失败");
+			halt(arm, FailText.of("move_failed"));
 			return;
 		}
 		state = EntryState.MOVING;
@@ -1957,7 +2031,7 @@ public class ProgramRuntime {
 	 */
 	private void applySuccessExit(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		if (entry.onSuccess == SkipAction.SKIP_TO && !entry.successTarget.isBlank()) {
-			lastFailure = "成功 → 跳转 " + entry.successTarget;
+			lastFailure = FailText.of("ok_jump", entry.successTarget);
 			resetEntryCounters();
 			jumpTo(arm, entry.successTarget);
 			return;
@@ -2100,11 +2174,12 @@ public class ProgramRuntime {
 	 * <p>所以这里不再有"立刻失败"这条路：老版本的 {@code force}/{@code onFail}
 	 * 已在 {@code ArmProgramEntry.load} 里迁移成 time/onTimeout。
 	 */
-	private void handleFailure(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, String reason) {
+	private void handleFailure(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, FailText reason) {
 		// ⚠️ **同步节流**：重试本身是每 tick 的（对齐上游），但"每 tick 都发一次方块实体同步"纯属浪费 ——
 		// 客户端每 tick 收到一次同步会让手臂动画看起来一顿一顿（用户实测："尝试定住物品的瞬间动画会变慢"）。
-		// 所以只有**状态或失败原因真的变了**才发。
-		boolean changed = state != EntryState.RETRY || !reason.equals(lastFailure);
+		// 所以只有**状态或失败原因真的变了**才发。判据按"键 + 服务端文本"比，而不是拿 Component 的
+		// equals 去比（可变的 Component 之间不一定有值相等语义，比错了就是每 tick 一条日志 + 一次同步）。
+		boolean changed = state != EntryState.RETRY || !sameFailure(reason, lastFailure);
 		lastFailure = reason;
 		if (entry.timeoutTicks() < 0 || waitElapsed <= entry.timeoutTicks()) {
 			state = EntryState.RETRY; // 阻塞重试（前摇不重跑；计时在 RETRY 分支按 tick 累加）
@@ -2113,12 +2188,24 @@ public class ProgramRuntime {
 				//   同一条原因每 tick 一行会把缓冲变成刷屏器；而"原因变了"正是玩家最想看到的
 				//   （"刚才报的是目标为空，现在报臂内已满"）。
 				if (arm.logEnabled())
-					arm.logLine(logWhere(task, entry) + " 失败：" + reason);
+					arm.logLine(logWhere(task, entry) + " 失败：" + reason.text()
+						.getString());
 				arm.markProgramDirty();
 			}
 			return;
 		}
-		applySkip(arm, task, entry, entry.onTimeout, reason + "（重试了 " + entry.failAmount + entry.failUnit.name() + "）");
+		applySkip(arm, task, entry, entry.onTimeout,
+			FailText.of("retried", reason.text(), entry.failAmount + entry.failUnit.name()));
+	}
+
+	/** 两条失败文案是不是"同一件"（键相同 + 服务端解析出来的文本相同）——见 {@link #handleFailure} 的节流说明。 */
+	private static boolean sameFailure(@Nullable FailText a, @Nullable FailText b) {
+		if (a == null || b == null)
+			return a == b;
+		return java.util.Objects.equals(a.key(), b.key()) && a.text()
+			.getString()
+			.equals(b.text()
+				.getString());
 	}
 
 	/**
@@ -2135,14 +2222,15 @@ public class ProgramRuntime {
 	 * 现在 {@code NONE} 只有一种语义 —— 停机，由 {@link #halt} 记下"停在哪一条"。
 	 */
 	private void applySkip(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, SkipAction action,
-		String reason) {
+		FailText reason) {
 		switch (action) {
 			case CONTINUE -> {
-				lastFailure = reason + "（跳过）";
+				lastFailure = FailText.of("skipped", reason.text());
 				// ★ 记录点④：超时后的**去向**（放弃这一条 / 跳到别处）。
 				//   与记录点③合起来回答"它为什么停了？停在哪一条？"：③是原因，④是结论。
 				if (arm.logEnabled())
-					arm.logLine(logWhere(task, entry) + " 放弃 → 继续下一条（" + reason + "）");
+					arm.logLine(logWhere(task, entry) + " 放弃 → 继续下一条（" + reason.text()
+						.getString() + "）");
 				resetEntryCounters();
 				entryIndex++;
 				if (entryIndex >= task.entries.size())
@@ -2151,9 +2239,10 @@ public class ProgramRuntime {
 					arm.markProgramDirty();
 			}
 			case SKIP_TO -> {
-				lastFailure = reason + "（跳转 " + entry.timeoutTarget + "）";
+				lastFailure = FailText.of("jumped", reason.text(), entry.timeoutTarget);
 				if (arm.logEnabled())
-					arm.logLine(logWhere(task, entry) + " 放弃 → 跳转 " + entry.timeoutTarget + "（" + reason + "）");
+					arm.logLine(logWhere(task, entry) + " 放弃 → 跳转 " + entry.timeoutTarget + "（" + reason.text()
+						.getString() + "）");
 				jumpTo(arm, entry.timeoutTarget);
 			}
 			case NONE -> halt(arm, reason); // 停机那行由 halt 自己记（含"停在哪一条"）
@@ -2189,7 +2278,7 @@ public class ProgramRuntime {
 					arm.markProgramDirty();
 					return;
 				}
-				halt(arm, "跳转序号超范围：" + oneBased + "（共 " + task.entries.size() + " 条）");
+				halt(arm, FailText.of("jump_out_of_range", oneBased, task.entries.size()));
 				return;
 			} catch (NumberFormatException ignored) {
 				// 不是序号，按任务名找
@@ -2207,7 +2296,7 @@ public class ProgramRuntime {
 				return;
 			}
 		}
-		halt(arm, "跳转目标不存在: " + trimmed);
+		halt(arm, FailText.of("jump_missing", trimmed));
 	}
 
 	/**
@@ -2267,7 +2356,7 @@ public class ProgramRuntime {
 		arm.markProgramDirty();
 	}
 
-	public void halt(SequencedArmBlockEntity arm, String reason) {
+	public void halt(SequencedArmBlockEntity arm, FailText reason) {
 		state = EntryState.HALTED;
 		error = reason;
 		errorEntryIndex = entryIndex;
@@ -2275,7 +2364,9 @@ public class ProgramRuntime {
 		//   带上"停在哪一条"：停机时游标还指着出错的那一条，logWhere 给的序号正是界面上的序号。
 		if (arm.logEnabled())
 			arm.logLine("停机 @" + logWhere(arm.getProgram()
-				.task(taskIndex), currentEntryOrNull(arm.getProgram())) + "：" + (reason == null ? "未说明" : reason));
+				.task(taskIndex), currentEntryOrNull(arm.getProgram())) + "："
+				+ (reason == null ? "未说明" : reason.text()
+					.getString()));
 		arm.cancelMove(); // 停机也收回：出错时把手臂留在目标前面既难看又挡视线
 		// 停机后 tick() 会在累积预算之前就早退，所以这笔记账**不清也不会自己涨**；这里还是清掉：
 		// 它是"本份程序还没花掉的那点余量"，而停机 = 这份程序到此为止（复位走 resetToStart 也会清）。
@@ -2326,7 +2417,7 @@ public class ProgramRuntime {
 
 	// ————————————————————————— 存读盘 —————————————————————————
 
-	public CompoundTag save() {
+	public CompoundTag save(HolderLookup.Provider registries) {
 		CompoundTag tag = new CompoundTag();
 		tag.putInt("task", taskIndex);
 		tag.putInt("entry", entryIndex);
@@ -2349,14 +2440,18 @@ public class ProgramRuntime {
 		}
 		tag.put("stack", stack);
 		tag.putInt("spins", idleSpins); // 老存档里的 steps/ticks 已废（那两条预算删了），读的时候直接忽略
+		// ★ 停机原因存**组件的 JSON + 键**（不是一句纯文本）：重进世界后护目镜上那一行仍然能按
+		//   玩家语言显示，而 /sma 读到的是服务端解析出来的那句话 —— 见 FailText 的说明。
 		if (error != null) {
-			tag.putString("error", error);
+			tag.putString("error", Component.Serializer.toJson(error.text(), registries));
 			tag.putInt("errorEntry", errorEntryIndex);
+			if (error.key() != null)
+				tag.putString("errorkey", error.key());
 		}
 		return tag;
 	}
 
-	public void load(CompoundTag tag) {
+	public void load(CompoundTag tag, HolderLookup.Provider registries) {
 		taskIndex = tag.getInt("task");
 		entryIndex = tag.getInt("entry");
 		state = readState(tag.getString("state"));
@@ -2376,9 +2471,32 @@ public class ProgramRuntime {
 					.orElse(BlockPos.ZERO)));
 		}
 		idleSpins = tag.getInt("spins");
-		if (tag.contains("error")) {
-			error = tag.getString("error");
+		Component readError = readComponent(tag, "error", registries);
+		if (readError != null) {
+			error = new FailText(readError, tag.contains("errorkey") ? tag.getString("errorkey") : null);
 			errorEntryIndex = tag.getInt("errorEntry");
+		}
+	}
+
+	/**
+	 * 把存进 NBT 的组件 JSON 读回来（{@code null} = 没存过这一条）。
+	 *
+	 * <p>⚠️ <b>必须兜一层</b>：改造前 {@code error} 存的是<b>一句纯文本</b>，直接丢给
+	 * {@code Component.Serializer.fromJson} 会抛 JSON 语法异常（把区块读盘整条炸掉）。
+	 * 读不动就按字面量兜回来 —— 那句话是现场的唯一记录，宁可它不翻译，也不许丢。
+	 */
+	@Nullable
+	public static Component readComponent(CompoundTag tag, String key, HolderLookup.Provider registries) {
+		if (!tag.contains(key))
+			return null;
+		String json = tag.getString(key);
+		if (json.isEmpty())
+			return null;
+		try {
+			Component parsed = Component.Serializer.fromJson(json, registries);
+			return parsed == null ? Component.literal(json) : parsed;
+		} catch (RuntimeException oldPlainText) {
+			return Component.literal(json);
 		}
 	}
 

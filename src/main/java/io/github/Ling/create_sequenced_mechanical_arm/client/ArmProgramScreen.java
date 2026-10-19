@@ -512,10 +512,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 上一次命中的热区名字（只给自检用 —— 点击热区是手算的，必须能被自动验证）。 */
 	private String lastHit = "";
 
-	/** 底栏那颗"切页"按钮（留着引用是为了每帧/换任务后刷新它的悬停提示，见 refreshPageButtonTip）。 */
-	@Nullable
-	private IconButton pageButton;
-
 	/**
 	 * 坐标框的**红字警示颜色**（原版聊天框里"命令出错"那种红 = {@code ChatFormatting.RED} 的 ARGB）。
 	 *
@@ -745,11 +741,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 底部三个按钮（位置照样板：21 / 45 / 63，确认键右下）
 		IconButton switchPage = new IconButton(leftPos + 21, topPos + 196, AllIcons.I_VIEW_SCHEDULE);
 		switchPage.withCallback(this::togglePage);
-		// 标题栏从"任务 N · 名字的操作"改成固定的「操作列表」之后（用户第八十九轮：标题不该动态），
-		// "我正在哪个任务里"就挂在**这颗按钮的悬停提示**上 —— 提示是问答式的，不是标题，随状态变没关系，
-		// 而且它每帧刷新（{@link #refreshPageButtonTip}），Alt+滚轮换任务后不会留旧名字。
-		pageButton = switchPage;
-		refreshPageButtonTip();
+		switchPage.setToolTip(page == Page.ENTRIES ? tr("btn.task_list") : tr("btn.enter_task"));
 		addRenderableWidget(switchPage);
 
 		IconButton undo = new IconButton(leftPos + 45, topPos + 196, AllIcons.I_REFRESH);
@@ -788,17 +780,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private void buildCardButtons(int x1, int x2, int y) {
 		IconButton setOrigin = new IconButton(leftPos + x1, topPos + y, AllIcons.I_TARGET);
 		setOrigin.withCallback(() -> openDialog(Dialog.ORIGIN));
-		// 提示 = 名字 + 一句解释（其它几颗只有名字，这两件事光看图标猜不出来）
-		setOrigin.setToolTip(tr("btn.set_origin").copy()
-			.append("\n")
-			.append(tr("tip.set_origin")));
+		// 提示 = 名字 + 一句解释（其它几颗只有名字，这两件事光看图标猜不出来）。
+		// ⚠️ 两行必须是**两个组件**：把 `名字 + "\n" + 解释` 塞进一个组件时，那个 `\n` 会被当成字符画成
+		//   "缺字方框"（用户第八十九轮图六截到的正是这个方框）。控件自带的那张提示表是列表，直接往里加。
+		setOrigin.setToolTip(tr("btn.set_origin"));
+		setOrigin.getToolTip()
+			.add(tr("tip.set_origin"));
 		addRenderableWidget(setOrigin);
 
 		IconButton shift = new IconButton(leftPos + x2, topPos + y, AllIcons.I_TOOL_MOVE_XZ);
 		shift.withCallback(() -> openDialog(Dialog.OFFSET));
-		shift.setToolTip(tr("btn.shift_coords").copy()
-			.append("\n")
-			.append(tr("tip.shift_coords")));
+		shift.setToolTip(tr("btn.shift_coords"));
+		shift.getToolTip()
+			.add(tr("tip.shift_coords"));
 		addRenderableWidget(shift);
 	}
 
@@ -1046,7 +1040,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return;
 		currentTask = Mth.clamp(index, 0, program.tasks.size() - 1);
 		pushTaskSelection();
-		refreshPageButtonTip(); // 换任务后那颗按钮的提示要跟着换（标题栏已经不再报任务名了）
 	}
 
 	/**
@@ -1061,25 +1054,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 标题栏文字：**只看当前是哪一页**。
+	 * 标题栏文字：**任务名 + 条数**（操作页）/「任务列表」（任务页）。
 	 *
-	 * <p>抽成方法是为了让自检（{@link #headingProblem()}）能在不渲染的情况下断言它
-	 * "打开编辑器 / 换属性 / 开弹窗时都不变" —— 那正是用户第八十九轮点名的那条。
+	 * <p>用户第八十九轮两条口径合起来就是它：
+	 * <ul>
+	 *   <li>"图一这个界面可以显示任务名称 + 条数，这有助于玩家确认当前编辑的任务" ⇒ 操作页标题带名字与条数；</li>
+	 *   <li>"标题完全不需要动态变化" ⇒ 它**只**随"在哪一页 / 哪个任务"变，不随编辑状态、属性名、
+	 *       弹窗、指针变（自检 {@link #headingProblem} 钉着这一条）。</li>
+	 * </ul>
+	 *
+	 * <p>名字长了要截断：文字不裁剪，整串居中画出去就会盖到面板外面。
 	 */
 	private Component headingText() {
-		return page == Page.TASKS ? tr("title_tasks") : tr("title_entries");
-	}
-
-	/** 那颗"切页"按钮的悬停提示（操作页上顺带报"现在是哪个任务" —— 标题栏不再报它了）。 */
-	private void refreshPageButtonTip() {
-		if (pageButton == null)
-			return;
-		if (page != Page.ENTRIES) {
-			pageButton.setToolTip(tr("btn.enter_task"));
-			return;
-		}
+		if (page == Page.TASKS)
+			return tr("title_tasks");
 		ArmProgramTask current = task(currentTask);
-		pageButton.setToolTip(current == null ? tr("btn.task_list") : tr("btn.task_list.current", current.name));
+		if (current == null)
+			return tr("title_entries", 0);
+		String tail = " · " + tr("title_entries", current.entries.size())
+			.getString();
+		String name = current.name == null ? "" : current.name;
+		int limit = ModGuiTextures.EDITOR_PANEL.getWidth() - 16;
+		if (font != null && font.width(name + tail) > limit)
+			name = font.plainSubstrByWidth(name, Math.max(12, limit - font.width(tail) - 6)) + "…";
+		return Component.literal(name + tail);
 	}
 
 	@Override
@@ -1558,16 +1556,35 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/**
 	 * 标题芯片（那块"虚拟物品"就在芯片最左边）的悬停提示。
 	 *
-	 * <p>用户第二十七轮：<i>"鼠标移动到虚拟物品的位置的时候，如果有备注就显示备注内容，而不是「左键编辑」"</i>
-	 * —— 备注是玩家写给这一条的话，在列表里扫一眼就能读到它，比一句"左键编辑"有用得多。
-	 * 没有备注时才退回动作提示。
+	 * <p>用户第八十九轮口径（图七）：<i>"有些语言确实不方便把全部文本放进去，可以和图八列车时刻表一样，
+	 * 鼠标移动上去的时候显示这条语句的具体功能，用金色显示操作，用白色显示具体参数，提行显示它的属性，
+	 * 最后再是备注"</i> —— 卡片第一行在 en_us 下会被截断（{@code renderChip} 按 120px 硬截），
+	 * 所以悬停要按"名字 / 参数 / 属性逐行 / 备注"重新排一遍，让玩家一次读全。
 	 *
-	 * <p>§12.3b 的两个新备注也挂在这里（P1 只从代码写，GUI 不给编辑入口）：
-	 * 任务页 ⇒ <b>任务备注</b>；操作页的第一张卡（= 主任务）⇒ <b>程序备注</b>。
-	 * 程序的备注只可能有一份，挂在"你打开编辑器看到的第一张卡"上是最不容易找错的位置。
+	 * <p>用户第二十七轮的另一条也照旧：有备注就显示备注内容（而不是只显示「左键编辑」）。
+	 * §12.3b 的两个备注（任务备注 / 程序备注）仍挂在最后。
 	 */
 	private List<Component> headerTooltip(Card card, int index) {
-		List<Component> lines = new ArrayList<>(entryNoteTooltip(card.task ? null : entry(card)));
+		List<Component> lines = new ArrayList<>();
+		ArmProgramEntry entry = card.task ? null : entry(card);
+		if (entry != null) {
+			// 第一行：金色操作名 + 白色参数（两半与卡片第一行**同源**，见 ArmEntryText.entryName / paramsText）
+			net.minecraft.network.chat.MutableComponent head = ArmEntryText.entryName(entry)
+				.copy()
+				.withStyle(ChatFormatting.GOLD);
+			String params = ArmEntryText.paramsText(entry);
+			if (!params.isEmpty())
+				head.append(Component.literal(" " + params)
+					.withStyle(ChatFormatting.WHITE));
+			lines.add(head);
+			// 属性：一行一条（`- 属性`）
+			for (Component prop : ArmEntryText.props(entry))
+				lines.add(tr("entry.prop_line", prop).copy()
+					.withStyle(ChatFormatting.WHITE));
+		}
+		// 备注最后
+		List<Component> note = entryNoteTooltip(entry);
+		lines.addAll(note);
 		if (card.task) {
 			ArmProgramTask task = task(card.taskIndex);
 			if (task != null && !task.note.isBlank())
@@ -1659,6 +1676,79 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return "程序备注没有挂到操作页第一张卡的悬停提示上（标题=" + programHead + " 正文=" + programBody + "）";
 		if (!taskHead || !taskBody)
 			return "任务备注没有挂到任务页那张卡的悬停提示上（标题=" + taskHead + " 正文=" + taskBody + "）";
+		return null;
+	}
+
+	/**
+	 * 自检：卡片悬停提示的**排版**（用户第八十九轮图七）。
+	 *
+	 * <p>用户原话：<i>"有些语言确实不方便把全部文本放进去，可以和图八列车时刻表一样，鼠标移动上去的时候
+	 * 显示这条语句的具体功能，用金色显示操作，用白色显示具体参数，提行显示它的属性，最后再是备注"</i>。
+	 * 这条之所以要钉：卡片第一行按 120px 硬截（图七现场就是 {@code Deposit at most 64 +0,0,} 被截断），
+	 * 悬停是玩家**唯一能读全坐标**的地方；它一旦退化成一句「左键编辑」，那条信息就彻底看不到了。
+	 *
+	 * <p>反证：把第一行里的 {@code paramsText} 删掉 ⇒ ① 红；把属性并成一行 ⇒ ② 红；
+	 * 把备注挪到第一行之前 ⇒ ③ 红。
+	 */
+	private static String headerTooltipProblem(Inventory inventory, RegistryAccess registries) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "tip";
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = OperationType.TAKE;
+		entry.offset = new BlockPos(1, 2, 3);
+		entry.onSuccess = SkipAction.SKIP_TO;
+		entry.successTarget = "2";
+		entry.note = "备注一\n备注二";
+		task.entries.add(entry);
+		program.tasks.add(task);
+
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
+		CardProgramStorage.write(card, program, registries);
+		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+		ItemStack.STREAM_CODEC.encode(buffer, card);
+		ArmProgramScreen screen = new ArmProgramScreen(new ArmProgramMenu(0, inventory, buffer), inventory, tr("title"));
+		screen.page = Page.ENTRIES;
+		List<Card> cards = screen.layout();
+		if (cards.isEmpty())
+			return "自检数据里没有条目卡片";
+		List<Component> tip = screen.headerTooltip(cards.get(0), 0);
+		if (tip.size() < 3)
+			return "悬停提示太短（" + tip.size() + " 行）：应当有「操作名+参数 / 属性 / 备注」";
+		// ① 第一行 = 操作名 + 参数（金色 + 白色两半，同一来源）
+		String expectHead = ArmEntryText.opName(OperationType.TAKE)
+			.getString() + " " + ArmEntryText.paramsText(entry);
+		if (!tip.get(0)
+			.getString()
+			.equals(expectHead))
+			return "悬停第一行不是「操作名 + 参数」（期望 " + expectHead + "，实际 " + tip.get(0)
+				.getString() + "）";
+		int headColor = tip.get(0)
+			.getStyle()
+			.getColor() == null ? -1
+				: tip.get(0)
+					.getStyle()
+					.getColor()
+					.getValue();
+		if (headColor != ChatFormatting.GOLD.getColor())
+			return "悬停第一行的操作名不是金色（0x" + Integer.toHexString(headColor)
+				+ "，图七要求「用金色显示操作」）";
+		// ② 属性一行一条
+		List<Component> props = ArmEntryText.props(entry);
+		if (props.isEmpty())
+			return "自检前提不成立：这条夹子没有任何属性（悬停的逐行属性无从验证）";
+		long propLines = tip.stream()
+			.filter(line -> line.getString()
+				.startsWith("- "))
+			.count();
+		if (propLines != props.size())
+			return "悬停里的属性行数不对（" + propLines + " ≠ " + props.size() + "）：属性要一行一条";
+		// ③ 备注最后
+		if (!tip.get(tip.size() - 1)
+			.getString()
+			.equals("备注二"))
+			return "悬停最后一行不是备注的末行（" + tip.get(tip.size() - 1)
+				.getString() + "）：备注要排在最后";
 		return null;
 	}
 
@@ -4198,44 +4288,63 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 自检：**标题不随状态变**（用户第八十九轮两条口径）。
+	 * 自检：**标题栏 = 任务名 + 条数，且只随「哪一页 / 哪个任务」变**（用户第八十九轮三条口径）。
 	 *
-	 * <p>① 标题栏只写页面名 —— 打开动作编辑器 / 属性编辑器 / 原点弹窗，它都必须是同一个词。
-	 * 原来它按 {@code editingDialog / editing / page} 拼四种句子，于是"打开子面板标题就换了一套说法"；
-	 * ② 编辑子面板顶上那行必须是**三个固定词**之一，且**放得进面板**（图六那条"英文说明过长超出屏幕"
-	 * 就是这行原来是一整句 {@code editor.hint_op}，en_us 下比面板还宽 —— 文字不裁剪，直接画到屏幕外）。
+	 * <p>① 操作页标题必须写「任务名 · N 条操作」（"这有助于玩家确认当前编辑的任务"）；
+	 * ② 打开动作编辑器 / 属性编辑器 / 原点弹窗，标题栏**一个字都不许变**（"标题完全不需要动态变化"）；
+	 * ③ 任务名再长也必须**截断在面板内**（文字不裁剪，画出去就是图六那种"超出屏幕"）；
+	 * ④ 子面板顶上那行必须是三个固定词之一，且放得进面板（同上）。
 	 *
-	 * <p>反证：把 {@code headingText()} 改回 {@code editing != null ? tr("title_edit_op") : …} ⇒ ① 红；
-	 * 把 {@code editorHeaderText()} 的返回改回 {@code tr("editor.hint_op")}（那句被删掉的整句，
-	 * 换成等长的字面量）⇒ ② 红。
+	 * <p>反证：把 {@code headingText()} 改回 {@code editing != null ? … : …} ⇒ ② 红；把它写成
+	 * {@code tr("title_entries", 0)}（丢掉任务名）⇒ ① 红；把截断那两行删掉 ⇒ ③ 红。
 	 */
 	private String headingProblem(Minecraft mc) {
 		Page savedPage = page;
+		int savedTask = currentTask;
 		EditTarget savedEditing = editing;
 		Prop savedProp = editingProp;
 		Dialog savedDialog = editingDialog;
 		try {
 			page = Page.ENTRIES;
+			currentTask = 0;
 			editing = null;
 			editingProp = null;
 			editingDialog = null;
+			ArmProgramTask current = task(0);
+			if (current == null)
+				return "自检前提不成立：程序里没有任务（标题栏要写任务名）";
+			String tail = " · " + tr("title_entries", current.entries.size())
+				.getString();
 			String base = headingText().getString();
-			if (!base.equals(tr("title_entries").getString()))
-				return "操作页的标题栏不是「操作列表」的译文：" + base;
-			// ① 四种状态各变一次，标题栏必须一个字都不变
+			if (!base.equals(current.name + tail))
+				return "操作页的标题栏不是「任务名 · 条数」（期望 " + current.name + tail + "，实际 " + base + "）";
+			// ② 四种状态各变一次，标题栏必须一个字都不变
 			editing = new EditTarget(false, 0, 0, null);
 			String op = headingText().getString();
 			editing = new EditTarget(false, 0, 0, "个数");
 			String prop = headingText().getString();
 			editing = new EditTarget(true, 0, -1, null);
-			String task = headingText().getString();
+			String taskHeadEdit = headingText().getString();
 			editingDialog = Dialog.ORIGIN;
 			String dialog = headingText().getString();
-			if (!base.equals(op) || !base.equals(prop) || !base.equals(task) || !base.equals(dialog))
+			if (!base.equals(op) || !base.equals(prop) || !base.equals(taskHeadEdit) || !base.equals(dialog))
 				return "标题栏随编辑状态变了（操作页=" + base + " 编辑操作=" + op + " 编辑属性=" + prop
-					+ " 编辑任务=" + task + " 弹窗=" + dialog + "）—— 它只该写页面名";
-			// ② 子面板顶上那行 = 三个固定词，且宽度放得进面板
+					+ " 编辑任务=" + taskHeadEdit + " 弹窗=" + dialog + "）—— 它只该写「任务名 · 条数」";
+			// ③ 长任务名要截断（否则整串居中画出去会盖到面板外）
 			int limit = ModGuiTextures.EDITOR_PANEL.getWidth() - 8;
+			String savedName = current.name;
+			try {
+				current.name = "很长的任务名".repeat(8);
+				String wide = headingText().getString();
+				int wideWidth = mc.font.width(wide);
+				if (wideWidth > limit)
+					return "长任务名的标题没有截断，画出了面板（" + wideWidth + " > " + limit + "）：" + wide;
+				if (!wide.endsWith(tail))
+					return "截断把条数尾巴也截掉了（期望以 [" + tail + "] 结尾，实际 " + wide + "）";
+			} finally {
+				current.name = savedName;
+			}
+			// ④ 子面板顶上那行 = 三个固定词，且宽度放得进面板
 			editingDialog = null;
 			editing = new EditTarget(false, 0, 0, null);
 			String opHead = editorHeaderText().getString();
@@ -4255,16 +4364,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					return "面板顶上那行放不进面板（" + w + " > " + limit + "）：" + head;
 			}
 			page = Page.TASKS;
-			if (!headingText().getString().equals(tr("title_tasks").getString()))
+			if (!headingText().getString()
+				.equals(tr("title_tasks").getString()))
 				return "任务页的标题栏不是「任务列表」的译文：" + headingText().getString();
-			// ③ 标题栏不再报任务名以后，"我在哪个任务里"挂在切页按钮的悬停提示上 ——
-			//   那条新提示也必须有译文（缺键的表现是悬停里显示裸 key，编译与运行都不报错）。
-			String tip = tr("btn.task_list.current", "probe").getString();
-			if (tip.contains("create_sequenced_mechanical_arm"))
-				return "切页按钮的悬停提示缺译文（显示成裸 key：" + tip + "）";
 			return null;
 		} finally {
 			page = savedPage;
+			currentTask = savedTask;
 			editing = savedEditing;
 			editingProp = savedProp;
 			editingDialog = savedDialog;
@@ -4609,6 +4715,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String scriptNotes = programAndTaskNoteProblem(inventory, registries);
 			if (scriptNotes != null && problem == null)
 				problem = "脚本备注: " + scriptNotes;
+
+			// 卡片悬停的排版（用户第八十九轮图七：金操作名 + 白参数 / 逐行属性 / 备注最后）
+			String headerTip = headerTooltipProblem(inventory, registries);
+			if (headerTip != null && problem == null)
+				problem = "卡片悬停: " + headerTip;
 
 			screen.editingProp = null;
 			screen.editing = null;

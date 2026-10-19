@@ -2,6 +2,7 @@ package io.github.Ling.create_sequenced_mechanical_arm.program;
 
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.chat.Component;
 
 /**
  * 护目镜用的<b>程序摘要</b> —— 客户端能看到的最小信息集。
@@ -36,9 +37,19 @@ public class ArmProgramView {
 	 * <b>不要把"第几轮 / 共几轮"加回来</b>：恒循环之下它没有答案。
 	 */
 	public String state = "IDLE";
-	public String failure = "";
+	/**
+	 * 最近一次失败 / 提示的那句话（{@code null} = 现在没有）。
+	 *
+	 * <p>★ <b>是 Component 而不是 String</b>：这几句文案要按玩家语言显示（用户口径：
+	 * "护目镜上的报错也要跟着玩家语言走"）。服务端把它连同翻译键一起发给客户端，
+	 * 客户端渲染时才解析 —— 存成 String 就等于把服务端的语言（英文）钉死在这一行上。
+	 * <p>⚠️ 存盘/同步走的是<b>组件 JSON</b>（键 {@code fl}）：老存档里那是一个纯文本字符串，
+	 * 读的时候必须兜住（见 {@link ProgramRuntime#readComponent}）。
+	 */
+	public Component failure;
 	public boolean halted;
-	public String error = "";
+	/** 停机原因（同上：Component，按玩家语言显示；{@code null} = 没停机）。 */
+	public Component error;
 
 	public static ArmProgramView capture(ArmProgram program, ProgramRuntime runtime,
 		HolderLookup.Provider registries) {
@@ -46,8 +57,8 @@ public class ArmProgramView {
 		view.taskCount = program.tasks.size();
 		view.state = runtime.state.name();
 		view.halted = runtime.isHalted();
-		view.failure = runtime.getLastFailure() == null ? "" : runtime.getLastFailure();
-		view.error = runtime.getError() == null ? "" : runtime.getError();
+		view.failure = runtime.getLastFailureText();
+		view.error = runtime.getErrorText();
 
 		ArmProgramTask task = program.task(runtime.taskIndex);
 		if (task != null) {
@@ -73,9 +84,11 @@ public class ArmProgramView {
 		if (entry != null)
 			tag.put("e", entry.save(registries));
 		tag.putString("st", state);
-		tag.putString("fl", failure);
+		if (failure != null)
+			tag.putString("fl", Component.Serializer.toJson(failure, registries));
 		tag.putBoolean("ha", halted);
-		tag.putString("er", error);
+		if (error != null)
+			tag.putString("er", Component.Serializer.toJson(error, registries));
 		return tag;
 	}
 
@@ -87,9 +100,9 @@ public class ArmProgramView {
 		entryText = tag.getString("et");
 		entry = tag.contains("e") ? ArmProgramEntry.load(tag.getCompound("e"), registries) : null;
 		state = tag.contains("st") ? tag.getString("st") : "IDLE";
-		failure = tag.getString("fl");
+		failure = ProgramRuntime.readComponent(tag, "fl", registries);
 		halted = tag.getBoolean("ha");
-		error = tag.getString("er");
+		error = ProgramRuntime.readComponent(tag, "er", registries);
 	}
 
 }
