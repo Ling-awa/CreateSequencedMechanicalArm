@@ -507,14 +507,29 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		restoreScroll("task#" + currentTask, view.scroll());
 	}
 
-	/** 把一个列表的滚动直接摆到位（**不带动画**：恢复的位置不该从顶部滑过去）。 */
+	/**
+	 * 把一个列表的滚动直接摆到位（**不带动画**：恢复的位置不该从顶部滑过去）。
+	 *
+	 * <p>⚠️ 用户实测（2026-10-19）：<i>"每次右键打开卡片看起来像是从顶部在很短的时间内滑倒对应位置，
+	 * 而不是直接打开就是那个位置"</i> —— 根因就在这一行原来写的是
+	 * {@code chaser.setValue(v)} + {@code chaser.chase(v, 1f, EXP)}：
+	 * <ul>
+	 *   <li>{@code LerpedFloat.setValue(v)} 只把 {@code previousValue = 旧值(0)}、{@code value = v}；</li>
+	 *   <li>而绘制用的是 {@code getValue(partialTicks)}，它按
+	 *       {@code interpolator(partial, previousValue, value)} 插值 —— 于是**打开后的第一帧**
+	 *       画在 0 与 v 之间（那一帧是从顶部滑出去的半截），下一 tick 的 {@code tickChaser()}
+	 *       才把 {@code previousValue} 追上 {@code value}。</li>
+	 * </ul>
+	 * 60fps 之下这就是"很短时间滑过去"的观感。{@link LerpedFloat#startWithValue(double)} 把
+	 * {@code previousValue / chaseTarget / value} **三个一起**落到同一个数上，插值起点和终点相同 ⇒
+	 * 第一帧就在正确位置，且后续 tick 也不会再动。
+	 */
 	private void restoreScroll(String key, float value) {
 		if (value <= 0f)
 			return;
 		LerpedFloat chaser = listScrolls.computeIfAbsent(key, key2 -> LerpedFloat.linear()
 			.startWithValue(0));
-		chaser.setValue(value);
-		chaser.chase(value, 1f, Chaser.EXP);
+		chaser.startWithValue(value);
 	}
 
 	/** 当前浏览位置（跨重开要保留的那四个数）。 */
@@ -3831,6 +3846,52 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			&& Math.abs(probe.scrollOf("task#1") - 40f) < 0.01f && Math.abs(probe.scrollOf("tasks") - 12f) < 0.01f;
 	}
 
+	/**
+	 * 自检：**恢复浏览位置时不许有动画**（用户 2026-10-19："每次右键打开卡片看起来像是从顶部在很短时间内
+	 * 滑倒对应位置，而不是直接打开就是那个位置"）。
+	 *
+	 * <p>为什么 {@link #viewStateSeedOk} 抓不到这个 bug：它读的是 {@code scrollOf(...)}
+	 * （= {@code getChaseTarget()}）——**目标**一直是对的，错的是"当前位置 / 上一帧位置"这一对：
+	 * {@code setValue(v)} 会把 {@code previousValue} 留在 0，而绘制读的是
+	 * {@code getValue(partialTicks)}（在 previousValue 与 value 之间插值）⇒ 第一帧从顶部滑出去。
+	 * 所以这条**必须读插值后的值**：{@code getValue(0.5f)} 要与恢复值相等，且 {@code settled()} 为真。
+	 * 反证：把 {@code restoreScroll} 退回 {@code setValue(v)} + {@code chase(v, 1f, EXP)}
+	 * ⇒ 这条立刻红（0.5f 那一半会读到 v 的一半）。
+	 */
+	private static String viewRestoreSnapProblem(Inventory inventory, RegistryAccess registries) {
+		ArmProgram program = new ArmProgram();
+		for (int i = 0; i < 2; i++) {
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "t" + (i + 1);
+			for (int e = 0; e < 6; e++)
+				task.entries.add(new ArmProgramEntry());
+			program.tasks.add(task);
+		}
+		program.editorTask = 1;
+		program.editorMode = CardUiPacket.EDIT;
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
+		CardProgramStorage.write(card, program, registries);
+		CardProgramStorage.writeView(card, new CardProgramStorage.View(3, CardProgramStorage.PAGE_ENTRIES, 40f, 12f));
+		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+		ItemStack.STREAM_CODEC.encode(buffer, card);
+		ArmProgramScreen probe = new ArmProgramScreen(new ArmProgramMenu(0, inventory, buffer), inventory, tr("title"));
+
+		for (String key : new String[] { "task#1", "tasks" }) {
+			float want = "tasks".equals(key) ? 12f : 40f;
+			LerpedFloat chaser = probe.listScrolls.get(key);
+			if (chaser == null)
+				return "恢复后找不到列表 " + key + " 的滚动位置（压根没恢复）";
+			// 插值中点 = "第一帧画在哪"的直接度量（绘制用的就是这个 getValue(partialTicks)）
+			float mid = chaser.getValue(0.5f);
+			if (Math.abs(mid - want) > 0.01f)
+				return "打开界面时列表 " + key + " 的滚动还会从别处滑过来（目标 " + want + "，插值中点 " + mid
+					+ "）—— restoreScroll 要用 startWithValue（它把 previousValue 一起落位），不能用 setValue";
+			if (!chaser.settled())
+				return "打开界面时列表 " + key + " 的滚动还在追（settled=false：打开后第一 tick 还会动）";
+		}
+		return null;
+	}
+
 	/** 自检用：实测到的任务数上限（加到第几个被编辑器挡住）；{@code -1} = 守卫没生效。 */
 	private int probedTaskLimit = -1;
 
@@ -4093,13 +4154,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			boolean sessionSeeded = true;
 			boolean emptyOnTasks = true;
 			boolean viewSeeded = true;
+			String viewSnap = null;
 			try {
 				sessionSeeded = sessionSeedOk(mc, inventory, registries);
 				emptyOnTasks = emptyProgramStartsOnTasks(inventory, registries);
 				viewSeeded = viewStateSeedOk(inventory, registries);
+				viewSnap = viewRestoreSnapProblem(inventory, registries);
 			} catch (Throwable t) {
 				sessionSeeded = false;
 				viewSeeded = false;
+				viewSnap = "回位自检抛异常：" + t;
 			}
 			if (!sessionSeeded && problem == null)
 				problem = "打开编辑器没有落到卡上记着的任务（etask 没被读）";
@@ -4107,6 +4171,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				problem = "空卡打开编辑器没有直接进任务页";
 			if (!viewSeeded && problem == null)
 				problem = "关掉界面再打开没有回到离开时的页面 / 指针 / 滚动位置（§18）";
+			if (viewSnap != null && problem == null)
+				problem = "回位动画: " + viewSnap;
 
 			if (problem != null)
 				return "FAIL " + problem;
@@ -4127,7 +4193,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				+ " 实测宽=模式" + modeLabelW + "/" + (SIGNAL_MODE_W - 10) + ",数值" + numLabelW + "/"
 				+ (SIGNAL_TICKS_W - 10) + ",单位" + unitLabelW + "/" + (SIGNAL_UNIT_W - 10)
 				+ " 会话落点=" + (sessionSeeded ? 1 : 0) + " 空卡进任务页=" + (emptyOnTasks ? 1 : 0) + " 视图="
-				+ (viewSeeded ? "记住了" : "FAIL") + " 任务上限="
+				+ (viewSeeded ? "记住了" : "FAIL") + " 回位=" + (viewSnap == null ? "直接到位" : "FAIL") + " 任务上限="
 				+ screen.probedTaskLimit + " 备注框=" + (noteFieldOk ? "OK" : "FAIL") + " 滚动="
 				+ (scrollIndep == null && scrollBar == null ? "独立+可拖" : "FAIL") + " 指针="
 				+ (pointerIndep == null ? "按列表独立" : "FAIL") + " 热区=" + screen.hits;
