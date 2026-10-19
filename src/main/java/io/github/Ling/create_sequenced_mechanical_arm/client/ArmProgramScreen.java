@@ -3740,21 +3740,36 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 		pushUndo();
 		int index = Mth.clamp(at, 0, task.entries.size());
-		// ★ 新条目**必须给一个有意义的位置**（§19.6 用户实测踩到的坑）：条目 offset 是**相对卡上录制原点**
-		//   的偏移（运行时的世界目标 = `臂位置 + offset`，§19.7）⇒ 把偏移留成 0 就等于"目标 = 原点那一格"，
-		//   玩家看到的就是"新操作不知道指哪"。默认取"你正看着的那个方块"，没看着就取你脚下 ——
-		//   与"录一条"的直觉一致（等价于当场录了一条只有位置、还没选动作的条目）。
-		//   ⚠️ 原点没设时退回 (0,0,0)（裸坐标），与世界内录制那边"没设就不让录"不同：这里只是给一个
-		//      默认落点，玩家接着就会在第二行把它改掉，没必要为此堵住"新建条目"。
+		// ★ 新条目的默认偏移由 {@link #newEntryOffset} 一处决定（见那里的说明）：
+		//   **没设原点 ⇒ 0,0,0**；设了原点 ⇒ "看向的方块 − 原点"（用户喜欢的那个自动填入）。
 		// 新建条目走 fresh(op)：个数取该操作的默认值（取出 1 / 放入 64 / 收存 64），
 		// 模式固定「小于等于」（用户 2026-10-19 二次确认）—— 一律别自己 new + 改 op，
 		// 那样会得到一条个数是字段初始值 1 的「放入」（见 ArmProgramEntry.fresh）。
 		ArmProgramEntry created = ArmProgramEntry.fresh(OperationType.TAKE);
-		created.offset = defaultNewEntryWorldPos()
-			.subtract(cardOriginOrZero());
+		created.offset = newEntryOffset(CardProgramStorage.readOrigin(menu.getCard()), defaultNewEntryWorldPos());
 		task.entries.add(index, created);
 		pointerIndex = index;
 		openEditor(new Card(false, currentTask, index), null);
+	}
+
+	/**
+	 * <b>新条目的默认偏移</b>（用户 2026-10-19 定稿）：<b>没设原点 ⇒ {@code 0,0,0}</b>；
+	 * 设了原点 ⇒ {@code 看向的方块 − 原点}（那个很顺手的自动填入，用户明确说好用，保留）。
+	 *
+	 * <p><b>为什么不能写成 {@code world − cardOriginOrZero()}</b>（这正是本轮修的残留 bug）：
+	 * 没设原点时 {@code cardOriginOrZero()} 退回 {@code (0,0,0)}，于是偏移**直接等于玩家所在的世界坐标**。
+	 * 以前看不出来 —— 那时坐标框显示的是 {@code 原点 + 偏移}（同一个世界位置，读起来是对的）；
+	 * 现在坐标框显示的是**相对偏移**，于是"新建一条就带着 {@code −139,−60,−129}"立刻露馅。
+	 *
+	 * <p>⚠️ 判据只看"卡上有没有原点"（{@code readOrigin == null} 才是没设；{@code (0,0,0)} 是一个**设过的**原点）。
+	 * 反证：把这句改成 {@code lookedAt.subtract(originOrZero)} 再传 {@code null} ⇒ 自检
+	 * {@code newEntryOffsetProblem()} 立刻红。
+	 *
+	 * @param origin  卡上的录制原点（{@code null} = 没设）
+	 * @param lookedAt 玩家正看着的方块（没有就看脚下；这个值只在有原点时参与运算）
+	 */
+	private static BlockPos newEntryOffset(@Nullable BlockPos origin, BlockPos lookedAt) {
+		return origin == null ? BlockPos.ZERO : lookedAt.subtract(origin);
 	}
 
 	/** 新条目的默认世界位置：看向的方块 → 没有就用玩家脚下；都没有才退回原点（等价于偏移 0）。 */
@@ -4001,8 +4016,34 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 自检：**恢复浏览位置时不许有动画**（用户 2026-10-19："每次右键打开卡片看起来像是从顶部在很短时间内
-	 * 滑倒对应位置，而不是直接打开就是那个位置"）。
+	 * 自检：**没设原点时新条目的默认偏移必须是 {@code 0,0,0}**，设了原点才是"看向的方块 − 原点"
+	 * （用户 2026-10-19 报的残留 bug：没原点时默认偏移直接变成玩家所在的世界坐标）。
+	 *
+	 * <p>为什么以前抓不到：客户端自检环境没有玩家，{@code defaultNewEntryWorldPos()} 会退回原点，
+	 * 于是"世界坐标 − 原点"恰好等于 0 —— 旧算式在这个环境里**永远是对的**。所以这条断言直接量
+	 * {@link #newEntryOffset}（纯函数：原点 + 看向位置进、偏移出），把"玩家看着哪儿"显式喂进去。
+	 *
+	 * <p>反证：把 {@code newEntryOffset} 改回 {@code lookedAt.subtract(originOrZero)}（即没原点时当 0,0,0 减）
+	 * ⇒ ① 立刻红；把"设了原点"那一支写成直接返回 {@code BlockPos.ZERO} ⇒ ② 立刻红。
+	 */
+	private static String newEntryOffsetProblem() {
+		BlockPos looked = new BlockPos(140, 70, -60);
+		BlockPos origin = new BlockPos(100, 64, -50);
+		BlockPos noOrigin = newEntryOffset(null, looked);
+		if (!noOrigin.equals(BlockPos.ZERO))
+			return "没设原点时新条目的默认偏移不是 0,0,0（是 " + noOrigin.toShortString()
+				+ "）—— 那等于把玩家所在的世界坐标当成相对偏移（用户报的残留 bug）";
+		BlockPos withOrigin = newEntryOffset(origin, looked);
+		BlockPos expected = looked.subtract(origin);
+		if (!withOrigin.equals(expected))
+			return "设了原点时自动填入的偏移不是「看向的方块 − 原点」（期望 " + expected.toShortString() + "，实际 "
+				+ withOrigin.toShortString() + "）—— 那个好用的自动填入不能丢";
+		return null;
+	}
+
+	/**
+	 * 自检：**恢复浏览位置时不许有动画**（用户 2026-10-19：「每次右键打开卡片看起来像是从顶部在很短时间内
+	 * 滑倒对应位置，而不是直接打开就是那个位置」）。
 	 *
 	 * <p>为什么 {@link #viewStateSeedOk} 抓不到这个 bug：它读的是 {@code scrollOf(...)}
 	 * （= {@code getChaseTarget()}）——**目标**一直是对的，错的是"当前位置 / 上一帧位置"这一对：
@@ -4202,6 +4243,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String useSneakRow = screen.useSneakRowProblem();
 			if (useSneakRow != null && problem == null)
 				problem = "使用的潜行开关: " + useSneakRow;
+			// ★ 新条目的默认偏移：没设原点 ⇒ 0,0,0（设了原点才"看向的方块 − 原点"）—— 用户报的残留 bug
+			String newEntryOffset = newEntryOffsetProblem();
+			if (newEntryOffset != null && problem == null)
+				problem = "新条目的默认偏移: " + newEntryOffset;
 			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
 			String exitRow = screen.exitRowProblem();
 			if (exitRow != null && problem == null)
