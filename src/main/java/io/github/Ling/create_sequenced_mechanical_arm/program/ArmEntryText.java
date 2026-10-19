@@ -40,8 +40,9 @@ public final class ArmEntryText {
 	/**
 	 * 操作 + 必要属性。
 	 *
-	 * <p>必要属性就是编辑器第二行里那些**必填**控件：位置类的坐标、左右键的朝向、等待类的时长/极性、
-	 * 调用的目标任务。可选属性（成功后 / 失败后 / 备注 / 个数…）不在这里，见 {@link #props}。
+	 * <p>必要属性就是编辑器第二行里那些**必填**控件：位置类的坐标与个数、左右键的朝向、
+	 * 等待类的时长/极性、收发信号的模式与接收距离、调用的目标任务。
+	 * 可选属性（成功后 / 失败后 / 备注 / 卸货方式…）不在这里，见 {@link #props}。
 	 */
 	public static Component base(ArmProgramEntry entry) {
 		return base(entry, false);
@@ -73,6 +74,15 @@ public final class ArmEntryText {
 				if (!tail.isEmpty())
 					suffix.append("  ")
 						.append(tail);
+				// ★ 用户本轮口径：「收发信号有距离」这件事必须**显式写在卡片第一行**，
+				//   而不是让玩家翻第二排的属性胶囊才知道（原话："收 / 发信号有距离这种事情我觉得得显式的
+				//   告诉玩家，而不是让玩家编辑其他属性的时候再找"）—— 所以「距离」和「个数」一样，
+				//   属于**基础内容**：它现在只在这里出现，属性胶囊里那一份已经删掉了。
+				//   判据只问 {@link ArmProgramEntry#hasSignalRange()}（收模式 + 半径 > 0），别在这里
+				//   再写一遍 `signalMode == RECEIVE && signalRange > 0`。
+				if (entry.hasSignalRange())
+					suffix.append("  ")
+						.append(signalRangeText(entry).getString());
 				// 频率物品是"等哪一对物品"的必需信息：卡片上它是两个图标，而工具提示里没有图标，
 				// 所以那里只能把名字写出来（空槽位不写，免得出现 "Air + Air"）。
 				if (withFrequencyItems) {
@@ -114,6 +124,16 @@ public final class ArmEntryText {
 							.getString());
 			}
 			default -> {
+				// ★ 个数先写、坐标在后（顺序**不能反**）：标题芯片宽度封顶（{@code renderChip} 那侧
+				//   文字按 120px 截断），个数是"这条要搬多少"的必读信息，必须留在前面；
+				//   坐标被截掉一截反而还能从编辑器里看全。
+				// ★ 个数**永远显示**（含默认值：取出 1 / 放入 64）：用户口径是"防止忘记放入默认 64 个"——
+				//   藏起默认值就会让人以为这条没配过数量。判据只问 {@link OperationType#hasCount()}
+				//   （单点），别在这里写 `op == TAKE || op == DEPOSIT`。
+				//   反证：把这两行删掉 ⇒ 自检里"取出默认必须含「最多 1 个」"那条立刻变红。
+				if (entry.op.hasCount())
+					suffix.append("  ")
+						.append(countText(entry).getString());
 				// ★ 问**条目级**的 needsTarget()：过滤的容器模式有坐标（且胶囊上要看得见），
 				//   手持模式则一个字都不写（用户口径：手持模式不写坐标）。
 				if (entry.needsTarget())
@@ -231,7 +251,13 @@ public final class ArmEntryText {
 
 	/**
 	 * 只列**偏离默认值**的可选属性，顺序与编辑器里一致：
-	 * 成功后 → 失败后 → 动作参数（个数 / 卸货方式） → 备注。
+	 * 成功后 → 失败后 → 卸货方式 → 备注。
+	 *
+	 * <p>★ 用户本轮口径：**「个数」（取出 / 放入）与「收信号距离」不再是属性** ——
+	 * 它们升级成"基础内容"，只写在第一行（见 {@link #base}）。
+	 * 反证：把原来那两支 {@code case TAKE, DEPOSIT} / {@code case SIGNAL} 加回来 ⇒
+	 * 卡片上同一个数会出现两遍（第一行 + 一枚胶囊），自检
+	 * "第一行之外不许再有「个数」/「距离」胶囊"那条立刻变红。
 	 *
 	 * <p>终结操作（退出 / 抛错）执行之后就不在这个任务里了，没有"成功后/失败后"可谈 —— 与编辑器同一条规则。
 	 */
@@ -244,24 +270,11 @@ public final class ArmEntryText {
 				out.add(failureText(entry));
 		}
 		switch (entry.op) {
-			case TAKE, DEPOSIT -> {
-				// 判据是 countIsSet()（= count != 1 **或** 等于模式）：count == 1 && EXACT 也必须显示 ——
-				// "必须恰好 1 个"与"最多 1 个"行为不同，藏起来就等于静默改掉语义。
-				if (entry.countIsSet())
-					out.add(countText(entry));
-			}
 			case UNLOAD -> {
 				if (entry.unloadRepeat != UnloadRepeat.ONCE)
 					out.add(unloadRepeatText(entry));
 				if (entry.unloadAmount != UnloadAmount.ONE_STACK)
 					out.add(unloadAmountText(entry));
-			}
-			case SIGNAL -> {
-				// 「距离」（用户口径：距离只约束「收」）：判据只有 hasSignalRange()
-				// —— 收模式 + 半径 > 0 才占胶囊位；发送 / 中断、以及默认的 0 都不显示
-				//（0 = 只有同一格才算收到，那是"只能自己接收发送"的默认语义，不是信息）。
-				if (entry.hasSignalRange())
-					out.add(signalRangeText(entry));
 			}
 			default -> {
 			}
@@ -316,15 +329,16 @@ public final class ArmEntryText {
 	}
 
 	/**
-	 * 「个数」胶囊 = <b>模式 + 数值</b>（用户本轮口径：小于等于写“最多 N”、等于写“等于 N”）。
+	 * 「个数」的一句话 = <b>模式 + 数值</b>（用户本轮口径：小于等于写“最多 N”、等于写“等于 N”）。
 	 *
 	 * <p>⚠️ 两个模式必须写成**两句不同的话**：它们的行为不同（一个“有多少动多少、不足不算失败”，
 	 * 一个“凑不出 N 个就走失败后”），共用一句“个数 N”会让玩家看不出这条到底会不会等。
 	 * 文案走 lang（{@code chip.count_atmost} / {@code chip.count_exact}），不硬编码中文。
 	 *
-	 * <p>这也是“界面显示的写法 = 卡片胶囊的写法 = 脚本写出的写法”三处同源的那一处：
-	 * 编辑器属性表的 chip、卡片胶囊、护目镜都从这里取（脚本那一侧写的是
-	 * {@code count=} + {@code countmode=}，语义判据同样是 {@link ArmProgramEntry#countIsExact()}）。
+	 * <p>★ 用户本轮口径：「个数」从**属性**升级成**基础内容** ⇒ 它现在只出现在
+	 * **第一行**（{@link #base} 的 {@code default} 分支，位于坐标之前）与护目镜那一行，
+	 * **不再有第二行的胶囊**（{@link #props} 里那一支已删）。
+	 * 语义判据仍然是 {@link ArmProgramEntry#countIsExact()}（单一来源）。
 	 */
 	public static Component countText(ArmProgramEntry entry) {
 		return entry.countIsExact() ? tr("chip.count_exact", entry.count) : tr("chip.count_atmost", entry.count);
@@ -353,10 +367,13 @@ public final class ArmEntryText {
 	}
 
 	/**
-	 * 「接收距离」胶囊：{@code 距离 16}（用户口径：距离只约束「收」）。
+	 * 「接收距离」的一句话：{@code 距离 16}（用户口径：距离只约束「收」）。
 	 *
-	 * <p>判据只有 {@link ArmProgramEntry#hasSignalRange()}（收模式且半径 &gt; 0）；胶囊文案与编辑器里
-	 * 那枚胶囊同源，两边说法不会分叉。键 {@code chip.signal_range}。
+	 * <p>判据只有 {@link ArmProgramEntry#hasSignalRange()}（收模式且半径 &gt; 0）。
+	 * ★ 用户本轮口径：距离从**属性**升级成**基础内容** ⇒ 它只出现在第一行
+	 * （{@link #base} 的 {@code SIGNAL} 分支，短语与尾巴之后、频率物品之前），
+	 * **不再有第二行的胶囊**（{@link #props} 里那一支已删），语句本身仍只有这一处。
+	 * 键 {@code chip.signal_range}。
 	 */
 	public static Component signalRangeText(ArmProgramEntry entry) {
 		return tr("chip.signal_range", entry.signalRange);
@@ -508,57 +525,94 @@ public final class ArmEntryText {
 			.equals(retryForever))
 			return "「攻击」的「失败后 停下」被写成了「一直重试」—— 硬失败没有重试窗口";
 
-		// ★ 个数模式（用户本轮口径）：count == 1 且「等于」必须**显示**出来
-		//（“必须恰好 1 个”与“最多 1 个”行为不同，藏起来就是静默改语义）；
-		// 而 count == 1 且「小于等于」仍然不占胶囊位（那就是默认值）。
-		// 反证：把 props() 里的判据改回 `entry.count != 1` ⇒ 第一条立刻红。
+		// ★ 用户本轮口径：「个数」升级成**基础内容** ⇒ 它**永远**出现在第一行（含默认值），
+		//   第二行的胶囊里**一个都不许再有**（同一个数出现两遍就是这次要修的东西）。
+		//   ① 取出默认（count=1 ATMOST）第一行必须含「最多 1 个」；
+		//   ② 放入默认（count=64 ATMOST）第一行必须含「最多 64 个」——
+		//      这条正是用户说的"防止忘记放入默认 64"；
+		//   ③ 两者的属性胶囊里必须没有个数那枚（props() 里那两支已删）。
+		//   反证：把 props() 里的 `case TAKE, DEPOSIT` 加回来 ⇒ ③ 立刻红；
+		//        把 base() 的 default 分支里那两行 `if (entry.op.hasCount())` 删掉 ⇒ ①② 立刻红。
+		ArmProgramEntry takeDefault = new ArmProgramEntry();
+		takeDefault.op = OperationType.TAKE;
+		// 默认值一律问 defaultCount（取出 1 / 放入 64）—— 别在夹具里写死数字
+		takeDefault.count = ArmProgramEntry.defaultCount(takeDefault.op);
+		String takeBase = base(takeDefault).getString();
+		String takeCount = tr("chip.count_atmost", 1).getString();
+		if (!takeBase.contains(takeCount))
+			return "取出默认（个数 1 / 小于等于）的第一行里没有「" + takeCount + "」：" + takeBase;
+		if (props(takeDefault).stream()
+			.anyMatch(c -> c.getString()
+				.contains(tr("chip.count_atmost", 1).getString())))
+			return "个数已经进了第一行，属性胶囊里不该再有它：" + props(takeDefault);
+		ArmProgramEntry depositDefault = new ArmProgramEntry();
+		depositDefault.op = OperationType.DEPOSIT;
+		// ⚠️ 默认值按操作给：字段初值是 1，而「放入」的默认是 64（{@code defaultCount}）——
+		//   编辑器换操作 / 脚本没写 count= 时落进来的就是这个值。这里**问 defaultCount**，
+		//   别在夹具里写死 64（写死就不是在测"默认"了）。
+		depositDefault.count = ArmProgramEntry.defaultCount(depositDefault.op);
+		String depositBase = base(depositDefault).getString();
+		String depositCount = tr("chip.count_atmost", 64).getString();
+		if (!depositBase.contains(depositCount))
+			return "放入默认（个数 64 / 小于等于）的第一行里没有「" + depositCount + "」：" + depositBase;
+		if (props(depositDefault).stream()
+			.anyMatch(c -> c.getString()
+				.contains(depositCount)))
+			return "放入的个数已经进了第一行，属性胶囊里不该再有它：" + props(depositDefault);
+		// 个数在**坐标之前**：标题芯片的文字会被截断（renderChip 按 120px 裁），
+		// 顺序反了就会出现"坐标还在、个数被切掉"。反证：把 base() 里那两行挪到坐标之后 ⇒ 这里立刻红。
+		ArmProgramEntry takeAt = new ArmProgramEntry();
+		takeAt.op = OperationType.TAKE;
+		takeAt.offset = new net.minecraft.core.BlockPos(1, 2, 3);
+		String atBase = base(takeAt).getString();
+		if (atBase.indexOf(takeCount) < 0 || atBase.indexOf("1,2,3") < 0 || atBase.indexOf(takeCount) > atBase.indexOf("1,2,3"))
+			return "第一行里「个数」必须排在坐标之前（芯片会被截断）：" + atBase;
+		// 个数的两种模式都要能读出来（等于模式写的是"等于 N 个"，不是"最多"）
 		ArmProgramEntry exactOne = new ArmProgramEntry();
 		exactOne.op = OperationType.TAKE;
 		exactOne.count = 1;
 		exactOne.countMode = ArmProgramEntry.CountMode.EXACT;
-		List<Component> exactProps = props(exactOne);
-		if (exactProps.size() != 1
-			|| !exactProps.get(0)
-				.getString()
-				.equals(tr("chip.count_exact", 1).getString()))
-			return "个数=1 且「等于」模式的胶囊没显示（或写成了别的模式）：" + exactProps;
-		// 「放入」也要有这一枚（用户口径：这条属性同时服务取出与放入）。
-		ArmProgramEntry atMostTwo = new ArmProgramEntry();
-		atMostTwo.op = OperationType.DEPOSIT;
-		atMostTwo.count = 2;
-		List<Component> atMostProps = props(atMostTwo);
-		if (atMostProps.size() != 1
-			|| !atMostProps.get(0)
-				.getString()
-				.equals(tr("chip.count_atmost", 2).getString()))
-			return "「放入」的个数胶囊没有按「小于等于」写出来：" + atMostProps;
+		if (!base(exactOne).getString()
+			.contains(tr("chip.count_exact", 1).getString()))
+			return "个数=1 且「等于」模式的第一行没写成「等于 1 个」：" + base(exactOne).getString();
 
-		// ★ 「距离」只对**收信号**有意义（用户口径：距离只约束收；"中断信号不需要这个属性"）：
-		//   ① 收 + 半径 16 ⇒ 胶囊里必须有一句（文案走 chip.signal_range，不写死中文）；
-		//   ② 收 + 半径 0（默认）⇒ 不占胶囊位（0 = 只有同一格才算收到，是默认语义、不是信息）；
-		//   ③ 发 / 中断 + 半径非 0 ⇒ **也不显示**（那份值运行时不读，显示出来等于骗人）。
-		//   反证：把 props() 里那一支的判据从 hasSignalRange() 改成 signalRange != 0 ⇒ ③ 立刻红。
+		// ★ 「距离」同样升级成**基础内容**，且只对**收信号**有意义（用户口径：距离只约束收；
+		//   "中断信号不需要这个属性"）：
+		//   ① 收 + 半径 16 ⇒ 第一行必须有一句「距离 16」（文案走 chip.signal_range，不写死中文）；
+		//   ② 收 + 半径 0（默认）⇒ 第一行**不写**（0 = 只有同一格才算收到，是默认语义、不是信息）；
+		//   ③ 发 / 中断 + 半径非 0 ⇒ **也不显示**（那份值运行时不读，显示出来等于骗人）；
+		//   ④ 这三种情况下**属性胶囊里都不许有它**（它已经进了第一行）。
+		//   反证：把 base() 里那两行判据从 hasSignalRange() 改成 signalRange != 0 ⇒ ③ 立刻红；
+		//        把 props() 里的 `case SIGNAL` 加回来 ⇒ ④ 立刻红。
 		ArmProgramEntry recvRange = new ArmProgramEntry();
 		recvRange.op = OperationType.SIGNAL;
 		recvRange.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
 		recvRange.signalRange = 16;
-		String rangeChip = tr("chip.signal_range", 16).getString();
-		List<Component> rangeProps = props(recvRange);
-		if (rangeProps.size() != 1
-			|| !rangeProps.get(0)
-				.getString()
-				.equals(rangeChip))
-			return "收信号 + 距离 16 的胶囊没出现（或文案不对）：" + rangeProps;
+		String rangeText = tr("chip.signal_range", 16).getString();
+		String rangeBase = base(recvRange).getString();
+		if (!rangeBase.contains(rangeText))
+			return "收信号 + 距离 16 的第一行里没有「" + rangeText + "」：" + rangeBase;
+		if (props(recvRange).stream()
+			.anyMatch(c -> c.getString()
+				.contains(rangeText)))
+			return "距离已经进了第一行，属性胶囊里不该再有它：" + props(recvRange);
 		ArmProgramEntry recvNoRange = new ArmProgramEntry();
 		recvNoRange.op = OperationType.SIGNAL;
-		if (!props(recvNoRange).isEmpty())
-			return "收信号 + 距离 0（默认）不该占胶囊位：" + props(recvNoRange);
-		ArmProgramEntry sendRange = new ArmProgramEntry();
-		sendRange.op = OperationType.SIGNAL;
-		sendRange.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
-		sendRange.signalRange = 16;
-		if (!props(sendRange).isEmpty())
-			return "「发送」不该显示距离（距离只约束收）：" + props(sendRange);
+		if (base(recvNoRange).getString()
+			.contains(tr("chip.signal_range", 0).getString()))
+			return "收信号 + 距离 0（默认）不该写进第一行：" + base(recvNoRange).getString();
+		for (ArmProgramEntry.SignalMode mode : new ArmProgramEntry.SignalMode[] {
+			ArmProgramEntry.SignalMode.SEND_ON, ArmProgramEntry.SignalMode.SEND_OFF }) {
+			ArmProgramEntry sending = new ArmProgramEntry();
+			sending.op = OperationType.SIGNAL;
+			sending.signalMode = mode;
+			sending.signalRange = 16;
+			if (base(sending).getString()
+				.contains(rangeText))
+				return "「" + mode + "」的第一行不该写距离（距离只约束收）：" + base(sending).getString();
+			if (!props(sending).isEmpty())
+				return "「" + mode + "」不该有点数 / 距离胶囊：" + props(sending);
+		}
 
 		// ★ 调用偏移**不进第一行**（用户："调用偏移不显示在第一行"，它只在第二行的胶囊里）：
 		//   第一行只写"操作 + 必要属性"（→ 任务名 / ×N），偏移由 {@link #callShiftText} 那枚胶囊负责。

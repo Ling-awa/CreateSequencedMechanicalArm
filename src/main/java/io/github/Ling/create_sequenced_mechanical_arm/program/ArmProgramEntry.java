@@ -256,12 +256,17 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * 「个数」这个属性算不算<b>偏离默认值</b> —— 胶囊要不要占位、编辑器属性表要不要把它算作“已加”。
+	 * 「个数」算不算<b>偏离默认值</b>（= 玩家改过、或选了「等于」模式）。
 	 *
-	 * <p>⚠️ 判据不能只是 {@code count != 1}：{@code count == 1 && EXACT}（“必须恰好 1 个”）与
-	 * {@code count == 1 && ATMOST}（“最多 1 个”）<b>行为不同</b>，藏起来就等于静默改掉语义。
-	 * 也不能只跟 1 比：放入的默认是 64（见 {@link #defaultCount(OperationType)}），
-	 * 拿 1 当基准会让每条默认的放入都顶着"最多 64 个"的胶囊。
+	 * <p>★ <b>它已经不再决定"卡片上显不显示"</b>（用户 2026-10-19 的口径变了）：
+	 * 个数属于**填写的内容**，按"凡是填写的都写进第一行"这条规矩，{@code ArmEntryText.base}
+	 * 对取出/放入<b>永远</b>写出「最多 N 个 / 等于 N 个」—— 正是为了不让人忘记默认值（放入默认 64）。
+	 * 现在的唯一消费方是 {@code describe()}（护目镜那一行调试摘要：非默认才多带一段，免得每条都拖 noise）。
+	 * 所以它的判据仍然是"跟 {@link #defaultCount(OperationType)} 比"，别改成跟 1 比。
+	 *
+	 * <p>⚠️ 判据也不能只是 {@code count != 1}：{@code count == 1 && EXACT}（“必须恰好 1 个”）与
+	 * {@code count == 1 && ATMOST}（“最多 1 个”）<b>行为不同</b>，当成"默认"就等于静默改掉语义。
+	 * 也不能只跟 1 比：放入的默认是 64（见 {@link #defaultCount(OperationType)}）。
 	 */
 	public boolean countIsSet() {
 		return count != defaultCount(op) || countIsExact();

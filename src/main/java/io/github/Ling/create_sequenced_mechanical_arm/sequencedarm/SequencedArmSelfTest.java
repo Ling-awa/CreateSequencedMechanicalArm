@@ -1316,7 +1316,10 @@ public class SequencedArmSelfTest {
 		//   ③ 把那句迁移的 `!tag.contains("cmode")` 去掉 ⇒「等于 1 的放入没被迁移」红（玩家真选的 1 被改掉）。
 		boolean depositDefault = ArmProgramEntry.defaultCount(OperationType.DEPOSIT) == 64
 			&& ArmProgramEntry.defaultCount(OperationType.TAKE) == 1;
-		// 默认的放入**不该**顶着"最多 64 个"的胶囊（countIsSet 要跟 defaultCount 比，不是跟 1 比）
+		// 默认的放入**不该**算成"玩家改过"（countIsSet 要跟 defaultCount 比，不是跟 1 比）。
+		// ⚠️ 用户 2026-10-19 改了显示口径：个数属于**填写的内容**，「取出 / 放入」的第一行**永远**写出
+		//    「最多 N 个 / 等于 N 个」（`ArmEntryText.base`，见 `ArmEntryText.selfCheck` 里那条断言）——
+		//    所以这里钉的**不再是**"卡片上不显示"，而是"默认值不算非默认"（`describe()` 因此不拖 noise）。
 		ArmProgramEntry freshDeposit = new ArmProgramEntry();
 		freshDeposit.op = OperationType.DEPOSIT;
 		freshDeposit.count = ArmProgramEntry.defaultCount(OperationType.DEPOSIT);
@@ -1335,12 +1338,12 @@ public class SequencedArmSelfTest {
 
 		LOGGER.info("[selftest] 个数模式 NBT: 等于模式往返={} 小于等于不写键={} 老卡读成小于等于={}", exactKept, keyAbsent,
 			legacyAtMost);
-		LOGGER.info("[selftest] 个数默认值: 放入默认=64 且 取出默认=1={} 默认的放入不占胶囊={} 老卡的放入迁成整摞={} 等于1的放入没被迁移={}",
+		LOGGER.info("[selftest] 个数默认值: 放入默认=64 且 取出默认=1={} 默认值不算非默认={} 老卡的放入迁成整摞={} 等于1的放入没被迁移={}",
 			depositDefault, depositDefaultQuiet, legacyDepositMigrated, exactOneKept);
 		if (!depositDefault)
 			LOGGER.error("[selftest] 「个数」的默认值不是「取出 1 / 放入 64」—— 默认的放入会从整摞变成一次 1 个");
 		if (!depositDefaultQuiet)
-			LOGGER.error("[selftest] 默认的「放入」在卡片上顶着个数胶囊（countIsSet 在拿 1 当基准，应该问 defaultCount）");
+			LOGGER.error("[selftest] 默认的「放入」被算成了「玩家改过」（countIsSet 在拿 1 当基准，应该问 defaultCount）");
 		if (!legacyDepositMigrated)
 			LOGGER.error("[selftest] 老卡里的「放入」没有迁成 64（整摞）—— 那些卡会一次只放 1 个");
 		if (!exactOneKept)

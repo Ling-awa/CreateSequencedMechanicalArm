@@ -199,7 +199,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * （越过面板凹槽的右沿 214），整排看起来是"整体偏移"（用户实测反馈）。
 	 */
 	private static final int FIELD_X = 77;
-	/** 内容宽度：77 + 120 = 197，正好和第一行那个选择框（GUI 54..197）**右沿对齐**。 */
+	/**
+	 * 第二行的**总**内容宽度：77 + 120 = 197，正好和第一行那个选择框（GUI 54..197）**右沿对齐**。
+	 *
+	 * <p>⚠️ 它不是"每一格都这么宽"：{@code 取出 / 放入} 要把右端让给「个数模式 + 个数」两个控件
+	 * （用户本轮：个数升级为基础内容），那时坐标框只占 {@link #COUNT_COORD_W}（60）；
+	 * 需要朝向的操作用 {@code FIELD_W - 4 - 32}。三种分支的右沿都由这一个常量收口。
+	 */
 	private static final int FIELD_W = 120;
 	/**
 	 * 「等待信号」专用的第二行起点：GUI **115**（= 第三个幽灵槽的右沿 111 再留 4px）。
@@ -261,30 +267,48 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 第二行右沿（= {@code FIELD_X + FIELD_W}）：所有控件都必须 ≤ 它。 */
 	private static final int SIGNAL_ROW_END = FIELD_X + FIELD_W;
 	/**
-	 * 「个数」属性第二行的两个控件（取出 / 放入共用）：模式框 56 ＋ 2 ＝ 58 处接数值框 62，
-	 * {@code 56 + 2 + 62 = 120 = FIELD_W} ⇒ 右沿仍是 197（与第一行选择框对齐）。
+	 * 「个数」（取出 / 放入）在第二行右端的两个控件 —— <b>它已经不是属性了</b>
+	 * （用户本轮口径：「个数」升级为基础内容，跟着动作头那一行走，见 {@code buildBaseControls}）。
 	 *
-	 * <p>模式框取 56 的来历：框里能放下的文字 ≤ {@code width - 10}（Create 的 {@code Label} 不裁剪），
-	 * 而最长的那个选项是 en 的 {@code At most}（7 字符 ≈ 42px）、中文「小于等于」4 字 ≈ 36px ⇒ 46 够用。
-	 * 数值框只放 1–64（{@code "64"} = 12px），62 宽绰绰有余。
+	 * <p>位置（左起 = 坐标框，右起 = 模式框 + 数值框，右沿仍是 197）：
+	 * <pre>
+	 * 77   ..137  坐标框 60（{@link #COUNT_COORD_W}）
+	 * 139  ..169  模式框 30（{@link #COUNT_MODE_INLINE_W}）
+	 * 171  ..197  数值框 26（{@link #COUNT_INLINE_W}）
+	 * </pre>
+	 * 三个常量互相推导，右沿由既有的 {@code FIELD_X + FIELD_W = 197} 收口 —— 不新造一个"197"。
+	 *
+	 * <p>⚠️ 模式框只有 <b>30</b> 宽 ⇒ 框里放得下的文字 ≤ {@code width - 10 = 20}
+	 * （Create 的 {@code Label} <b>不裁剪</b>、画超出盒子）：中文「小于等于」4 字 ≈ 36px **放不下**，
+	 * 所以紧凑框用的是单字符标签（{@code opt.atmost_short = ≤} / {@code opt.exact_short = =}，
+	 * 见 {@link #countModeLabels}）。长文案 {@code opt.atmost} / {@code opt.exact} 仍然保留给别处。
+	 *
+	 * <p>数值框 26 只放 1–64（{@code "64"} = 12px），{@code width - 10 = 16} 够。
+	 * 这三条账由 {@code countInlineRowProblem()} 用**实测字体宽度**钉住。
 	 */
-	private static final int COUNT_MODE_X = FIELD_X;
-	private static final int COUNT_MODE_W = 56;
-	private static final int COUNT_X = COUNT_MODE_X + COUNT_MODE_W + 2;
-	private static final int COUNT_W = FIELD_X + FIELD_W - COUNT_X;
+	private static final int COUNT_INLINE_W = 26;
+	private static final int COUNT_MODE_INLINE_W = 30;
+	private static final int COUNT_INLINE_X = FIELD_X + FIELD_W - COUNT_INLINE_W;
+	private static final int COUNT_MODE_INLINE_X = COUNT_INLINE_X - 2 - COUNT_MODE_INLINE_W;
+	private static final int COUNT_COORD_W = COUNT_MODE_INLINE_X - 2 - FIELD_X;
 	/** 第二行的**可用宽度**（左侧三个幽灵槽压到 GUI 111 ⇒ 115..197 只有 82px）。 */
 	private static final int SIGNAL_ROW_W = FIELD_W - 38;
 	/**
-	 * 「收发信号 · 距离」属性第二行那个数值框：起点沿用信号那一行的 {@link #SIGNAL_MODE_X}（115）、
-	 * 宽度铺到右沿 {@code SIGNAL_ROW_END}（197）—— 也就是**恰好 {@link #SIGNAL_ROW_W}（82）**。
+	 * 「收发信号 · 距离」在**动作头那一行**的数值框（用户本轮口径：距离升级为基础内容，
+	 * 跟着模式框一起出现在第二行，不再是属性 —— 原话"这里的『接收』右边不是还空着吗，
+	 * 我觉得可以把距离选择放在这边。收发信号有距离这种事情我觉得得显式的告诉玩家"）。
 	 *
-	 * <p>为什么不从 {@link #FIELD_X}（77）起：「收发信号」这条操作的第二行在**动作头**那一态是从 115 起的
-	 * （它要占三个幽灵槽，槽位压到 GUI 111），距离这一行沿用同一个左沿 —— 在"动作头"与"距离"
-	 * 两个属性之间切换时那个框**不会左右跳**，而且天然让开槽位（{@code checkGhostSlotClearance} 盯着）。
-	 * 右沿与 {@code SIGNAL_ROW_END} 对齐 = 与第一行那个选择框同一条右边界（既有常量，**没有新数字**）。
+	 * <p>起点 {@code SIGNAL_TICKS_X}（147 = 模式框 115..145 再留 2），宽度铺到右沿 197 ⇒ <b>50</b>。
+	 * 与「发送通电」那两个控件（数值 30 + 单位 18）**共用同一起点但永不同时出现**：
+	 * 距离只在 {@code RECEIVE} 建，数值 / 单位只在 {@code SEND_ON} 建，「中断」只有一个模式框
+	 * —— 判据分别是 {@code isSignalReceive()} 与 {@code hasSignalDuration()}（都只有一处）。
+	 *
+	 * <p>50 宽里放得下 {@code "256"}（{@link ArmProgramEntry#SIGNAL_RANGE_MAX}，约 18px）与
+	 * 悬停标题「距离」（约 18px），上限 {@code width - 10 = 40} —— 由
+	 * {@code signalRangeRowProblem()} 用实测字体宽度钉住。
 	 */
-	private static final int SIGNAL_RANGE_X = SIGNAL_MODE_X;
-	private static final int SIGNAL_RANGE_W = SIGNAL_ROW_END - SIGNAL_RANGE_X;
+	private static final int SIGNAL_RANGE_INLINE_X = SIGNAL_TICKS_X;
+	private static final int SIGNAL_RANGE_INLINE_W = SIGNAL_ROW_END - SIGNAL_RANGE_INLINE_X;
 	/**
 	 * 信号标题芯片的宽度上限 = {@code ROW_CLIP_RIGHT - 25 - 26} = <b>153</b>。
 	 *
@@ -1289,12 +1313,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 「收发信号」的标题芯片：<b>图标 · 短语（接收信号/发送信号/中断信号）· 频率物品 · 频率物品 · 时间（有才写）</b>。
+	 * 「收发信号」的标题芯片：<b>图标 · 短语（接收信号/发送信号/中断信号）· 频率物品 · 频率物品 · 尾巴</b>。
 	 *
 	 * <p>用户反馈第二轮的读法（图二那张）：操作名这一处随模式变成短语，极性**不再单独写"开/关"**
 	 * （已含在词里）；只有"发 + 持续 &gt; 0"才在后面加时间（{@code 发送信号 ⚙⚙ 1s}；{@code 0} = 保持 ⇒ 不写）；
 	 * 老卡 {@code redpow=false} 仍然写成 {@code 接收信号 ⚙⚙ 等断电}。
 	 * 短语与尾巴**都从 {@link ArmEntryText} 取**（与胶囊 / 护目镜同一个来源：§11 决策 43），这里不另写一份。
+	 *
+	 * <p>★ 用户本轮口径：「距离」升级为基础内容之后必须**显式写在第一行**
+	 * （原话："收发信号有距离这种事情我觉得得显式的告诉玩家，而不是让玩家编辑其他属性的时候再找"）
+	 * —— 它接在尾巴后面（见 {@link #signalChipTail}，绘制与丈量共用同一个字符串）。
 	 *
 	 * <p>两个频率物品**单独占两个物品槽**（不是塞在文字里），**空槽也照画空框**
 	 * —— 这样"频率有一格留空"看得出来（用户："频率本身是可以填空的，不是必须两个物品"）。
@@ -1306,7 +1334,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		ItemStack second = entry.frequency == null ? ItemStack.EMPTY : entry.frequency.getSecond()
 			.getStack();
 		Component label = ArmEntryText.signalHeadText(entry);
-		Component tail = ArmEntryText.signalTailText(entry);
 
 		graphics.pose()
 			.pushPose();
@@ -1337,12 +1364,35 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			textX += 19;
 		}
 
-		// ④ 尾巴：发的时长（1s）/ 老卡的"等断电"；**空就一个字都不画**（0 = 一直保持 ⇒ 不写）
-		String tailText = tail.getString();
+		// ④ 尾巴：发的时长（1s）/ 老卡的"等断电" / 接收距离（距离 16）；**空就一个字都不画**
+		//    （0 = 一直保持 / 半径 0 ⇒ 不写）
+		String tailText = signalChipTail(entry);
 		if (!tailText.isEmpty())
 			graphics.drawString(font, tailText, textX + 2, 4, 0xff_f2f2ee);
 		graphics.pose()
 			.popPose();
+	}
+
+	/**
+	 * 信号芯片上"短语 + 两个物品槽之后"的那段文字 = <b>时长尾巴</b> +（收信号时）<b>距离</b>。
+	 *
+	 * <p>★ 绘制（{@link #renderSignalChip} 的 ④）与丈量（{@link #signalChipTextEnd}）**必须用同一个
+	 * 字符串**：两处各拼一份就会出现"文字画到芯片外面"（标题栏的文字是不裁剪的）。
+	 * 两段文字本身仍然只有一处来源（{@link ArmEntryText#signalTailText} /
+	 * {@link ArmEntryText#signalRangeText}），这里只负责把它们接起来。
+	 *
+	 * <p>顺序与卡片第一行（{@link ArmEntryText#base}）一致：先时长 / 等断电，再距离。
+	 */
+	private String signalChipTail(ArmProgramEntry entry) {
+		String tail = ArmEntryText.signalTailText(entry)
+			.getString();
+		String range = entry.hasSignalRange() ? ArmEntryText.signalRangeText(entry)
+			.getString() : "";
+		if (tail.isEmpty())
+			return range;
+		if (range.isEmpty())
+			return tail;
+		return tail + "  " + range;
 	}
 
 	/**
@@ -1353,7 +1403,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private int signalChipTextEnd(ArmProgramEntry entry) {
 		return 26 + font.width(ArmEntryText.signalHeadText(entry)) + 4 + 19 + 19 + 2
-			+ font.width(ArmEntryText.signalTailText(entry));
+			+ font.width(signalChipTail(entry));
 	}
 
 	/**
@@ -1985,10 +2035,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 动作自己的参数
 		// 朝向**不是**胶囊属性：它和坐标一样是这个动作的必填项，放在编辑器第二行（见 buildBaseControls）；
 		// 前摇也没有了（已有独立的"等待"操作）
+		//
+		// ★ 用户本轮口径：**「个数」（取出 / 放入）与「收信号距离」都不是属性了** ——
+		//   它们是"基础内容"，跟坐标 / 模式一起长在动作头那一行（见 buildBaseControls）。
+		//   所以下面这两个 case 整段删掉（原来它们分别 add(countProp) / add(signalRangeProp)）。
+		//   反证：把任意一支加回来 ⇒ 属性选择框里会多出「个数」/「距离」，
+		//   而卡片第一行同时也在写它们 ⇒ checkPropTable 那条"属性表里不许有它们"立刻变红。
 		switch (entry.op) {
-			// 个数：**取出与放入共用同一个属性**（用户本轮口径：放入也开始读 count）。
-			// ⚠️ 只加这一项：其它属性（成功后 / 失败后 / 坐标 / 交互面）的显示判据一个字都没动。
-			case TAKE, DEPOSIT -> props.add(countProp(entry));
 			case UNLOAD -> {
 				props.add(enumProp(tr("entry.unload_repeat"), tr("hint.entry_unload_repeat"),
 					ArmEntryText.unloadRepeatText(entry), UnloadRepeat.values(), UnloadRepeat.ONCE,
@@ -1996,14 +2049,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				props.add(enumProp(tr("entry.unload_amount"), tr("hint.entry_unload_amount"),
 					ArmEntryText.unloadAmountText(entry), UnloadAmount.values(), UnloadAmount.ONE_STACK,
 					() -> entry.unloadAmount, v -> entry.unloadAmount = v));
-			}
-			// 「收发信号 · 距离」（用户口径：距离只约束「收」）：**只有「接收」模式才列这个属性** ——
-			// 用户原话"中断信号不需要这个属性"，而发送侧按已定方案也不读它（发出去了由收方的距离决定）。
-			// 两个判据分工：**列不列**看模式（isSignalReceive），**显不显示**看值（hasSignalRange）——
-			// 后者是单点方法，胶囊 / 反编译器 / 运行时都问它，别在这里第四次写同一个条件。
-			case SIGNAL -> {
-				if (entry.isSignalReceive())
-					props.add(signalRangeProp(entry));
 			}
 			case CALL -> {
 				props.add(intProp(tr("entry.call_repeat"), tr("hint.entry_call_repeat"),
@@ -2283,106 +2328,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		};
 	}
 
-	/**
-	 * 「个数」属性（取出 / 放入共用；用户本轮口径：等于 / 小于等于 ＋ 数值）。
-	 *
-	 * <p>第二行**两个**控件（照本文件既有的"一行多个盒子"写法）：
-	 * ① 模式选择框（小于等于 / 等于 —— 顺序 = {@code CountMode.ordinal}，ATMOST 在前就是默认项）；
-	 * ② 数值框（1..64，范围常量只从 {@link ScriptParser#COUNT_MIN} / {@link ScriptParser#COUNT_MAX} 取）。
-	 *
-	 * <p>★ 判据一律问单点方法：显示看 {@link ArmProgramEntry#countIsSet()}，
-	 * 模式看 {@link ArmProgramEntry#countIsExact()}（胶囊文案也走同一支 {@code ArmEntryText.countText}）。
-	 * 这里**不重新解释** countMode —— 三处各写一个 if 的话，界面说"等于"、运行时按"小于等于"跑，
-	 * 那种分裂只有在实机里丢过物品才看得出来。
-	 */
-	private Prop countProp(ArmProgramEntry entry) {
-		return new Prop(tr("entry.count"), tr("hint.entry_count"), ArmEntryText.countText(entry), true) {
-			@Override
-			boolean isSet() {
-				return entry.countIsSet();
-			}
-
-			@Override
-			void reset() {
-				// 垃圾桶 = 恢复默认：个数与模式**一起**回默认（只清一个会留下"等于 1"的胶囊，
-				// 而 countIsSet() 会认为它还在 ⇒ 点垃圾桶后属性不消失）。
-				// ⚠️ 默认值按操作给（取出 1 / 放入 64）：问 defaultCount(op)，别写死 1。
-				entry.count = ArmProgramEntry.defaultCount(entry.op);
-				entry.countMode = ArmProgramEntry.CountMode.ATMOST;
-			}
-
-			@Override
-			void reveal() {
-				// 加进来就得一眼看出它非默认：默认是 ATMOST + defaultCount(op)，显式给"2 个"。
-				// ⚠️ 只动 count、**不动模式** —— "加一个属性只多一个胶囊"那条不变量盯着这里。
-				// ⚠️ 2 必须确实"非默认"：放入的默认是 64、取出的默认是 1，2 对两者都成立。
-				entry.count = 2;
-			}
-
-			@Override
-			void buildEditor() {
-				inlinePicker(COUNT_MODE_X, COUNT_MODE_W, tr("entry.count_mode"), tr("hint.entry_count_mode"),
-					labels(ArmProgramEntry.CountMode.values()), entry.countMode.ordinal(), i -> {
-						pushUndo();
-						entry.countMode = ArmProgramEntry.CountMode.values()[i];
-						rebuildPending = true;
-					});
-				inlineInt(COUNT_X, COUNT_W, tr("entry.count"), tr("hint.entry_count"), ScriptParser.COUNT_MIN,
-					ScriptParser.COUNT_MAX, entry.count, v -> {
-						pushUndo();
-						entry.count = v;
-					});
-			}
-		};
-	}
-
-	/**
-	 * 「接收距离」属性（用户口径：<b>距离只约束「收」</b> —— 我只接受半径内的来源，发出去不管）。
-	 *
-	 * <p>只有一个数值控件（0..{@link ArmProgramEntry#SIGNAL_RANGE_MAX}），位置见 {@link #SIGNAL_RANGE_X}。
-	 * 语义（模型里的长说明在 {@link ArmProgramEntry#signalRange}）：
-	 * <ul>
-	 *   <li>{@code 0}（默认）= 只有"来源与本臂<b>同一格</b>"才算收到 —— 自己发自己收的自环，用户说的
-	 *       "只能自己接收发送"；</li>
-	 *   <li>{@code 1..256} = 方块欧氏距离 {@code dx²+dy²+dz² <= N²}（含边界）；</li>
-	 *   <li><b>只有「接收」有它</b>：发送 / 中断既不显示也不读（见 {@code entryProps} 里那个分支）。</li>
-	 * </ul>
-	 *
-	 * <p>★ 判据只有 {@link ArmProgramEntry#hasSignalRange()}（收模式且半径 &gt; 0）；胶囊文案走
-	 * {@link ArmEntryText#signalRangeText}（与卡片上那枚胶囊同一句）。
-	 */
-	private Prop signalRangeProp(ArmProgramEntry entry) {
-		return new Prop(tr("entry.signal_range"), tr("hint.entry_signal_range"),
-			ArmEntryText.signalRangeText(entry), true) {
-			@Override
-			boolean isSet() {
-				return entry.hasSignalRange();
-			}
-
-			@Override
-			void reset() {
-				// 垃圾桶 = 恢复默认（0 = 只能同格收到），属性随之从卡片上消失
-				entry.signalRange = 0;
-			}
-
-			@Override
-			void reveal() {
-				// 加进来就得**一眼看出它非 0**：0 与"没加这个属性"在卡片上看不出区别。
-				// 16 是个一眼能读出来的小半径，也正是文档里的示例数。
-				entry.signalRange = 16;
-			}
-
-			@Override
-			void buildEditor() {
-				// 夹取只走 clampSignalRange（读盘 / 脚本解析 / 这里三处共用同一个区间）
-				inlineInt(SIGNAL_RANGE_X, SIGNAL_RANGE_W, tr("entry.signal_range"), tr("hint.entry_signal_range"),
-					0, ArmProgramEntry.SIGNAL_RANGE_MAX, entry.signalRange, v -> {
-						pushUndo();
-						entry.signalRange = ArmProgramEntry.clampSignalRange(v);
-					});
-			}
-		};
-	}
+	// ⚠️ 这里原来有两个属性工厂：countProp(...)（个数）与 signalRangeProp(...)（收信号距离）。
+	//   用户本轮口径把它们**从属性升级成基础内容**（跟坐标 / 模式一起长在动作头那一行），
+	//   ⇒ 两个工厂整段删除，控件改在 {@link #buildBaseControls} 里建：
+	//   个数 = {@link #COUNT_COORD_W} / {@link #COUNT_MODE_INLINE_X} / {@link #COUNT_INLINE_X} 三格，
+	//   距离 = {@link #SIGNAL_RANGE_INLINE_X} 那一格。
+	//   "距离只约束收"的语义说明仍在 {@link ArmProgramEntry#signalRange} 的 javadoc 里（单点），
+	//   卡片 / 护目镜那句话仍只有 {@link ArmEntryText#signalRangeText} 一处。
+	//   反证：把任意一个工厂加回 entryProps ⇒ checkPropTable 的"属性表里不许有它们"立刻变红。
 
 	private Prop intProp(Component name, Component hint, Component chip, int def, int min, int max, IntSupplier get,
 		IntConsumer set) {
@@ -3188,6 +3141,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 							dirty = true;
 						});
 				}
+				// ③ 「接收距离」：**只有「接收」才建**（用户口径：中断"不需要这个属性"、发送侧运行时
+				//    一个字都不读它 —— 建出来就是给玩家一个空参数）。判据只问 isSignalReceive()。
+				//    ★ 它已经不是属性了：用户原话"「接收」右边不是还空着吗，我觉得可以把距离选择放在这边"
+				//      —— 收紧到动作头这一行、紧挨模式框，右沿仍是 197。
+				//    ⚠️ 与 ② 的数值 / 单位框共用 147 这个起点，但两者永不同时存在（模式不同）。
+				//    ⚠️ 夹取只走 clampSignalRange（读盘 / 脚本解析 / 这里三处共用同一个区间）。
+				if (entry.isSignalReceive()) {
+					inlineInt(SIGNAL_RANGE_INLINE_X, SIGNAL_RANGE_INLINE_W, tr("entry.signal_range"),
+						tr("hint.entry_signal_range"), 0, ArmProgramEntry.SIGNAL_RANGE_MAX, entry.signalRange, v -> {
+							pushUndo();
+							entry.signalRange = ArmProgramEntry.clampSignalRange(v);
+						});
+				}
 			}
 			case CALL -> inlinePicker(FIELD_X, FIELD_W, tr("entry.call_target"), tr("hint.entry_call_target"),
 				callTargetOptions(), callTargetIndex(entry.callTarget), i -> {
@@ -3233,17 +3199,20 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					//   读容器内容与朝向无关 ⇒ 容器模式只有**一个坐标框**，它把第二行铺到右沿 197
 					//   （位置框压到 30 之后余下 69px，长坐标也放得下了）。朝向不再是玩家要填的东西，
 					//   模型里的 face 保持默认 UP（臂解析交互点时用得到，见 FILTER_COORD_W 的说明）。
-					BlockPos origin = cardOriginOrZero();
-					BlockPos world = origin.offset(entry.offset);
+					// ★ 用户本轮口径：框里**直接编辑相对坐标**（就是模型里的 offset），世界坐标只进悬停提示
+					//   —— 与下面通用那一支同一套（判据与写法都只有这一处，见 {@link #worldCoordLines}）。
 					textField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, FILTER_COORD_W, tr("entry.coords"),
-						tr("hint.entry_filter_coords"), world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
+						tr("hint.entry_filter_coords"), worldCoordLines(entry.offset),
+						entry.offset.getX() + "," + entry.offset.getY() + "," + entry.offset.getZ(), 24, v -> {
 							// 坐标解析**只有一处**（parseTriple：逗号/空格都吃、且守住 ±COORD_LIMIT）。
 							// 曾有一份只按逗号切、没有上限校验的副本走这条路 —— 超限坐标会被吞进模型，
 							// 直到落盘才以"保存失败"的形式爆出来（用户看到的是莫名其妙保存不了）。
 							BlockPos parsed = parseTriple(v);
 							if (parsed != null) {
 								pushUndo();
-								entry.offset = parsed.subtract(origin);
+								// 写回的就是**偏移**（框里显示什么就存什么）—— 不再减去原点：
+								// 拿世界坐标往返换算会出现"改一下 Z、X 也跟着变"（原点记得不对时更糟）。
+								entry.offset = parsed;
 							}
 						});
 				}
@@ -3251,8 +3220,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			default -> {
 				// 走到这里的都是"需要坐标"的动作：坐标（+ 左右键才有朝向）
 				// ★ P1「坐标模型统一」（§19）：条目属性里的「坐标空间」（rel/abs 滚轮）已删 ——
-				//   条目坐标只有一种语义（相对执行它的那条臂），不再有空间记号。用户第四十轮起
-				//   录制原点住在**卡**上，这个框拿它当"世界位置 ↔ 偏移"的换算参考点（见下方说明）。
+				//   条目坐标只有一种语义（相对执行它的那条臂），不再有空间记号。
+				// ★ 用户本轮：这个框**直接显示 / 编辑相对坐标**（模型里的 offset），
+				//   世界坐标只在悬停提示里补一行（见 {@link #worldCoordLines}）——
+				//   框也就因此能收窄（个数要占右端 58px）。
 				// ★ 问**条目级**的 needsTarget()：过滤在上面自己那一支就把坐标建完了，
 				//   这里挡住的是"没有目标"的操作（等待类 / 控制类）。
 				if (!entry.needsTarget())
@@ -3267,21 +3238,24 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				//   ⚠️ 所有"同时要坐标与朝向"的操作都是这一条路（攻击 / 挖掘 / 使用 / 潜行使用 / 组装…），
 				//   用户特意说明过"这个在所有要同时选择坐标和方向的 UI 都会出现"。
 				final int faceW = 32;
-				int coordW = face ? FIELD_W - 4 - faceW : FIELD_W;
-				// 框里回显的是**世界位置**（= 原点 + 偏移）：这个框编辑的是"我要打的那个世界位置"，
-				// 而模型里存的是相对**卡上那个录制原点**的偏移，所以写回去时要减去原点。
-				// ⚠️ 注意与运行时的区别（§19.7）：臂跑这条条目时用的是 `臂位置 + offset`，
-				//    卡上的原点不参与 —— 这个框只在"你还记得原点在哪"时才对得上世界位置
-				//    （原点没设时退回 (0,0,0)，框里显示的就是裸偏移）。
-				BlockPos origin = cardOriginOrZero();
-				BlockPos world = origin.offset(entry.offset);
+				// ★ 「个数」（取出 / 放入）现在也长在**这一行**（用户本轮口径：从属性升级为基础内容）。
+				//   右端留出模式框 + 数值框，剩下的全给坐标框（77..137 = 60）；
+				//   不需要个数的操作照旧用满整行（{@code FIELD_W}）。判据只有 {@code hasCount()} 一处。
+				boolean count = entry.op.hasCount();
+				int coordW = count ? COUNT_COORD_W : face ? FIELD_W - 4 - faceW : FIELD_W;
+				// ★ 用户本轮口径：框里显示 / 回填的是**相对坐标**（模型里的 offset），世界坐标只进悬停提示：
+				//   "玩家编辑的时候此处不再根据原点计算真实坐标，而是直接显示和编辑相对坐标，
+				//    这样应该可以更短并且更便于编辑，当鼠标移动上去的时候提示框额外显示对应的世界坐标"
+				//   —— 于是写回时**不再** {@code subtract(origin)}（存什么就是什么），
+				//   而世界坐标由 {@link #worldCoordLines} 挂到 tooltip 上（没有原点就不加那一行）。
 				textField(FIELD_X, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
-					world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
+					worldCoordLines(entry.offset),
+					entry.offset.getX() + "," + entry.offset.getY() + "," + entry.offset.getZ(), 24, v -> {
 						// 与上面过滤坐标同一个解析器（唯一实现）：逗号/空格都吃，且守住 ±COORD_LIMIT。
 						BlockPos parsed = parseTriple(v);
 						if (parsed != null) {
 							pushUndo();
-							entry.offset = parsed.subtract(origin);
+							entry.offset = parsed;
 						}
 					});
 				if (face)
@@ -3291,6 +3265,25 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 							entry.face = Direction.values()[i];
 							rebuildPending = true;
 						});
+				// 右端：模式（≤ / =）+ 数值。**只有需要个数的操作才建**（见上），
+				// 与"坐标框收窄到 60"同一个判据、同一处（{@code hasCount()}）——
+				// 判据写两份就会出现"框收窄了却没画控件"的空白。
+				// ⚠️ 模式框只有 30 宽（文字上限 20）：中文「小于等于」放不下，所以用单字符标签
+				//   （{@link #countModeLabels}），悬停提示里写全（{@code hint.entry_count_mode}）。
+				if (count) {
+					inlinePicker(COUNT_MODE_INLINE_X, COUNT_MODE_INLINE_W, tr("entry.count_mode"),
+						tr("hint.entry_count_mode"), countModeLabels(), entry.countMode.ordinal(), i -> {
+							pushUndo();
+							entry.countMode = ArmProgramEntry.CountMode.values()[i];
+							rebuildPending = true;
+						});
+					// 范围常量只从 ScriptParser 取（1..64），别在这里写死数字
+					inlineInt(COUNT_INLINE_X, COUNT_INLINE_W, tr("entry.count"), tr("hint.entry_count"),
+						ScriptParser.COUNT_MIN, ScriptParser.COUNT_MAX, entry.count, v -> {
+							pushUndo();
+							entry.count = v;
+						});
+				}
 			}
 		}
 	}
@@ -3521,6 +3514,33 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return list;
 	}
 
+	/**
+	 * 「个数」的**紧凑模式标签**（{@code ≤} / {@code =}）—— 取出 / 放入第二行右端那个 30px 的框。
+	 *
+	 * <p>★ 用户本轮口径：个数升级为基础内容之后，模式框只分到 **30px**，
+	 * 而框里放得下的文字 ≤ {@code 30 - 10 = 20}（Create 的 {@code Label} <b>不裁剪</b>、画超出盒子）：
+	 * 中文「小于等于」4 字 ≈ 36px、en 的 {@code At most} ≈ 46px，两种语言**都放不下**。
+	 * 所以这个框里放**单字符**（{@code opt.atmost_short = ≤} / {@code opt.exact_short = =}），
+	 * 语义靠悬停提示 {@code hint.entry_count_mode} 兜（它本来就写着两种模式的完整解释）。
+	 *
+	 * <p>⚠️ 原来走的是 {@link #labels(Enum[])} 派生的 {@code opt.atmost} / {@code opt.exact}
+	 * （「小于等于」/「等于」）—— 那两个键**保留**（它们仍是长文案，别处随时可能用），
+	 * 只是这个紧凑框不再查它们。反证：把这里换回 {@code labels(CountMode.values())} ⇒
+	 * {@code countInlineRowProblem()} 的"选项放得下"那条立刻变红（36 &gt; 20）。
+	 *
+	 * <p>顺序按 ordinal 走（下标 i ↔ {@code CountMode.values()[i]}）：ATMOST 在前 = 默认项，
+	 * 与 {@code inlinePicker} 的 {@code selected} 同源。
+	 */
+	private static List<Component> countModeLabels() {
+		List<Component> list = new ArrayList<>(ArmProgramEntry.CountMode.values().length);
+		for (ArmProgramEntry.CountMode mode : ArmProgramEntry.CountMode.values())
+			list.add(tr(switch (mode) {
+				case ATMOST -> "opt.atmost_short";
+				case EXACT -> "opt.exact_short";
+			}));
+		return list;
+	}
+
 	// ————————————————————————— 数据操作 —————————————————————————
 
 	/** 底部第一个按钮：任务页 ↔ 操作页。 */
@@ -3650,6 +3670,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private BlockPos cardOriginOrZero() {
 		BlockPos origin = CardProgramStorage.readOrigin(menu.getCard());
 		return origin == null ? BlockPos.ZERO : origin;
+	}
+
+	/**
+	 * 坐标框的**附加提示行**：卡上真的设了原点时，多报一行「世界坐标 x,y,z」。
+	 *
+	 * <p>★ 用户本轮口径：编辑时框里显示 / 编辑的是<b>相对坐标</b>（模型里的 {@code offset}，
+	 * 也就是"相对执行这条程序的臂"的偏移），世界坐标只作为**提示**出现 —— 原话：
+	 * <i>"玩家编辑的时候此处不再根据原点计算真实坐标，而是直接显示和编辑相对坐标，这样应该可以更短
+	 * 并且更便于编辑，当鼠标移动上去的时候提示框额外显示对应的世界坐标（如果有原点的话）"</i>。
+	 *
+	 * <p>⚠️ 判据是 <b>{@code readOrigin(...) != null}</b>，不是"原点 ≠ (0,0,0)"：
+	 * 把原点真的设成 (0,0,0) 是完全合法的状态（世界原点那一格），那种卡也必须显示世界坐标行；
+	 * 而<b>没设过</b>原点时 {@code readOrigin} 返回 {@code null} —— 这时候没有换算基准，
+	 * 那一行**不加**（加一行"世界坐标 = 偏移"只会让人以为原点就在 0,0,0）。
+	 *
+	 * <p>⚠️ 必须**一行一个 Component**（见 {@link #noteTipLines} 里 NeoForge tooltip 的断行机制）：
+	 * 带 {@code \n} 的整段在装得下屏幕时不会被断行，{@code \n} 会画成缺字方框（用户实测过）。
+	 */
+	private List<Component> worldCoordLines(BlockPos offset) {
+		BlockPos origin = CardProgramStorage.readOrigin(menu.getCard());
+		if (origin == null)
+			return List.of();
+		BlockPos world = origin.offset(offset);
+		return List.of(tr("entry.coords_world",
+			world.getX() + "," + world.getY() + "," + world.getZ()));
 	}
 
 	private int totalEntries() {
@@ -4030,10 +4075,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String signalRow = screen.signalRowProblem();
 			if (signalRow != null && problem == null)
 				problem = "收发信号第二行: " + signalRow;
-			// ★ 收信号的「距离」属性：只对「接收」出现，且第二行那一格的几何对得上常量
+			// ★ 收信号的「距离」：只有「接收」那一行有它（用户本轮：从属性升级为基础内容），
+			//   且三种模式的盒子几何逐格对得上常量
 			String signalRangeRow = screen.signalRangeRowProblem();
 			if (signalRangeRow != null && problem == null)
 				problem = "收发信号距离: " + signalRangeRow;
+			// ★ 「个数」（取出 / 放入）：也在动作头那一行（坐标 60 + 模式 30 + 数值 26，右沿 197）
+			String countRow = screen.countInlineRowProblem();
+			if (countRow != null && problem == null)
+				problem = "取出 / 放入的个数: " + countRow;
 			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
 			String exitRow = screen.exitRowProblem();
 			if (exitRow != null && problem == null)
@@ -4188,7 +4238,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				unitLabelW = Math.max(unitLabelW, screen.font.width(unit));
 			return "OK 任务卡=" + taskCards + " 操作卡=" + entryCards + " 编辑器=" + editors + " 控件=" + widgets
 				+ " 槽位=" + screen.menu.slots.size() + " 最宽行=" + rowWidth + " 最大胶囊宽=" + screen.maxChipWidth()
-				+ " 第二行=" + (signalRow == null ? "82=30+2+30+2+18" : "FAIL") + " 文案="
+				+ " 第二行=" + (signalRow == null ? "82=30+2+30+2+18" : "FAIL")
+				// ★ 个数那一行（用户本轮：取出 / 放入的第二排右边 = 坐标 60 + 模式 30 + 数值 26）
+				//   数字变了不用改代码：它只是把**实测**的常量账打进日志，断言绿了就行。
+				+ " 个数行=" + (countRow == null ? "60+2+30+2+26" : "FAIL") + " 文案="
 				+ (signalWording == null ? "收发+单位" : "FAIL") + " 语言键=" + (langKeys == null ? "缺=0" : "FAIL")
 				+ " 实测宽=模式" + modeLabelW + "/" + (SIGNAL_MODE_W - 10) + ",数值" + numLabelW + "/"
 				+ (SIGNAL_TICKS_W - 10) + ",单位" + unitLabelW + "/" + (SIGNAL_UNIT_W - 10)
@@ -4773,13 +4826,18 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 *
 	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出/放入/卸货/组装/过滤/收信号）
 	 * 才有「超时后 + 时限」；③ 前摇已经删掉（任何动作都不该再有它）；④ 朝向**不在任何卡片的胶囊里**；
-	 * ⑤ 第二行的 DATA_AREA 盒子数：位置类 1（坐标）、左键/右键 2（坐标+朝向）、等待 2、收信号 1/3。
+	 * ⑤ 第二行的 DATA_AREA 盒子数：位置类 1（坐标）、左键/右键 2（坐标+朝向）、**取出/放入 3**
+	 * （坐标 + 个数模式 + 个数）、等待 2、收信号 2/3/1（接收 / 发送通电 / 中断）；
+	 * ⑥ <b>「个数」与「收信号距离」都不在属性表里</b>（用户本轮：它们升级成基础内容）。
 	 */
 	@Nullable
 	private String checkPropTable(ArmProgramTask task) {
 		String success = tr("entry.on_success").getString();
 		String failure = tr("entry.on_failure").getString();
 		String faceName = tr("entry.face").getString();
+		// 两个"已经升级成基础内容"的旧属性名：属性表里再出现它们就是改回去了
+		String countName = tr("entry.count").getString();
+		String rangeName = tr("entry.signal_range").getString();
 		boolean sawWait = false;
 		boolean sawFace = false;
 		boolean sawRetryWindow = false;
@@ -4820,9 +4878,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (ArmEntryText.needsFace(entry.op))
 				sawFace = true;
 			// 第二行的 DATA_AREA 盒子数（§19 坐标统一之后："坐标空间"选择框已删，坐标只剩一个框）：
-			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；等待 = 时长 + 单位 = 2；
-			// 收发信号 = 模式 +（**只有发送通电**才有）数值 + 单位 ⇒ 接收 / 中断 = 1、发送 = 3
-			//（两个频率格是**菜单幽灵槽**，不算盒子）；
+			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；**取出 / 放入 = 坐标 + 个数模式 + 个数 = 3**
+			// （用户本轮：个数从属性升级为基础内容）；等待 = 时长 + 单位 = 2；
+			// 收发信号 = 模式 +（**接收**才有）距离 **或**（只有发送通电才有）数值 + 单位
+			// ⇒ 接收 = 2、发送 = 3、中断 = 1（两个频率格是**菜单幽灵槽**，不算盒子）；
 			// 调用 = 目标 = 1；抛错 = 信息 = 1；退出 = 0（终结操作，第二行不需要任何东西）
 			editingProp = null;
 			editing = new EditTarget(false, 0, e, null);
@@ -4830,10 +4889,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			int boxes = editorBoxes.size();
 			editing = null;
 			int expected = switch (entry.op) {
+				// 取出 / 放入：坐标框收窄让出右端，再并排两个控件的盒子（模式 30 + 数值 26）。
+				// 反证：把 buildBaseControls 里那个 `if (count)` 删掉 ⇒ 这两类立刻报"应当是 3、实际 1"。
+				case TAKE, DEPOSIT -> 3;
 				case WAIT -> 2;
-				// 收发信号：模式 +（只有**发送通电**才有）数值 + 单位 ⇒ 接收 / 中断 1、发送 3
-				//（用户本轮口径：「中断」= 立即清除，**不接收持续时间** ⇒ 它不再有数值/单位两个盒子）
-				case SIGNAL -> entry.hasSignalDuration() ? 3 : 1;
+				// 收发信号：模式 + 距离（接收）/ 数值 + 单位（发送通电）/ 什么都没有（中断）
+				case SIGNAL -> entry.hasSignalDuration() ? 3 : entry.isSignalReceive() ? 2 : 1;
 				case CALL, THROW -> 1;
 				case BREAK -> 0;
 				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 = 2
@@ -4843,6 +4904,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			};
 			if (boxes != expected)
 				return entry.op + " 的基础内容应当是 " + expected + " 个控件，实际 " + boxes;
+			// ★ 用户本轮口径：「个数」与「收信号距离」**都不是属性**了（它们是基础内容，长在动作头那一行）。
+			//   属性表里出现它们就等于"同一个值在卡片第一行和第二行各说一遍"，而这正是这次要修的东西。
+			//   反证：把 `case TAKE, DEPOSIT -> props.add(countProp(entry))` 或
+			//   `case SIGNAL -> props.add(signalRangeProp(entry))` 加回 entryProps ⇒ 这条立刻变红。
+			if (entry.op.hasCount() && names.contains(countName))
+				return entry.op + " 的属性表里不该有「个数」（它是基础内容，见 buildBaseControls）";
+			if (entry.op == OperationType.SIGNAL && names.contains(rangeName))
+				return "收发信号 的属性表里不该有「距离」（它是基础内容，见 buildBaseControls）";
 			// 「失败后」的编辑器：会重试的 4 个控件（去向/落点/时限/单位），只有硬失败的 2 个
 			for (Prop prop : entryProps(entry)) {
 				if (!prop.name.getString()
@@ -5083,22 +5152,28 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 自检：收信号的「距离」属性第二行那**一格**（用户本轮新增的属性）。
+	 * 自检：收信号的「距离」现在长在**动作头那一行**（用户本轮口径：从属性升级为基础内容）。
 	 *
-	 * <p>断言四件事：
+	 * <p>用户原话：<i>"如图一，这里的『接收』右边不是还空着吗，我觉得可以把距离选择放在这边。
+	 * 收发信号有距离这种事情我觉得得显式的告诉玩家，而不是让玩家编辑其他属性的时候再找。"</i>
+	 * ⇒ 距离不再是属性（属性表里**不能**再有它），而是和模式框并排的第二格控件。
+	 *
+	 * <p>断言四组：
 	 * <ol>
-	 *   <li><b>只有「接收」模式的属性表里有它</b>：发送 / 中断一个都不许有（用户原话"中断信号不需要
-	 *       这个属性"；发送侧按已定方案也不读它）；</li>
-	 *   <li>它真建出 <b>1</b> 个 DATA_AREA 盒子，左沿 = {@link #SIGNAL_MODE_X}、宽度 =
-	 *       {@link #SIGNAL_ROW_W}、右沿 = {@link #SIGNAL_ROW_END}（197）；</li>
-	 *   <li>最大值 {@link ArmProgramEntry#SIGNAL_RANGE_MAX}（256）的文字在 {@code width - 10} 里放得下
-	 *       （Create 的 Label 不裁剪）；</li>
-	 *   <li>控件不出面板（右沿 &le; 200，与 {@link #signalRowProblem} 同一条）。</li>
+	 *   <li><b>三种模式的属性表里都不许有「距离」</b>（它属于基础内容）；</li>
+	 *   <li><b>接收</b>：恰好 2 个盒子 = 模式(115,30) + 距离(147,50)，相邻间隔 2、右沿 197，
+	 *       且 {@code "256"} 与标题「距离」都在 {@code width - 10 = 40} 里放得下
+	 *       （Create 的 {@code Label} 不裁剪、画超出盒子）；</li>
+	 *   <li><b>发送通电</b>：3 个盒子 = 模式(115,30) + 数值(147,30) + 单位(179,18)
+	 *       —— 与改造前逐像素相同（距离与它们**共用 147 这个起点，但永不同时存在**）；</li>
+	 *   <li><b>中断</b>：只有模式一个盒子。</li>
 	 * </ol>
 	 *
-	 * <p>反证：把 {@code SIGNAL_RANGE_W} 改成 {@code FIELD_W}（忘了减起点差）⇒ ② 红（右沿 235）；
-	 * 在 {@code entryProps} 的 SIGNAL 分支删掉 {@code if (entry.isSignalReceive())} ⇒ ① 红；
-	 * 把 {@code SIGNAL_RANGE_W} 压到 20 ⇒ ③ 红（"256" 放不下）。
+	 * <p>反证（每条都能单独把这条弄红）：
+	 * 把 {@code SIGNAL_RANGE_INLINE_W} 改回 18 ⇒ ② 红（右沿 165 ≠ 197，且 "256" 放不下）；
+	 * 把 {@code SIGNAL_RANGE_INLINE_X} 写回 {@code SIGNAL_MODE_X}（忘了错开模式框）⇒ ② 红
+	 * （第 2 格起点 115 ≠ 147）；把 {@code if (entry.isSignalReceive())} 删掉（三种模式都建距离）⇒
+	 * ③④ 红（盒子数 3→4 / 1→2）；把 {@code case SIGNAL} 那支加回 {@code entryProps} ⇒ ① 红。
 	 */
 	@Nullable
 	private String signalRangeRowProblem() {
@@ -5111,57 +5186,182 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		task.entries.add(probe);
 		int index = task.entries.size() - 1;
 		try {
-			// ① 只有「接收」有它
-			probe.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
-			Prop rangeProp = null;
-			for (Prop prop : entryProps(probe))
-				if (prop.name.getString()
-					.equals(name))
-					rangeProp = prop;
-			if (rangeProp == null)
-				return "「接收」的属性表里没有「距离」";
-			for (ArmProgramEntry.SignalMode mode : List.of(ArmProgramEntry.SignalMode.SEND_ON,
-				ArmProgramEntry.SignalMode.SEND_OFF)) {
+			// ① 三种模式的属性表里都不许有「距离」（它已经是基础内容）
+			for (ArmProgramEntry.SignalMode mode : ArmProgramEntry.SignalMode.values()) {
 				probe.signalMode = mode;
 				if (entryProps(probe).stream()
 					.anyMatch(p -> p.name.getString()
 						.equals(name)))
-					return "模式 " + mode + " 的属性表里不该有「距离」（距离只约束「收」）";
+					return "模式 " + mode + " 的属性表里不该有「距离」（它是基础内容，见 buildBaseControls）";
 			}
-			// ②③④ 真建一次，量几何
-			probe.signalMode = ArmProgramEntry.SignalMode.RECEIVE;
-			probe.signalRange = 16; // 非 0 才 isSet（属性显示出来，编辑器才进得去）
-			editingProp = rangeProp;
-			editing = new EditTarget(false, 0, index, name);
-			init(minecraft, 427, 240);
-			if (editorBoxes.size() != 1) {
-				int boxes = editorBoxes.size();
-				editing = null;
+			// ②③④ 每个模式各建一次动作头，量几何
+			for (ArmProgramEntry.SignalMode mode : ArmProgramEntry.SignalMode.values()) {
+				probe.signalMode = mode;
+				probe.signalRange = 16; // 顺手带上一个非 0 值：距离框**与它的值无关**，不该因此多/少一个盒子
 				editingProp = null;
-				return "「距离」的第二行应当是 1 个控件，实际 " + boxes;
-			}
-			int left = editorBoxes.get(0)[0] - leftPos;
-			int width = editorBoxes.get(0)[2];
-			if (left != SIGNAL_RANGE_X)
-				return "「距离」控件的起点不对（" + left + " ≠ " + SIGNAL_RANGE_X + "）";
-			if (width != SIGNAL_RANGE_W)
-				return "「距离」控件的宽度不对（" + width + " ≠ " + SIGNAL_RANGE_W + "）";
-			if (left + width != SIGNAL_ROW_END)
-				return "「距离」控件没有铺到右沿（" + (left + width) + " ≠ " + SIGNAL_ROW_END + "）";
-			int numWidth = font.width(String.valueOf(ArmProgramEntry.SIGNAL_RANGE_MAX));
-			if (numWidth > SIGNAL_RANGE_W - 10)
-				return "「距离」的最大值放不下（" + numWidth + " > " + (SIGNAL_RANGE_W - 10) + "）";
-			for (GuiEventListener listener : editorWidgets) {
-				if (!(listener instanceof ScrollInput input) || !input.visible)
-					continue;
-				// 只查那一格数值框（属性选择框在第一行，宽度不一样，别拿它当判据）
-				if (input.getY() - topPos != ROW2_Y)
-					continue;
-				int right = input.getX() - leftPos + input.getWidth();
-				if (right > 200) {
+				editing = new EditTarget(false, 0, index, null);
+				init(minecraft, 427, 240);
+				// 期望的盒子表（左沿, 宽）—— 与 buildBaseControls 里的常量逐一对应
+				int[][] want = switch (mode) {
+					case RECEIVE -> new int[][] { { SIGNAL_MODE_X, SIGNAL_MODE_W },
+						{ SIGNAL_RANGE_INLINE_X, SIGNAL_RANGE_INLINE_W } };
+					case SEND_ON -> new int[][] { { SIGNAL_MODE_X, SIGNAL_MODE_W },
+						{ SIGNAL_TICKS_X, SIGNAL_TICKS_W }, { SIGNAL_UNIT_X, SIGNAL_UNIT_W } };
+					case SEND_OFF -> new int[][] { { SIGNAL_MODE_X, SIGNAL_MODE_W } };
+				};
+				String problem = rowBoxesProblem("收发信号（" + mode + "）", want);
+				if (problem != null) {
 					editing = null;
 					editingProp = null;
-					return "「距离」控件出面板（右沿 " + right + "）";
+					return problem;
+				}
+				if (mode == ArmProgramEntry.SignalMode.RECEIVE) {
+					// 距离框里的文字上限 = width - 10（Create 的 Label 不裁剪）
+					int numWidth = font.width(String.valueOf(ArmProgramEntry.SIGNAL_RANGE_MAX));
+					if (numWidth > SIGNAL_RANGE_INLINE_W - 10) {
+						editing = null;
+						editingProp = null;
+						return "「距离」的最大值放不下（" + numWidth + " > " + (SIGNAL_RANGE_INLINE_W - 10) + "）";
+					}
+					int labelWidth = font.width(tr("entry.signal_range"));
+					if (labelWidth > SIGNAL_RANGE_INLINE_W - 10) {
+						editing = null;
+						editingProp = null;
+						return "「距离」这个标题放不下（" + labelWidth + " > " + (SIGNAL_RANGE_INLINE_W - 10) + "）";
+					}
+					// 值控件不许出面板（右沿 ≤ 200；编辑器两颗按钮本来就在面板外，别一起量）
+					for (GuiEventListener listener : editorWidgets) {
+						if (!(listener instanceof ScrollInput input) || !input.visible)
+							continue;
+						if (input.getY() - topPos != ROW2_Y)
+							continue;
+						int right = input.getX() - leftPos + input.getWidth();
+						if (right > 200) {
+							editing = null;
+							editingProp = null;
+							return "「距离」控件出面板（右沿 " + right + "）";
+						}
+					}
+				}
+			}
+		} finally {
+			editing = null;
+			editingProp = null;
+			task.entries.remove(index);
+		}
+		return null;
+	}
+
+	/**
+	 * 一排 DATA_AREA 盒子的**通用**几何断言（第二行）：盒子数、每格的左沿与宽度、相邻间隔恰 2px、
+	 * 以及"只要不止一格，最后一格就必须收在右沿 197 上"（整排铺满，不留空洞）。
+	 *
+	 * <p>为什么单独抽一个：动作头那一行现在有多套并排布局（个数三格 / 收信号两格 / 发信号三格 /
+	 * 中断一格），各写一份 for 循环迟早会出现"这一支忘了查间隔"。判据只有这一处。
+	 *
+	 * <p>⚠️ 单格的行**不查右沿**：{@code 中断}那一行只有一个 30 宽的固定模式框（115..145），
+	 * 它不该被拉伸到 197 —— 那会与「接收 / 发送」两种模式的模式框宽度不一致（切模式时控件乱跳）。
+	 *
+	 * @param want 逐格期望 {@code {左沿, 宽}}，顺序 = 从左到右
+	 */
+	@Nullable
+	private String rowBoxesProblem(String label, int[][] want) {
+		if (editorBoxes.size() != want.length)
+			return label + " 的第二行应当是 " + want.length + " 个控件，实际 " + editorBoxes.size();
+		int expectedLeft = -1;
+		for (int i = 0; i < want.length; i++) {
+			int left = editorBoxes.get(i)[0] - leftPos;
+			int width = editorBoxes.get(i)[2];
+			if (left != want[i][0])
+				return label + " 的第 " + (i + 1) + " 个控件起点不对（" + left + " ≠ " + want[i][0] + "）";
+			if (width != want[i][1])
+				return label + " 的第 " + (i + 1) + " 个控件宽度不对（" + width + " ≠ " + want[i][1] + "）";
+			int right = left + width;
+			if (right > SIGNAL_ROW_END)
+				return label + " 的第 " + (i + 1) + " 个控件越界（右沿 " + right + " > " + SIGNAL_ROW_END + "）";
+			if (expectedLeft >= 0 && left != expectedLeft)
+				return label + " 的第 " + i + " 与第 " + (i + 1) + " 个控件之间不是 2px 间隔（左沿 " + left + " ≠ "
+					+ expectedLeft + "）";
+			expectedLeft = right + 2;
+		}
+		if (want.length > 1) {
+			int[] lastBox = editorBoxes.get(want.length - 1);
+			int last = lastBox[0] - leftPos + lastBox[2];
+			if (last != SIGNAL_ROW_END)
+				return label + " 的第二行没有铺到右沿（" + last + " ≠ " + SIGNAL_ROW_END
+					+ "）—— 应当由最后一格吸收剩余宽度";
+		}
+		return null;
+	}
+
+	/**
+	 * 自检：「个数」（取出 / 放入）现在也长在**动作头那一行**（用户本轮口径：从属性升级为基础内容）。
+	 *
+	 * <p>用户原话：<i>"对于放入和取出的数量选择和模式也是，放在编辑的第二排右边"</i>
+	 * ⇒ 三格并排：坐标框(77,60) + 模式框(139,30) + 数值框(171,26)，右沿仍是
+	 * {@code FIELD_X + FIELD_W = 197}（与第一行那个选择框对齐）。
+	 *
+	 * <p>断言五件事：
+	 * <ol>
+	 *   <li><b>取出与放入都有这三格</b>，且几何与常量逐一对上（走 {@link #rowBoxesProblem}：
+	 *       盒子数 / 左沿 / 宽 / 相邻 2px / 右沿 197）；</li>
+	 *   <li>两者的**属性表里都不许有「个数」**（它属于基础内容）；</li>
+	 *   <li>紧凑模式标签（{@code ≤} / {@code =}）在 {@code 30 - 10 = 20} 里放得下
+	 *       —— 反证：换回 {@code labels(CountMode.values())}（「小于等于」≈36 / {@code At most}≈46）⇒ 立刻红；</li>
+	 *   <li>数值框里最长的数（{@code "64"} = {@link ScriptParser#COUNT_MAX}）在 {@code 26 - 10 = 16} 里放得下；</li>
+	 *   <li>三个框加起来正好铺满 77..197（由 ① 的右沿那条兜住）。</li>
+	 * </ol>
+	 *
+	 * <p>反证：把 {@code COUNT_INLINE_W} 改成 34 ⇒ ① 红（数值框宽不对，且模式框起点跟着变）；
+	 * 把 {@code COUNT_COORD_W} 改回 {@code FIELD_W}（坐标框不让位）⇒ ① 红（第 2 格起点 197 ≠ 139）；
+	 * 把 {@code if (count)} 删掉（不建那两格）⇒ ① 红（盒子数 1 ≠ 3）；
+	 * 把 {@code case TAKE, DEPOSIT} 加回 {@code entryProps} ⇒ ② 红。
+	 */
+	@Nullable
+	private String countInlineRowProblem() {
+		if (program.tasks.isEmpty())
+			return "自检前提不成立：烟雾程序里没有任务";
+		String name = tr("entry.count").getString();
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry probe = new ArmProgramEntry();
+		task.entries.add(probe);
+		int index = task.entries.size() - 1;
+		try {
+			for (OperationType op : new OperationType[] { OperationType.TAKE, OperationType.DEPOSIT }) {
+				probe.op = op;
+				// ② 属性表里不许有「个数」
+				if (entryProps(probe).stream()
+					.anyMatch(p -> p.name.getString()
+						.equals(name)))
+					return op + " 的属性表里不该有「个数」（它是基础内容，见 buildBaseControls）";
+				// ① 动作头那一行的三格几何
+				editingProp = null;
+				editing = new EditTarget(false, 0, index, null);
+				init(minecraft, 427, 240);
+				String problem = rowBoxesProblem(String.valueOf(op), new int[][] {
+					{ FIELD_X, COUNT_COORD_W }, { COUNT_MODE_INLINE_X, COUNT_MODE_INLINE_W },
+					{ COUNT_INLINE_X, COUNT_INLINE_W } });
+				if (problem != null) {
+					editing = null;
+					editingProp = null;
+					return problem;
+				}
+				// ③ 紧凑模式标签必须真的放得下（Create 的 Label 不裁剪、画超出盒子）
+				for (Component option : countModeLabels()) {
+					int w = font.width(option);
+					if (w > COUNT_MODE_INLINE_W - 10) {
+						editing = null;
+						editingProp = null;
+						return op + " 的个数模式标签放不下（" + option.getString() + " " + w + " > "
+							+ (COUNT_MODE_INLINE_W - 10) + "）";
+					}
+				}
+				// ④ 数值框里最长的那个数
+				int numWidth = font.width(String.valueOf(ScriptParser.COUNT_MAX));
+				if (numWidth > COUNT_INLINE_W - 10) {
+					editing = null;
+					editingProp = null;
+					return op + " 的个数放不下（" + numWidth + " > " + (COUNT_INLINE_W - 10) + "）";
 				}
 			}
 		} finally {
@@ -5181,7 +5381,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 *
 	 * <p>断言五件事：① 三段的宽度**加起来 ≤ 82** 且右沿 ≤ 197；② 每个控件右沿 ≤ 197；
 	 * ③ 模式框的**每个选项**都放得下；④ 数值框的最大值与单位框的 t/s/m 都放得下；
-	 * ⑤ 发模式恰好 3 个 DATA_AREA 盒子（模式 + 数值 + 单位）、接收模式 1 个。
+	 * ⑤ 盒子数按模式走：发送通电 3 个（模式 + 数值 + 单位）、**接收 2 个（模式 + 距离）**、
+	 * 中断 1 个（只有模式）。
+	 *
+	 * <p>⚠️ 「接收」在用户本轮改造里从 1 个变成 2 个：「距离」升级为基础内容，紧挨着模式框长在
+	 * 同一行（{@link #SIGNAL_RANGE_INLINE_X} / {@link #SIGNAL_RANGE_INLINE_W}）——
+	 * 它与「发送通电」的数值 / 单位框**共用 147 这个起点，但按模式互斥、永不同时出现**，
+	 * 所以 ① 那条"三段并排"的账（{@code SIGNAL_ROW_W = 82}）一个字都不用改。
 	 */
 	@Nullable
 	private String signalRowProblem() {
@@ -5241,9 +5447,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					if (w > SIGNAL_MODE_W - 10)
 						return "模式选项放不下（" + option.getString() + " " + w + " > " + (SIGNAL_MODE_W - 10) + "）";
 				}
-				// ⑤ 接收 / 中断 = 1 个盒子（只有模式）；**发送通电** = 3 个（模式 + 数值 + 单位）
-				//    ——「中断」本轮起也在 1 个那一侧：它立即清除该频率，**不接收持续时间**
-				int want = mode == ArmProgramEntry.SignalMode.SEND_ON ? 3 : 1;
+				// ⑤ 盒子数按模式走（用户本轮：距离升级为基础内容，长在同一行）：
+				//    **接收** = 模式 + 距离 = 2（原来是 3，因为旧布局里距离是属性、且模式框占满整行）；
+				//    **发送通电** = 模式 + 数值 + 单位 = 3（与改造前逐像素相同）；
+				//    **中断** = 只有模式 = 1（它立即清除该频率，不接收持续时间，也没有距离）。
+				//    反证：把 `if (entry.isSignalReceive())` 删掉（三种模式都建距离）⇒ ③④ 立刻红。
+				int want = mode == ArmProgramEntry.SignalMode.SEND_ON ? 3
+					: mode == ArmProgramEntry.SignalMode.RECEIVE ? 2 : 1;
 				if (editorBoxes.size() != want)
 					return "模式 " + mode + " 的第二行应当是 " + want + " 个盒子，实际 " + editorBoxes.size();
 			}
@@ -5342,12 +5552,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		ArmProgramEntry recvOff = new ArmProgramEntry();
 		recvOff.op = OperationType.SIGNAL;
 		recvOff.waitForPowered = false; // 老卡：界面上不再给这个开关，但必须照样写成"等断电"
+		// ★ 用户本轮：距离升级为基础内容之后，它也进标题芯片（{@link #signalChipTail}）——
+		//   取**界面真的能造出来的**那种状态（接收 + 距离 16 + 极性默认 true）。
+		//   反证：把 SIGNAL_CHIP_MAX 改成 130 ⇒ 中文这里立刻红（"距离 256" 会画到 140+）；
+		//   在 signalChipTail 里忘掉距离那一段 ⇒ {@code ArmEntryText.selfCheck} 的④ 先红。
+		ArmProgramEntry recvRange = new ArmProgramEntry();
+		recvRange.op = OperationType.SIGNAL;
+		recvRange.signalRange = ArmProgramEntry.SIGNAL_RANGE_MAX; // 最宽的那一档（"距离 256"）
 		ArmProgramEntry sendLong = new ArmProgramEntry();
 		sendLong.op = OperationType.SIGNAL;
 		sendLong.signalMode = ArmProgramEntry.SignalMode.SEND_ON;
 		sendLong.waitAmount = ArmProgramEntry.SIGNAL_MAX_AMOUNT;
 		sendLong.waitUnit = WaitUnit.MINUTE; // 最宽的尾巴（120m）
-		for (ArmProgramEntry chip : new ArmProgramEntry[] { recv, send, cut, recvOff, sendLong }) {
+		for (ArmProgramEntry chip : new ArmProgramEntry[] { recv, send, cut, recvOff, recvRange, sendLong }) {
 			int need = signalChipTextEnd(chip) + 2;
 			if (need > SIGNAL_CHIP_MAX)
 				return "标题芯片的「" + ArmEntryText.signalHeadText(chip)
@@ -5440,15 +5657,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	};
 
 	/**
-	 * 「个数」属性（取出 / 放入）用到的键：属性名 / 模式名 / 悬停提示 / 两个胶囊文案 / 两个选项名。
+	 * 「个数」（取出 / 放入）用到的键：属性名 / 模式名 / 悬停提示 / 两个胶囊文案 / 两个**紧凑**选项名。
 	 *
-	 * <p>与 {@link #SIGNAL_LANG_KEYS} 同一条理由：{@code opt.atmost} / {@code opt.exact} 是
-	 * 由枚举名**派生**的键（{@code labels(CountMode.values())}），改名 / 加项会自动换成查不到的键，
-	 * 而界面上只表现为"选择框里画着裸键名"，编译与运行都不报错。
+	 * <p>与 {@link #SIGNAL_LANG_KEYS} 同一条理由：紧凑模式框现在查的是 {@code opt.atmost_short} /
+	 * {@code opt.exact_short}（单字符 ≤ / =，见 {@link #countModeLabels}）—— 这两个键由 switch 手写，
+	 * 键名打错的表现同样是"选择框里画着裸键名"，编译与运行都不报错。
+	 *
+	 * <p>⚠️ 长文案 {@code opt.atmost} / {@code opt.exact}（「小于等于」/「等于」）**仍然保留**：
+	 * 紧凑框不再查它们（30px 放不下），但它们不是死键、也不进 {@code langKeyProblem} 的死键表 ——
+	 * 这里一并守着"至少还在"，免得日后有人以为可以顺手删。
 	 */
 	private static final String[] COUNT_LANG_KEYS = {
 		"entry.count", "entry.count_mode", "hint.entry_count", "hint.entry_count_mode",
-		"chip.count_atmost", "chip.count_exact", "opt.atmost", "opt.exact"
+		"chip.count_atmost", "chip.count_exact", "opt.atmost", "opt.exact",
+		"opt.atmost_short", "opt.exact_short"
+	};
+
+	/**
+	 * 坐标框那一组键（用户本轮：框里编辑**相对坐标**，世界坐标只进悬停提示）。
+	 *
+	 * <p>缺 {@code entry.coords_world} 的表现是"提示框第三行显示裸键名"——
+	 * 编译、运行、自检全都不报错，只有玩家把鼠标挪到坐标框上才看得见，所以必须在这里守。
+	 */
+	private static final String[] COORD_LANG_KEYS = {
+		"entry.coords", "entry.coords_world", "hint.entry_coords", "hint.entry_filter_coords"
 	};
 
 	/**
@@ -5504,6 +5736,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			}
 			// 「个数」属性这一组（用户本轮：等于 / 小于等于 + 数值，取出与放入共用）
 			for (String key : COUNT_LANG_KEYS) {
+				String full = prefix + key;
+				if (!zh.containsKey(full))
+					missing.add("zh:" + key);
+				if (!en.containsKey(full))
+					missing.add("en:" + key);
+			}
+			// 坐标框那一组（用户本轮：框里编辑相对坐标，世界坐标进悬停提示）
+			for (String key : COORD_LANG_KEYS) {
 				String full = prefix + key;
 				if (!zh.containsKey(full))
 					missing.add("zh:" + key);

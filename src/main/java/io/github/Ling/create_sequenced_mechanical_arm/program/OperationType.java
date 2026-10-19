@@ -118,10 +118,14 @@ public enum OperationType {
 	 *
 	 * <p>用户本轮口径：个数属性<b>同时服务于取出与放入</b>（放入以前是"整摞都塞"，现在也受个数约束）。
 	 * 之所以收在枚举上而不是各处写 {@code op == TAKE || op == DEPOSIT}：它同时决定
-	 * 编辑器属性表要不要列出这一项（{@code ArmProgramScreen.entryProps}）、卡片胶囊要不要显示
-	 * （{@code ArmEntryText.props}，判据 {@code ArmProgramEntry.countIsSet()}）、
-	 * 脚本 {@code count=} / {@code countmode=} 允不允许出现（{@code ScriptParser} / {@code ScriptDecompiler}）、
-	 * 以及 {@code describe()} 报不报它 —— 五处各写一遍必然有一天只有四处改到。
+	 * 编辑器第二行要不要多建"模式 + 数值"两个控件（{@code ArmProgramScreen.buildBaseControls}）、
+	 * 坐标框要不要让位收窄（同一个方法里同一处判据）、卡片第一行要不要写个数
+	 * （{@code ArmEntryText.base}）、脚本 {@code count=} / {@code countmode=} 允不允许出现
+	 * （{@code ScriptParser} / {@code ScriptDecompiler}）以及 {@code describe()} 报不报它
+	 * —— 六处各写一遍必然有一天只有五处改到。
+	 *
+	 * <p>⚠️ 它<b>不再</b>决定属性表 / 卡片胶囊：用户本轮把「个数」从属性升级成基础内容之后，
+	 * {@code ArmProgramScreen.entryProps} 与 {@code ArmEntryText.props} 里都没有它了。
 	 */
 	public boolean hasCount() {
 		return this == TAKE || this == DEPOSIT;
