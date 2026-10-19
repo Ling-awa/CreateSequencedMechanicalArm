@@ -130,6 +130,7 @@
   "create_sequenced_mechanical_arm.gui.editor.opt.sneak": "潜行",
   "create_sequenced_mechanical_arm.gui.editor.entry.sneak_mode": "潜行",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_sneak_mode": "这一下右键是正常还是潜行（有些交互必须潜行才生效，例如炒锅）。它是「使用」自己的参数，所以摆在动作头这一行，不用去属性里找",
+  "create_sequenced_mechanical_arm.gui.editor.hint.coords_out_of_range": "超出动力臂的活动范围（要小于 %s 格）—— 真跑起来会在动身前就报「目标超出臂的范围」，把偏移改小或把臂挪近",
   "create_sequenced_mechanical_arm.gui.editor.opt.filter": "过滤",
   "create_sequenced_mechanical_arm.gui.editor.opt.filter_held": "手持",
   "create_sequenced_mechanical_arm.gui.editor.opt.filter_container": "容器",

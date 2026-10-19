@@ -886,7 +886,43 @@ public class ProgramRuntime {
 	 * 只是手臂会拉直（固有限制，见 PLAN §7.9）。
 	 */
 	public static boolean withinArmRange(BlockPos armPos, BlockPos target) {
-		return target.closerThan(armPos, ArmBlockEntity.getRange());
+		return target.closerThan(armPos, armRange());
+	}
+
+	/**
+	 * 条目偏移（<b>相对执行它的那条臂</b>）在不在臂的活动范围内 —— 与 {@link #withinArmRange}
+	 * <b>同一个判据</b>，只是把臂的位置抽掉了。
+	 *
+	 * <p>为什么可以这么抽：条目坐标是**臂相对**的（世界目标 = {@code 臂位置 + 偏移}），而
+	 * {@code closerThan} 对平移不变 ⇒ 「臂够不够得到」等价于「偏移本身在不在范围内」。
+	 * 于是**客户端也能提前判**（编辑器红字、操作表的描框都问这一个方法），不需要知道那条臂在哪。
+	 *
+	 * <p>⚠️ 范围取 Create 自己的配置（{@code mechanicalArmRange}，默认 5 格）：专用服务器上客户端拿到的是
+	 * 同步值，万一没同步到就是默认值 —— 这里的判定只用于**提前提示**，真跑起来服务器那边（{@code preCheckFailure}）
+	 * 用同一个 {@code withinArmRange} 再判一次，所以提示与执行不会分叉到"提示说行、实际不行"以外的程度。
+	 */
+	public static boolean offsetInArmRange(BlockPos offset) {
+		return withinArmRange(BlockPos.ZERO, offset);
+	}
+
+	/**
+	 * 臂的活动范围（格）= Create 的 {@code mechanicalArmRange}（默认 5）。
+	 *
+	 * <p>⚠️ <b>必须兜一层 try/catch</b>：Create 的服务器配置在**还没加载**时取值会抛
+	 * {@code IllegalStateException: Cannot get config value before config is loaded} ——
+	 * 客户端在标题界面就跑编辑器自检、操作表描框也可能早于配置同步，直接调就是一次崩溃
+	 * （第一版就是这么红的：{@code @withinArmRange} 抛 IllegalStateException）。
+	 * 取不到时退回 Create 自己的默认值 {@link #DEFAULT_ARM_RANGE}，**不做缓存** ——
+	 * 配置真加载好之后，下一次调用自然拿到真实值。
+	 */
+	private static final int DEFAULT_ARM_RANGE = 5;
+
+	public static int armRange() {
+		try {
+			return ArmBlockEntity.getRange();
+		} catch (RuntimeException configNotLoadedYet) {
+			return DEFAULT_ARM_RANGE;
+		}
 	}
 
 	/**
@@ -917,7 +953,7 @@ public class ProgramRuntime {
 		// 范围直接取 Create 自己的配置（`mechanicalArmRange`，默认 5 格）—— 与"原版会接受多远的点"完全一致。
 		// 注意它比 IK 的两节臂总长（29/16 ≈ 1.81 格）大：范围内的远处目标仍会让手臂拉直，
 		// 那是固有限制、不在这里拦（见 PLAN §7.9）。
-		int range = ArmBlockEntity.getRange();
+		int range = armRange();
 		if (!withinArmRange(arm.getBlockPos(), target)) {
 			// ★ 这段每 tick 都会走一遍（前置检查失败是**每 tick 重试**的）⇒ 不为此付 `String.format` +
 			//   `Math.sqrt` 的钱：纯字符串拼接就够了，而"差多远"用**平方**距离同样回答得了

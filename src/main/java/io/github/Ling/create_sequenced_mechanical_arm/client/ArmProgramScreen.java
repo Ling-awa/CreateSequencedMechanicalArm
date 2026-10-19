@@ -44,6 +44,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.script.ScriptParser;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmRegistration;
@@ -69,6 +70,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.contents.TranslatableContents;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.util.Mth;
@@ -509,6 +511,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private Prop editingProp;
 	/** 上一次命中的热区名字（只给自检用 —— 点击热区是手算的，必须能被自动验证）。 */
 	private String lastHit = "";
+
+	/**
+	 * 坐标框的**红字警示颜色**（原版聊天框里"命令出错"那种红 = {@code ChatFormatting.RED} 的 ARGB）。
+	 *
+	 * <p>用户口径：超出动力臂活动范围的坐标要按**我的世界聊天栏错误提示**的颜色标出来。
+	 * {@code ChatFormatting.RED} 是 {@code 0xFF5555}（不带 alpha），{@code EditBox.setTextColor} 吃 ARGB。
+	 */
+	private static final int ERROR_TEXT_COLOR = 0xFFFF5555;
+
+	/** 正常（在范围内）的输入框文字颜色 —— 与 {@link #ERROR_TEXT_COLOR} 配对，自检两边都比。 */
+	private static final int NORMAL_TEXT_COLOR = 0xFFFFFF;
+
+	/** 「超出动力臂活动范围」那一句悬停警示的语言键（自检按**键名**断言，不赌文案）。 */
+	private static final String COORDS_RANGE_KEY = "create_sequenced_mechanical_arm.gui.editor.hint.coords_out_of_range";
+
+	/**
+	 * 自检用的镜像：{@code EditBox} 在 1.21 **没有** {@code getTextColor()}，所以
+	 * {@link #refreshCoordsWarning} 把"上一次算出来的颜色 / 是否警示"顺手记在这里，
+	 * 自检（{@code coordsRangeProblem}）拿它断言。**只读、不参与任何逻辑**。
+	 */
+	private int lastCoordsColor = NORMAL_TEXT_COLOR;
+	private boolean lastCoordsWarned;
+	@Nullable
+	private List<Component> lastCoordsTip;
 
 	/**
 	 * 「原点坐标」/「坐标偏移」那两个输入框：现在开着哪一个（{@code null} = 都没开）。
@@ -3278,20 +3304,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					//   模型里的 face 保持默认 UP（臂解析交互点时用得到，见 FILTER_COORD_W 的说明）。
 					// ★ 用户本轮口径：框里**直接编辑相对坐标**（就是模型里的 offset），世界坐标只进悬停提示
 					//   —— 与下面通用那一支同一套（判据与写法都只有这一处，见 {@link #worldCoordLines}）。
-					textField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, FILTER_COORD_W, tr("entry.coords"),
-						tr("hint.entry_filter_coords"), worldCoordLines(entry.offset),
-						entry.offset.getX() + "," + entry.offset.getY() + "," + entry.offset.getZ(), 24, v -> {
-							// 坐标解析**只有一处**（parseTriple：逗号/空格都吃、且守住 ±COORD_LIMIT）。
-							// 曾有一份只按逗号切、没有上限校验的副本走这条路 —— 超限坐标会被吞进模型，
-							// 直到落盘才以"保存失败"的形式爆出来（用户看到的是莫名其妙保存不了）。
-							BlockPos parsed = parseTriple(v);
-							if (parsed != null) {
-								pushUndo();
-								// 写回的就是**偏移**（框里显示什么就存什么）—— 不再减去原点：
-								// 拿世界坐标往返换算会出现"改一下 Z、X 也跟着变"（原点记得不对时更糟）。
-								entry.offset = parsed;
-							}
-						});
+					coordsField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, FILTER_COORD_W, entry,
+						tr("hint.entry_filter_coords"));
 				}
 			}
 			default -> {
@@ -3331,21 +3345,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				int coordW = count ? COUNT_COORD_W
 					: sneak ? USE_COORD_W
 						: face ? FIELD_W - 4 - faceW : FIELD_W;
-				// ★ 用户本轮口径：框里显示 / 回填的是**相对坐标**（模型里的 offset），世界坐标只进悬停提示：
-				//   "玩家编辑的时候此处不再根据原点计算真实坐标，而是直接显示和编辑相对坐标，
-				//    这样应该可以更短并且更便于编辑，当鼠标移动上去的时候提示框额外显示对应的世界坐标"
-				//   —— 于是写回时**不再** {@code subtract(origin)}（存什么就是什么），
-				//   而世界坐标由 {@link #worldCoordLines} 挂到 tooltip 上（没有原点就不加那一行）。
-				textField(FIELD_X, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
-					worldCoordLines(entry.offset),
-					entry.offset.getX() + "," + entry.offset.getY() + "," + entry.offset.getZ(), 24, v -> {
-						// 与上面过滤坐标同一个解析器（唯一实现）：逗号/空格都吃，且守住 ±COORD_LIMIT。
-						BlockPos parsed = parseTriple(v);
-						if (parsed != null) {
-							pushUndo();
-							entry.offset = parsed;
-						}
-					});
+				// ★ 用户本轮口径：框里显示 / 回填的是**相对坐标**（模型里的 offset），世界坐标只进悬停提示；
+				//   世界坐标由 {@link #coordsField} 里的提示行给出（没有原点就不加那一行），
+				//   超出动力臂活动范围时那一行变成**红字**、框里的文字也变红（同一个 helper）。
+				coordsField(FIELD_X, ROW2_Y, coordW, entry, tr("hint.entry_coords"));
 				if (sneak)
 					// 「正常 / 潜行」二选一（下标与 ArmProgramEntry.SneakMode 的 ordinal 同一套：
 					// 0 = NORMAL = 默认项，1 = SNEAK）。选项名走 labels(...) 的 `opt.<小写>` 派生，
@@ -3497,6 +3500,81 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// 用 addRenderableWidget 的话它会把点击吃掉，EditBox 永远拿不到焦点（点不进输入框）。
 		editorWidgets.add(area);
 		addRenderableOnly(area);
+	}
+
+	/**
+	 * <b>坐标输入框</b>（通用动作与「过滤 · 容器」共用这一处）：框里编辑的是**相对坐标**
+	 * （模型里的 {@code offset}），世界坐标只作为悬停提示的附加行。
+	 *
+	 * <p>★ 用户 2026-10-19 的新要求：**超出动力臂活动范围的坐标用红字**，悬停提示里也要说明。
+	 * <ul>
+	 *   <li>判据只有 {@link ProgramRuntime#offsetInArmRange}（与运行时前置检查同一个方法）——
+	 *       "臂够不够得到"对臂相对坐标来说就是"偏移在不在范围内"，所以客户端不需要知道那条臂在哪；</li>
+	 *   <li>红色取**原版聊天框错误提示**的颜色（{@code ChatFormatting.RED} = {@code 0xFF5555}，
+	 *       就是命令输错时那句话的颜色）；</li>
+	 *   <li>提示行随**打字实时**增删（{@code TooltipArea.withTooltip} 存的是列表引用，所以我们改同一个
+	 *       可变列表即可；颜色用 {@code EditBox.setTextColor}）。</li>
+	 * </ul>
+	 */
+	private void coordsField(int x, int y, int width, ArmProgramEntry entry, Component hint) {
+		addEditorBox(x, y, width);
+		EditBox box = new EditBox(font, leftPos + x + 5, topPos + y + 5, width - 10, 8, tr("entry.coords"));
+		box.setBordered(false);
+		box.setMaxLength(24);
+		box.setValue(offsetText(entry.offset));
+		// 提示：标题 + 说明 + （有原点时）世界坐标 + （超出范围时）红字警示。
+		// ⚠️ 这个列表**会被原地修改**（打字时刷新），因为 TooltipArea 存的是引用。
+		List<Component> tip = new ArrayList<>();
+		lastCoordsTip = tip;
+		refreshCoordsWarning(box, tip, entry, hint);
+		box.setResponder(v -> {
+			// 坐标解析**只有一处**（parseTriple：逗号/空格都吃、且守住 ±COORD_LIMIT）。
+			// 曾有一份只按逗号切、没有上限校验的副本走这条路 —— 超限坐标会被吞进模型，
+			// 直到落盘才以"保存失败"的形式爆出来（用户看到的是莫名其妙保存不了）。
+			BlockPos parsed = parseTriple(v);
+			if (parsed != null && !parsed.equals(entry.offset)) {
+				pushUndo();
+				entry.offset = parsed;
+			}
+			// 边打边判：颜色与警示行都跟着当前值走（也覆盖"打了个半截"的情况 —— 那时 offset 不变）
+			refreshCoordsWarning(box, tip, entry, hint);
+		});
+		addEditorWidget(box);
+		TooltipArea area = new TooltipArea(leftPos + x, topPos + y, width, 18);
+		area.withTooltip(tip);
+		// ⚠️ 只"画"不"收事件"（与 {@link #textField} 同一条理由：否则 EditBox 点不进焦点）。
+		editorWidgets.add(area);
+		addRenderableOnly(area);
+	}
+
+	/** 偏移 → 框里的文本（{@code x,y,z}）。 */
+	private static String offsetText(BlockPos offset) {
+		return offset.getX() + "," + offset.getY() + "," + offset.getZ();
+	}
+
+	/**
+	 * 刷新坐标框的**红字警示**（颜色 + 悬停提示那一行）—— 判据只有
+	 * {@link ProgramRuntime#offsetInArmRange} 一处。
+	 *
+	 * <p>反证：把 {@code outOfRange} 恒置 false ⇒ 自检 {@code coordsRangeProblem()} 的"超出范围要变红"红；
+	 * 把判据换成 {@code offset.distSqr(ZERO) > 100}（自己另写一个范围）⇒ 边界那条红。
+	 */
+	private void refreshCoordsWarning(EditBox box, List<Component> tip, ArmProgramEntry entry, Component hint) {
+		boolean outOfRange = !ProgramRuntime.offsetInArmRange(entry.offset);
+		box.setTextColor(outOfRange ? ERROR_TEXT_COLOR : NORMAL_TEXT_COLOR);
+		lastCoordsColor = outOfRange ? ERROR_TEXT_COLOR : NORMAL_TEXT_COLOR;
+		lastCoordsWarned = outOfRange;
+		tip.clear();
+		tip.add(tr("entry.coords")
+			.copy());
+		tip.add(hint.copy()
+			.withStyle(ChatFormatting.DARK_GRAY));
+		tip.addAll(worldCoordLines(entry.offset));
+		if (outOfRange)
+			// 红字警示：用原版聊天框里"命令出错"那种红（ChatFormatting.RED = 0xFF5555）
+			tip.add(tr("hint.coords_out_of_range", ProgramRuntime.armRange())
+				.copy()
+				.withStyle(ChatFormatting.RED));
 	}
 
 	private <E extends Enum<E>> void picker(Component name, Component hint, List<Component> options, int selected,
@@ -4016,6 +4094,69 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * 自检：**超出动力臂活动范围的坐标要变红**（用户 2026-10-19：世界里的框改成"够不到就红"，
+	 * 编辑器里的坐标框文字也用原版聊天框错误提示那种红，悬停再补一句）。
+	 *
+	 * <p>判据与运行时前置检查同一个方法（{@link ProgramRuntime#offsetInArmRange}），所以这里直接
+	 * 走真实的动作头构建（{@code init()} → {@code buildBaseControls} → {@code coordsField}），
+	 * 再读 {@code refreshCoordsWarning} 记下的镜像（{@code EditBox} 没有 {@code getTextColor()}）。
+	 *
+	 * <p>反证：把 {@code refreshCoordsWarning} 里的颜色恒置白 ⇒ ① 红；把警示行删掉 ⇒ ② 红；
+	 * 用自有范围（例如 {@code distSqr > 100}）替代 {@code offsetInArmRange} ⇒ 边界那条（恰好 N 格）红。
+	 */
+	private String coordsRangeProblem(Minecraft mc) {
+		int range = ProgramRuntime.armRange();
+		// ⚠️ {@code closerThan} 是**严格小于**（`distSqr < range²`，见 {@code Vec3i:204-206}）——
+		//   所以"正好 range 格"在原版与我们的运行时里**都算超出**（原版添加交互点用的是同一个调用）。
+		//   夹具就按这条真值表来：range-1 在范围内，range 已经超出。
+		BlockPos in = new BlockPos(Math.max(0, range - 1), 0, 0);
+		BlockPos out = new BlockPos(range, 0, 0);
+		if (!ProgramRuntime.offsetInArmRange(in) || ProgramRuntime.offsetInArmRange(out))
+			return "范围判据本身不对（range=" + range + "）：" + in.toShortString() + " 应当在范围内、"
+				+ out.toShortString() + " 应当超出 —— closerThan 是严格小于，正好 range 格就算超出";
+		for (int i = 0; i < 2; i++) {
+			ArmProgram program = new ArmProgram();
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "range";
+			ArmProgramEntry entry = new ArmProgramEntry();
+			entry.op = OperationType.TAKE;
+			entry.offset = i == 0 ? out : in;
+			task.entries.add(entry);
+			program.tasks.add(task);
+			ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
+			CardProgramStorage.write(card, program, mc.level != null ? mc.level.registryAccess()
+				: RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY));
+			RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), mc.level != null
+				? mc.level.registryAccess() : RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY));
+			ItemStack.STREAM_CODEC.encode(buffer, card);
+			ArmProgramScreen probe =
+				new ArmProgramScreen(new ArmProgramMenu(0, mc.player != null ? mc.player.getInventory() : new Inventory(null),
+					buffer), mc.player != null ? mc.player.getInventory() : new Inventory(null), tr("title"));
+			probe.program = program;
+			probe.editing = new EditTarget(false, 0, 0, null);
+			probe.init(mc, 427, 240);
+			boolean warned = probe.lastCoordsWarned;
+			int color = probe.lastCoordsColor;
+			boolean tipHasWarning = probe.lastCoordsTip != null && probe.lastCoordsTip.stream()
+				.anyMatch(c -> c.getContents() instanceof TranslatableContents tc
+					&& tc.getKey()
+						.equals(COORDS_RANGE_KEY));
+			if (i == 0) {
+				if (!warned || color != ERROR_TEXT_COLOR)
+					return "超出活动范围的坐标没有变红（warned=" + warned + " color=0x" + Integer.toHexString(color) + "）";
+				if (!tipHasWarning)
+					return "超出活动范围时悬停提示里没有那一句警示（" + COORDS_RANGE_KEY + "）";
+			} else {
+				if (warned || color != NORMAL_TEXT_COLOR)
+					return "在范围内的坐标被误标红了（warned=" + warned + " color=0x" + Integer.toHexString(color) + "）";
+				if (tipHasWarning)
+					return "在范围内时悬停提示里却带着超范围警示";
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * 自检：**没设原点时新条目的默认偏移必须是 {@code 0,0,0}**，设了原点才是"看向的方块 − 原点"
 	 * （用户 2026-10-19 报的残留 bug：没原点时默认偏移直接变成玩家所在的世界坐标）。
 	 *
@@ -4247,6 +4388,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String newEntryOffset = newEntryOffsetProblem();
 			if (newEntryOffset != null && problem == null)
 				problem = "新条目的默认偏移: " + newEntryOffset;
+			// ★ 超出动力臂活动范围的坐标：坐标框要变红（原版聊天错误提示那种红），悬停再补一句
+			String coordsRange = screen.coordsRangeProblem(mc);
+			if (coordsRange != null && problem == null)
+				problem = "坐标超范围提示: " + coordsRange;
 			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
 			String exitRow = screen.exitRowProblem();
 			if (exitRow != null && problem == null)
@@ -6048,7 +6193,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private static final String[] USE_SNEAK_LANG_KEYS = {
 		"opt.use", "opt.use_sneak", "opt.normal", "opt.sneak",
-		"entry.sneak_mode", "hint.entry_sneak_mode"
+		"entry.sneak_mode", "hint.entry_sneak_mode",
+		// 「坐标超出活动范围」那一句悬停警示（坐标框变红时出现；自检按**键名**断言过它）
+		"hint.coords_out_of_range"
 	};
 
 	/**

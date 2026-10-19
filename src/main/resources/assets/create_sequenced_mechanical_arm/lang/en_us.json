@@ -130,6 +130,7 @@
   "create_sequenced_mechanical_arm.gui.editor.opt.sneak": "Sneak",
   "create_sequenced_mechanical_arm.gui.editor.entry.sneak_mode": "Sneak",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_sneak_mode": "Whether this right-click is normal or sneaking (some interactions only work while sneaking, e.g. a cooking pot). It belongs to Use itself, so it sits on the action header row instead of in the property list",
+  "create_sequenced_mechanical_arm.gui.editor.hint.coords_out_of_range": "Outside the arm's reach (must be closer than %s blocks) - when it runs it fails with target-out-of-range before moving; shrink the offset or move the arm closer",
   "create_sequenced_mechanical_arm.gui.editor.opt.filter": "Filter",
   "create_sequenced_mechanical_arm.gui.editor.opt.filter_held": "Held",
   "create_sequenced_mechanical_arm.gui.editor.opt.filter_container": "Cont",

@@ -16,6 +16,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ClipboardChecklist;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_sequenced_mechanical_arm.sequencedarm.SequencedArmBlock;
 
 import net.createmod.catnip.outliner.Outliner;
@@ -86,6 +87,13 @@ public class OperationTableHandler {
 	 * 键位事件 —— 不节流就是 20 包/秒（服务端虽然幂等、删不到东西就静默返回，但没必要刷）。
 	 */
 	private static final int REMOVE_INTERVAL = 5;
+
+	/**
+	 * 描框颜色：<b>金色 = 在动力臂活动范围内</b>（取原版动力臂输出端那个金，{@code ArmInteractionPoint:198}）；
+	 * <b>红色 = 超出活动范围</b>。⚠️ 两种颜色都**与"那里是不是空气"无关**（用户 2026-10-19）。
+	 */
+	private static final int OUTLINE_COLOR_IN_RANGE = 0xDDC166;
+	private static final int OUTLINE_COLOR_OUT_OF_RANGE = 0xE06C6C;
 
 	public enum Mode {
 		RECORDING, EDITING
@@ -215,9 +223,17 @@ public class OperationTableHandler {
 	 * 画出来的就是能被改的，别的任务既不画也不动 —— 否则会出现"删掉了看不见的东西"或者
 	 * "看得见却删不掉"。
 	 *
-	 * <p><b>方块被挖掉了也照画</b>（用户："这样玩家破坏方块了也可以知道在那个地方是有操作的"）：
-	 * 没有形状（空气 / 被破坏）时退化成整方块大小的框，并换成<b>红色</b> —— 红色 = 那里的方块已经没了，
-	 * 金色 = 目标还在。未加载的区块直接跳过：那种情况下判不出"方块还在不在"，满世界画红框只会误导。
+	 * <p><b>框的颜色只表达一件事：那个偏移在不在动力臂的活动范围内</b>（用户 2026-10-19 的口径）：
+	 * <ul>
+	 *   <li><b>金色/黄色</b> = 在范围内。方块与空气**同色**（那里本来就没方块也照样画一个整方块的框，
+	 *       玩家仍然能看出"这里有一条操作"）；</li>
+	 *   <li><b>红色</b> = <b>超出活动范围</b>（判据 {@code ProgramRuntime.offsetInArmRange}，与运行时
+	 *       前置检查同一个方法）。⚠️ 红色以前表示"这里的方块已经没了"，现在**不再表示那件事** ——
+	 *       空气也是黄的，只有够不到才是红的。</li>
+	 * </ul>
+	 *
+	 * <p>方块还在时按它的真实形状描边、空气 / 被挖掉时退化成整方块大小的框；未加载的区块直接跳过
+	 * （那种情况下连"够不够得到"都判不了）。
 	 *
 	 * <p>用户第四十轮起原点住在**卡上**（{@code CardProgramStorage.readOrigin}，null = 没设过），
 	 * 条目里存的仍是<b>相对该原点的偏移</b>，所以世界位置要按 {@code 原点 + offset} 算。
@@ -260,11 +276,17 @@ public class OperationTableHandler {
 			boolean missing = shape.isEmpty();
 			AABB box = missing ? new AABB(pos) : shape.bounds()
 				.move(pos);
+			// ★ 颜色判据**只有一处**：{@link ProgramRuntime#offsetInArmRange}（= 运行时前置检查用的那个
+			//   `withinArmRange`）。够不到 ⇒ 红；够得到 ⇒ 金（方块与空气**同色**，用户 2026-10-19 定：
+			//   "空气和方块都是黄色框，超出动力臂交互范围的就改为红框"）。
+			//   反证：把这里换成 `missing ? RED : GOLD`（旧行为：红 = 方块没了）⇒ 空气会重新变红、
+			//   而够不到的方块反而不红，与用户口径直接相反。
+			boolean inRange = ProgramRuntime.offsetInArmRange(entry.offset);
 			// key 用 BlockPos（稳定值类型）：读卡每次都会新建条目对象，
 			// 拿对象当 key 会让 Outliner 每 tick 累积一份，越画越多。
 			Outliner.getInstance()
 				.showAABB(pos, box)
-				.colored(missing ? 0xE06C6C : 0xDDC166)
+				.colored(inRange ? OUTLINE_COLOR_IN_RANGE : OUTLINE_COLOR_OUT_OF_RANGE)
 				.lineWidth(1 / 16f);
 		}
 	}
