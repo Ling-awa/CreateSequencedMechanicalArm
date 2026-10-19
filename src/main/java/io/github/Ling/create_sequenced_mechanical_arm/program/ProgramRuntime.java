@@ -16,6 +16,7 @@ import com.simibubi.create.content.kinetics.mechanicalArm.ArmBlockEntity;
 import com.simibubi.create.content.kinetics.mechanicalArm.ArmInteractionPoint;
 import com.simibubi.create.content.logistics.filter.FilterItemStack;
 import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
+import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.ArmEffects;
 import io.github.Ling.create_sequenced_mechanical_arm.interaction.RightClickBridge;
@@ -37,6 +38,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.crafting.Recipe;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.neoforge.items.IItemHandler;
 import net.neoforged.neoforge.items.ItemHandlerHelper;
@@ -1012,7 +1014,7 @@ public class ProgramRuntime {
 				//   目标格里最靠前的那件往往就是**我们刚加工出来的产物** —— 它当然不匹配配方，
 				//   旧写法于是报"没有匹配的配方"、手臂干脆不伸出去，而它后面那件**能加工的原料**
 				//   就永远等不到机会（带子一直被产物占着判定窗口）。
-				//   这与真正加工时的判据必须**同源**：`deployOnBelt` 是逐件 it 的，
+				//   这与真正加工时的判据必须**同源**：`deployInPlace` 是逐件 it 的，
 				//   上游机械手（Deployer）也是**逐件回调**、不匹配的直接 `PASS`
 				//   （`BeltDeployerCallbacks:38-63`，`:58-59` 就是这一条的出处）——
 				//   所以上游根本不存在"产物挡住原料"这个问题。
@@ -1058,7 +1060,7 @@ public class ProgramRuntime {
 	 * 目标上有没有**这条条目加工得了**的物品 —— 「组装」的前置检查用它，判据与真正加工时**同源**。
 	 *
 	 * <p>传送带：直接用带子自己的加工迭代（{@code handleProcessingOnAllItems}，与
-	 * {@link #deployOnBelt} 同一个调用、同一个范围：格子中心 ±.51），回调返回 {@code doNothing()}
+	 * {@link #deployInPlace} 同一个调用、同一个范围：格子中心 ±.51），回调返回 {@code doNothing()}
 	 * 所以是**只读探测**（`BeltInventory.applyToEachWithin:466-467`：结果没变化就 continue，不改任何东西）。
 	 * <br>普通容器：**逐槽找**（上游动力臂取物也是遍历所有槽位，`ArmBlockEntity:385-402`）。
 	 *
@@ -1077,15 +1079,21 @@ public class ProgramRuntime {
 	 */
 	private boolean anyProcessable(Level level, SequencedArmBlockEntity arm, ArmProgramEntry entry,
 		IItemHandler handler, ItemStack applicator) {
-		TransportedItemStackHandlerBehaviour transport = beltBehaviourAt(level, arm, entry);
+		TransportTarget transport = transportTargetAt(level, arm, entry);
 		if (transport != null) {
+			boolean belt = transport.belt();
 			boolean[] found = { false };
-			transport.handleProcessingOnAllItems(t -> {
-				if (!found[0] && arm.isAtWorkPosition(t) && !t.stack.isEmpty()
-					&& DeployRecipes.find(level, t.stack.copyWithCount(1), applicator) != null)
-					found[0] = true;
-				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
-			});
+			transport.behaviour()
+				.handleProcessingOnAllItems(t -> {
+					// 与 {@link #deployInPlace} 同一条门：作业位只对传送带生效
+					// （置物台的物品天生在作业位上，`isAtWorkPosition` 对它恒为 false）。
+					// 反证：把 `(!belt || …)` 的 belt 判断去掉 ⇒ 置物台上的组装永远不会开始
+					// （前置检查永远说"没有可加工的东西"）。
+					if (!found[0] && (!belt || arm.isAtWorkPosition(t)) && !t.stack.isEmpty()
+						&& DeployRecipes.find(level, t.stack.copyWithCount(1), applicator) != null)
+						found[0] = true;
+					return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+				});
 			return found[0];
 		}
 		for (int slot = 0; slot < handler.getSlots(); slot++) {
@@ -1119,7 +1127,7 @@ public class ProgramRuntime {
 	 * <p>★ <b>调用偏移只在这里叠加一处，别在别处再叠一遍</b>（决策 68/85："判据/换算写两份必然分叉"）。
 	 * 运行时所有要世界目标的地方都从这里取：{@code beginEntry}（→ {@code preCheckFailure} 与
 	 * {@code arm.beginMove}）、{@code DEPOSIT}/{@code UNLOAD}/{@code ATTACK}/{@code MINE}/
-	 * {@code USE} 的坐标、{@code beltBehaviourAt}、{@code restartMove}、{@code peekHandler}
+	 * {@code USE} 的坐标、{@code transportTargetAt}、{@code restartMove}、{@code peekHandler}
 	 * （认领/前置检查读的那一格）、「过滤」容器模式的 {@code peekContainerHandler}（读哪个方块）、
 	 * 以及对外暴露的 {@code pinOffset} / {@code entryOffset}。唯一另一处涉及
 	 * {@code 臂坐标 + 偏移} 的算式在 {@code preCheckFailure} 里，它吃的是**本方法已经算好的结果**
@@ -1504,7 +1512,9 @@ public class ProgramRuntime {
 			return;
 		}
 
-		// ★ 传送带走**原地加工**（照 `BeltDeployerCallbacks.activate:118-132`），置物台等普通容器走"取出→加工→放回"。
+		// ★ **传送带和置物台都走"原地加工"**（照 Create 的 `BeltDeployerCallbacks.activate:118-132`，
+		//   两者都注册了 `TransportedItemStackHandlerBehaviour`，也都被 Create 自己的部署器这么加工）；
+		//   只有箱子这类**普通容器**才走"取出 1 个 → 加工 → 结果塞回去"。
 		//
 		// ⚠️ 为什么带子不能"取出放回"（用户第二十七轮续二十八实测：第一次成功、之后产物全被"原料"堵住、
 		//    最后全掉进臂的溢出库存）：带子的 `extractItem` 只是把栈清零、**真正移除要等下一次**
@@ -1514,9 +1524,20 @@ public class ProgramRuntime {
 		//    更糟的是：**我们自己放回去的那个产物恰好满足** `insertedAt == 这一格 && insertedFrom == UP`
 		//    ⇒ 从那以后这一格的插入永远被拒。原地加工由带子自己记账（产物进 `toInsert`、原件进 `toRemove`），
 		//    位置也不动 ⇒ 顺带解决"物品从上半格跳到格子中间"的观感问题。
-		TransportedItemStackHandlerBehaviour transport = beltBehaviourAt(level, arm, entry);
+		//
+		// ⚠️⚠️ 置物台**更不能**"取出放回"（用户 2026-10-19 实测：置物台上组装出来的产物全跑进臂的溢出库存，
+		//    置物台上什么都没留下）：`DepotItemHandler.insertItem(0, …)` 只在
+		//    「手上那格空 **且** 输出缓冲也空」时收（`DepotItemHandler:28-41`）——
+		//    ① 置物台上还剩 N−1 个原料时，那一格**非空** ⇒ 产物根本塞不回去；
+		//    ② 就算那一格空了，置物台的"输出位置"其实是它自己的 `processingOutputBuffer`
+		//       （`DepotBehaviour:406-414` 由 `applyToAllItems` 写入，客户端的产物就画在那里），
+		//       走 `insertItem(0)` 一辈子写不到它。
+		//    而 `DepotBehaviour` 也注册了 `TransportedItemStackHandlerBehaviour`（`DepotBehaviour:250`），
+		//    所以正确做法与带子**完全一样**：把加工结果交给那个 behaviour，让它自己决定
+		//    "产物上手 / 进输出缓冲 / 多余的落地"。
+		TransportTarget transport = transportTargetAt(level, arm, entry);
 		if (transport != null) {
-			deployOnBelt(arm, task, entry, level, transport, applicator);
+			deployInPlace(arm, task, entry, level, transport, applicator);
 			return;
 		}
 
@@ -1558,57 +1579,69 @@ public class ProgramRuntime {
 	}
 
 	/**
-	 * 传送带上的组装：**原地加工**（照 Create 的 `BeltDeployerCallbacks.activate:118-132`）。
+	 * 传送带 / 置物台上的组装：**原地加工**（照 Create 的 `BeltDeployerCallbacks.activate:118-132`）。
 	 *
 	 * <p>做法：在目标方块中心半格内找第一件"能匹配配方"的物品，对它调
 	 * {@code handleProcessingOnAllItems}，返回
 	 * {@code convertTo(left)}（没有产物，只剩原件被消耗后的余量）或
-	 * {@code convertToAndLeaveHeld(collect, left)}（有产物 ⇒ 产物上带、原件余量留在带上）。
-	 * **不 extract、不 insert** —— 记账全部交给带子（产物进 `toInsert`、原件进 `toRemove`），
-	 * 于是不会撞上 `canInsertAt`/"那格被自己占住"的坑，物品位置也不会跳。
+	 * {@code convertToAndLeaveHeld(produced, left)}（有产物 ⇒ 产物交回载体、原件余量留在原地）。
+	 * **不 extract、不 insert** —— 记账全部交给载体的 behaviour：
+	 * <ul>
+	 *   <li>传送带：产物进 `toInsert`、原件进 `toRemove`，于是不会撞上 `canInsertAt` /
+	 *       "那格被自己占住"的坑，物品位置也不会跳；</li>
+	 *   <li>置物台：`DepotBehaviour.applyToAllItems:387-418` 把"手上那格 + 输出缓冲 …"算清 ——
+	 *       产物落**置物台**（手上那格空了就直接摆上去），多余的进它自己的 `processingOutputBuffer`
+	 *       （那就是置物台的"输出位置"），实在放不下才落地。⚠️ 绝不能改回"取出→塞回 slot 0"：
+	 *       置物台上还剩 N−1 个原料时那一格非空、`DepotItemHandler.insertItem` 直接拒收
+	 *       ⇒ 产物全被塞进臂的库存/溢出（用户 2026-10-19 实测的 bug）。</li>
+	 * </ul>
 	 *
-	 * <p>★ **只加工"已经在作业位上"的那件**（与前置检查同一条判据，见 {@code anyProcessable}）：
+	 * <p>★ **传送带上只加工"已经在作业位上"的那件**（与前置检查同一条判据，见 {@code anyProcessable}）：
 	 * 本体在 HOLD 时会把物品**居中**（`BeltInventory:292`），我们也照做（认领时 `snapToWorkPosition`），
 	 * 所以产物一定在格子中心出生、不会提前半格挡在原料前面（用户第二十七轮续四十一实测）。
+	 * 置物台没有"带速 / 作业位"这回事（`isAtWorkPosition` 在没有带子时恒为 false）⇒ 对它**不加**这道门。
 	 */
-	private void deployOnBelt(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
-		TransportedItemStackHandlerBehaviour transport, ItemStack applicator) {
+	private void deployInPlace(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry, Level level,
+		TransportTarget transport, ItemStack applicator) {
+		boolean belt = transport.belt();
 		boolean[] handled = { false };
 		RecipeHolder<? extends Recipe<?>>[] recipeRef = new RecipeHolder<?>[1];
 		ItemStack[] processedRef = new ItemStack[1];
-		transport.handleProcessingOnAllItems(t -> {
-			if (handled[0] || !arm.isAtWorkPosition(t))
-				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
-			RecipeHolder<? extends Recipe<?>> recipe = DeployRecipes.find(level, t.stack, applicator);
-			if (recipe == null)
-				return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
-			List<ItemStack> results = RecipeApplier.applyRecipeOn(level, t.stack.copyWithCount(1), recipe.value(),
-				true);
-			// ⚠️ 产物与余量都必须**把继承来的锁标记清掉**：`t.copy()` 会把 `locked`/`lockedExternally`
-			//    一起带走，而我们是靠 `locked` 按住物品的（见 SequencedArmBlockEntity.holdBeltItem）——
-			//    不清的话，加工出来的新物品会**带着锁出生**、永远不动（而带子那边因为找不到加工行为，
-			//    只有在我们还按着它时才会替我们清理）。
-			List<TransportedItemStack> produced = new ArrayList<>();
-			for (ItemStack out : results) {
-				if (out.isEmpty())
-					continue;
-				TransportedItemStack copy = t.copy();
-				copy.stack = out;
-				copy.locked = false;
-				copy.lockedExternally = false;
-				produced.add(copy);
-			}
-			TransportedItemStack left = t.copy();
-			left.stack.shrink(1); // 消耗掉被加工的那 1 个；多出来的余量留在带上
-			left.locked = false;
-			left.lockedExternally = false;
-			handled[0] = true;
-			recipeRef[0] = recipe;
-			processedRef[0] = t.stack.copyWithCount(1);
-			return produced.isEmpty()
-				? TransportedItemStackHandlerBehaviour.TransportedResult.convertTo(left)
-				: TransportedItemStackHandlerBehaviour.TransportedResult.convertToAndLeaveHeld(produced, left);
-		});
+		transport.behaviour()
+			.handleProcessingOnAllItems(t -> {
+				// ⚠️ 作业位这道门**只对传送带**：置物台的物品天生就在作业位上（也根本没有带子）。
+				if (handled[0] || (belt && !arm.isAtWorkPosition(t)))
+					return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+				RecipeHolder<? extends Recipe<?>> recipe = DeployRecipes.find(level, t.stack, applicator);
+				if (recipe == null)
+					return TransportedItemStackHandlerBehaviour.TransportedResult.doNothing();
+				List<ItemStack> results = RecipeApplier.applyRecipeOn(level, t.stack.copyWithCount(1), recipe.value(),
+					true);
+				// ⚠️ 产物与余量都必须**把继承来的锁标记清掉**：`t.copy()` 会把 `locked`/`lockedExternally`
+				//    一起带走，而我们是靠 `locked` 按住物品的（见 SequencedArmBlockEntity.holdBeltItem）——
+				//    不清的话，加工出来的新物品会**带着锁出生**、永远不动（而带子那边因为找不到加工行为，
+				//    只有在我们还按着它时才会替我们清理）。
+				List<TransportedItemStack> produced = new ArrayList<>();
+				for (ItemStack out : results) {
+					if (out.isEmpty())
+						continue;
+					TransportedItemStack copy = t.copy();
+					copy.stack = out;
+					copy.locked = false;
+					copy.lockedExternally = false;
+					produced.add(copy);
+				}
+				TransportedItemStack left = t.copy();
+				left.stack.shrink(1); // 消耗掉被加工的那 1 个；多出来的余量留在原地
+				left.locked = false;
+				left.lockedExternally = false;
+				handled[0] = true;
+				recipeRef[0] = recipe;
+				processedRef[0] = t.stack.copyWithCount(1);
+				return produced.isEmpty()
+					? TransportedItemStackHandlerBehaviour.TransportedResult.convertTo(left)
+					: TransportedItemStackHandlerBehaviour.TransportedResult.convertToAndLeaveHeld(produced, left);
+			});
 		if (!handled[0]) {
 			// 前置检查刚放行的物品在这几 tick 里被别的机器加工/拿走了 ⇒ 按"没配方"重试（不是停机）
 			handleFailure(arm, task, entry, "没有匹配的 deploying / item_application 配方");
@@ -1629,13 +1662,27 @@ public class ProgramRuntime {
 		succeed(arm, task, entry);
 	}
 
-	/** 目标方块是传送带就返回它承载物品的 behaviour（否则 null ⇒ 走普通容器那条路）。 */
-	private TransportedItemStackHandlerBehaviour beltBehaviourAt(Level level, SequencedArmBlockEntity arm,
-		ArmProgramEntry entry) {
-		if (!(level.getBlockEntity(arm.getBlockPos()
-			.offset(offsetOf(arm, entry))) instanceof BeltBlockEntity belt))
+	/**
+	 * 目标方块是不是**能原地加工**的载体（传送带 / 置物台）：两者都注册了
+	 * {@code TransportedItemStackHandlerBehaviour}，也只有它们才有"原地加工"这回事
+	 * （`BeltBlockEntity:105`、`DepotBehaviour:250`）。返回 null ⇒ 走普通容器那条路。
+	 *
+	 * <p>{@code belt} 那一项只用来决定"要不要过作业位这道门"（见 {@link #deployInPlace}）：
+	 * 置物台没有带速/作业位的概念，{@code isAtWorkPosition} 在没有带子时恒为 false。
+	 */
+	@Nullable
+	private TransportTarget transportTargetAt(Level level, SequencedArmBlockEntity arm, ArmProgramEntry entry) {
+		BlockEntity be = level.getBlockEntity(arm.getBlockPos()
+			.offset(offsetOf(arm, entry)));
+		TransportedItemStackHandlerBehaviour behaviour =
+			BlockEntityBehaviour.get(be, TransportedItemStackHandlerBehaviour.TYPE);
+		if (behaviour == null)
 			return null;
-		return belt.getBehaviour(TransportedItemStackHandlerBehaviour.TYPE);
+		return new TransportTarget(behaviour, be instanceof BeltBlockEntity);
+	}
+
+	/** {@link #transportTargetAt} 的结果：原地加工的 behaviour + "它是不是传送带"。 */
+	private record TransportTarget(TransportedItemStackHandlerBehaviour behaviour, boolean belt) {
 	}
 
 	private static void returnToCarrier(SequencedArmBlockEntity arm, IItemHandler handler, ItemStack stack) {

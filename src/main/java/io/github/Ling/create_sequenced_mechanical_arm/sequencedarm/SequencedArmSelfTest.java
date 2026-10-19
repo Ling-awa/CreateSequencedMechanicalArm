@@ -36,6 +36,7 @@ import com.simibubi.create.content.logistics.item.filter.attribute.attributes.In
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlock;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlockEntity;
+import com.simibubi.create.foundation.recipe.RecipeApplier;
 
 import io.github.Ling.create_sequenced_mechanical_arm.Create_sequenced_mechanical_arm;
 import io.github.Ling.create_sequenced_mechanical_arm.SequencedArmConfig;
@@ -205,6 +206,8 @@ public class SequencedArmSelfTest {
 		checkPrecheckRetryIsPerTick(server);
 		checkClaimFollowsIntent(server);
 		checkDeployPrecheckScansAllSlots(server);
+		// 置物台上的「组装」：产物必须留在置物台，不许进臂的库存（用户 2026-10-19 报的 bug）
+		checkDeployOnDepot(server);
 		checkRetractBeforeNextMove(server);
 		checkCountMode(server);
 		// 「收存」：把手持物品挪进溢出库存（无动作、无需坐标），与「个数模式」同一套夹具
@@ -1122,6 +1125,175 @@ public class SequencedArmSelfTest {
 			level.setBlockAndUpdate(targetPos, oldTarget);
 			level.setBlockAndUpdate(armPos, oldArm);
 		}
+	}
+
+	/**
+	 * 「组装」落在**置物台**上：产物必须留在置物台（它自己的输出位置），<b>不许</b>进臂的库存 / 溢出。
+	 *
+	 * <p><b>用户 2026-10-19 实测的 bug</b>：臂对着置物台组装，产物全进了溢出库存、置物台上什么都没留下。
+	 * 根因是置物台当时被当成"普通容器"走「取出 1 个 → 加工 → 塞回 slot 0」：
+	 * {@code DepotItemHandler.insertItem} 只在「手上那格空 <b>且</b> 输出缓冲也空」时收
+	 * （{@code DepotItemHandler:28-41}）—— 而置物台上还剩 N−1 个原料时那一格非空 ⇒ 产物一律被拒 ⇒
+	 * 唯一的去处只剩臂的库存（溢出）。正确的路与传送带相同：交给载体的
+	 * {@code TransportedItemStackHandlerBehaviour}（置物台的那个由 {@code DepotBehaviour.applyToAllItems}
+	 * 支撑，它会把产物摆上置物台 / 塞进 {@code processingOutputBuffer}）。
+	 *
+	 * <p>夹具：真置物台 + 3 份原料 + 手上拿应用物 + 一条「组装」；判据只看<b>可观测结果</b>
+	 * （置物台里有没有产物、臂里有没有产物、原料还剩几个），不看运行时内部游标
+	 * （主任务恒循环，第二轮当然会因为没有原料而失败）。
+	 *
+	 * <p>反证：把 {@code ProgramRuntime.deploy} 里 {@code transportTargetAt(...)} 那一支删掉
+	 * （退回"取出放回"）⇒ ①「产物落在置物台上」红、②「臂里没有产物」红。
+	 */
+	private static void checkDeployOnDepot(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		// 与别的夹具的坐标错开（它们用的是 +80…+94 / +118 那一带，见各自的 armPos）
+		BlockPos armPos = new BlockPos(spawn.getX() - 60, 200, spawn.getZ() + 120);
+		BlockPos depotPos = armPos.offset(2, 0, 0);
+		BlockState oldArm = level.getBlockState(armPos);
+		BlockState oldDepot = level.getBlockState(depotPos);
+		String detail = "";
+		boolean productOnDepot = false;
+		boolean armClean = false;
+		boolean leftoverKept = false;
+		try {
+			// ① 找一份真实的 item_application 配方：raw（被加工物）+ applicator（手上的应用物）
+			ItemStack raw = ItemStack.EMPTY;
+			ItemStack applicator = ItemStack.EMPTY;
+			RecipeHolder<? extends Recipe<?>> recipe = null;
+			for (RecipeHolder<?> holder : level.getRecipeManager()
+				.getAllRecipesFor(AllRecipeTypes.ITEM_APPLICATION.getType())) {
+				List<Ingredient> ingredients = holder.value()
+					.getIngredients();
+				if (ingredients.size() < 2)
+					continue;
+				for (ItemStack a : ingredients.get(0)
+					.getItems()) {
+					for (ItemStack b : ingredients.get(1)
+						.getItems()) {
+						recipe = DeployRecipes.find(level, a, b);
+						if (recipe != null) {
+							raw = a.copy();
+							applicator = b.copy();
+						} else {
+							recipe = DeployRecipes.find(level, b, a);
+							if (recipe != null) {
+								raw = b.copy();
+								applicator = a.copy();
+							}
+						}
+						if (recipe != null)
+							break;
+					}
+					if (recipe != null)
+						break;
+				}
+				if (recipe != null)
+					break;
+			}
+			if (recipe == null) {
+				LOGGER.error("[selftest] 置物台组装自检**没跑起来**：配方表里找不到任何 item_application 配方");
+				return;
+			}
+			List<ItemStack> expected = RecipeApplier.applyRecipeOn(level, raw.copyWithCount(1), recipe.value(), true);
+			expected.removeIf(ItemStack::isEmpty);
+			// ② 放一个置物台，上面摆 3 份原料（置物台只有一个"手上"格：一次插 3 个）
+			BlockState depotState = stateOf("create:depot");
+			if (depotState == null) {
+				LOGGER.error("[selftest] 置物台组装自检**没跑起来**：找不到 create:depot");
+				return;
+			}
+			level.setBlockAndUpdate(depotPos, depotState);
+			IItemHandler depot = level.getCapability(Capabilities.ItemHandler.BLOCK, depotPos, Direction.UP);
+			if (depot == null) {
+				LOGGER.error("[selftest] 置物台组装自检**没跑起来**：置物台没有物品能力");
+				return;
+			}
+			depot.insertItem(0, raw.copyWithCount(3), false);
+			int fed = countMatching(depot, raw);
+			// ③ 建臂：手上拿应用物，程序里只有一条「组装」指向置物台
+			level.setBlockAndUpdate(armPos, SequencedArmRegistration.SEQUENCED_ARM.get()
+				.defaultBlockState());
+			if (!(level.getBlockEntity(armPos) instanceof SequencedArmBlockEntity arm)) {
+				LOGGER.error("[selftest] 置物台组装自检**没跑起来**：臂的方块实体没建出来");
+				return;
+			}
+			arm.setSpeed(32);
+			clearArm(arm);
+			arm.setHeldItem(applicator.copy());
+			ArmProgram program = new ArmProgram();
+			ArmProgramTask task = new ArmProgramTask();
+			task.name = "自检置物台组装";
+			ArmProgramEntry entry = new ArmProgramEntry();
+			entry.op = OperationType.DEPLOY;
+			entry.offset = depotPos.subtract(armPos);
+			task.entries.add(entry);
+			program.tasks.add(task);
+			arm.setProgram(program);
+			// ④ 跑到"置物台上出现产物"为止（每拍把 chasedPointProgress 当作已到位，与别的夹具同一手法）
+			for (int i = 0; i < 80 && !productOnDepot; i++) {
+				arm.chasedPointProgress = 1f;
+				arm.runtime.tick(arm);
+				productOnDepot = countMatching(depot, expected.toArray(ItemStack[]::new)) > 0;
+			}
+			// ⑤ 三个可观测量
+			boolean productInArm = countMatching(arm.getHeldItem().isEmpty() ? null : new ItemStack[] { arm.getHeldItem() },
+				expected.toArray(ItemStack[]::new)) > 0;
+			for (ItemStack stack : arm.getOverflow())
+				productInArm |= countMatching(new ItemStack[] { stack }, expected.toArray(ItemStack[]::new)) > 0;
+			armClean = !productInArm;
+			leftoverKept = countMatching(depot, raw) == 2;
+			detail = "原料=" + raw.getHoverName()
+				.getString() + " 应用物=" + applicator.getHoverName()
+					.getString() + " 喂进原料=" + fed + " 置物台上原料剩=" + countMatching(depot, raw)
+				+ " 置物台上的产物=" + countMatching(depot, expected.toArray(ItemStack[]::new)) + " 臂里产物="
+				+ (productInArm ? "有" : "无");
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(depotPos, oldDepot);
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+		LOGGER.info("[selftest] 置物台组装: 产物留在置物台={} 臂里没有产物={} 原料剩下 N-1={} （{}）", productOnDepot, armClean,
+			leftoverKept, detail);
+		if (!productOnDepot)
+			LOGGER.error("[selftest] 置物台上的「组装」没有把产物留在置物台（{}）—— 用户实测的 bug 回来了："
+				+ "别退回「取出 → insertItem(0, 产物)」，置物台要走它自己的 "
+				+ "TransportedItemStackHandlerBehaviour（见 ProgramRuntime.deployInPlace）", detail);
+		else if (!armClean)
+			LOGGER.error("[selftest] 置物台组装之后**臂里**出现了产物（{}）—— 产物该留在置物台上，不进臂的库存 / 溢出",
+				detail);
+		else if (!leftoverKept)
+			LOGGER.error("[selftest] 置物台上的原料没有剩 N−1 个（{}）—— 被加工的那 1 个之外不该动别的原料", detail);
+	}
+
+	/** 一组物品**同物同组件**的总个数（{@code expected} 空数组时返回 0）。 */
+	private static int countMatching(@Nullable IItemHandler handler, ItemStack... expected) {
+		if (handler == null)
+			return 0;
+		int total = 0;
+		for (int slot = 0; slot < handler.getSlots(); slot++) {
+			ItemStack stack = handler.getStackInSlot(slot);
+			total += countMatching(new ItemStack[] { stack }, expected);
+		}
+		return total;
+	}
+
+	/** 这些栈里"属于 {@code expected} 那一类"的总个数（按物品 + 数据组件比，与配方口径一致）。 */
+	private static int countMatching(ItemStack[] stacks, ItemStack[] expected) {
+		int total = 0;
+		for (ItemStack stack : stacks) {
+			if (stack == null || stack.isEmpty())
+				continue;
+			for (ItemStack want : expected) {
+				if (!want.isEmpty() && ItemStack.isSameItemSameComponents(stack, want)) {
+					total += stack.getCount();
+					break;
+				}
+			}
+		}
+		return total;
 	}
 
 	/**
