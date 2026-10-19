@@ -63,7 +63,7 @@ public final class ArmEntryText {
 	private static Component base(ArmProgramEntry entry, boolean withFrequencyItems) {
 		StringBuilder suffix = new StringBuilder();
 		switch (entry.op) {
-			case WAIT -> suffix.append("  ")
+			case WAIT -> suffix.append(" ")
 				.append(entry.waitAmount)
 				.append(unitSuffix(entry.waitUnit));
 			case SIGNAL -> {
@@ -72,7 +72,7 @@ public final class ArmEntryText {
 				// 但绝不能静默隐瞒它仍然在等断电）；其余（发 + 0 = 一直保持）什么都不写。
 				String tail = signalTailText(entry).getString();
 				if (!tail.isEmpty())
-					suffix.append("  ")
+					suffix.append(" ")
 						.append(tail);
 				// ★ 用户本轮口径：「收发信号有距离」这件事必须**显式写在卡片第一行**，
 				//   而不是让玩家翻第二排的属性胶囊才知道（原话："收 / 发信号有距离这种事情我觉得得显式的
@@ -81,26 +81,26 @@ public final class ArmEntryText {
 				//   判据只问 {@link ArmProgramEntry#hasSignalRange()}（收模式 + 半径 > 0），别在这里
 				//   再写一遍 `signalMode == RECEIVE && signalRange > 0`。
 				if (entry.hasSignalRange())
-					suffix.append("  ")
+					suffix.append(" ")
 						.append(signalRangeText(entry).getString());
 				// 频率物品是"等哪一对物品"的必需信息：卡片上它是两个图标，而工具提示里没有图标，
 				// 所以那里只能把名字写出来（空槽位不写，免得出现 "Air + Air"）。
 				if (withFrequencyItems) {
 					String freq = frequencyText(entry);
 					if (!freq.isBlank())
-						suffix.append("  ")
+						suffix.append(" ")
 							.append(freq);
 				}
 			}
 			case CALL -> {
-				suffix.append("  → ")
+				suffix.append(" → ")
 					.append(entry.callTarget.isBlank() ? tr("call.none").getString() : entry.callTarget);
 				// 调用次数归**调用点**（用户第二十七轮：把循环次数放在调用上），所以写在调用后面。
 				// 0 = 无限循环（用户第四十轮）⇒ 写 ×∞，别让"×0"看起来像"不跑"
 				if (entry.callRepeat == ArmProgramEntry.CALL_REPEAT_INFINITE)
-					suffix.append("  ×∞");
+					suffix.append(" ×∞");
 				else if (entry.callRepeat > 1)
-					suffix.append("  ×")
+					suffix.append(" ×")
 						.append(entry.callRepeat);
 				// ★ 调用偏移（Δ）**不再写进第一行**（用户："调用偏移不显示在第一行"）：它只在第二行的
 				//   胶囊里出现（见 {@link #callShiftText} 与编辑器的属性表）。
@@ -111,7 +111,7 @@ public final class ArmEntryText {
 			case FILTER -> {
 				// 过滤的必需信息 = 过滤位置（用户口径：必要输入为"幽灵物品 + 过滤位置"）。
 				// 位置名走 entry.filter_source.* 那个键（与编辑器第二行同一个来源，不写死中文）。
-				suffix.append("  ")
+				suffix.append(" ")
 					.append(tr(entry.filterSource == ArmProgramEntry.FilterSource.CONTAINER
 						? "filter_source.container"
 						: "filter_source.held")
@@ -132,7 +132,7 @@ public final class ArmEntryText {
 				//   （单点），别在这里写 `op == TAKE || op == DEPOSIT`。
 				//   反证：把这两行删掉 ⇒ 自检里"取出默认必须含「最多 1 个」"那条立刻变红。
 				if (entry.op.hasCount())
-					suffix.append("  ")
+					suffix.append(" ")
 						.append(countText(entry).getString());
 				// ★ 问**条目级**的 needsTarget()：过滤的容器模式有坐标（且胶囊上要看得见），
 				//   手持模式则一个字都不写（用户口径：手持模式不写坐标）。
@@ -141,7 +141,7 @@ public final class ArmEntryText {
 					// **臂运行时就是"臂坐标 + 偏移"**（{@code ProgramRuntime.offsetOf} 直接返回 offset，
 					// 卡上的原点不参与运行时、插卡也不平移），所以这一行读出来就是"相对执行它的那条臂"
 					// —— `0,0,0` 就是那条臂自己。显示世界位置反而会让人以为臂在用绝对坐标（§19.6）。
-					suffix.append("  +")
+					suffix.append(" +")
 						.append(entry.offset.getX())
 						.append(',')
 						.append(entry.offset.getY())
@@ -155,7 +155,7 @@ public final class ArmEntryText {
 		boolean faceMeaningful = needsFace(entry.op)
 			&& !(entry.op == OperationType.FILTER && !entry.needsTarget());
 		if (faceMeaningful)
-			suffix.append("  ")
+			suffix.append(" ")
 				.append(tr("opt." + entry.face.getName()).getString());
 		// 「收发信号」的**操作名**就是随模式变的短语（接收信号 / 发送信号 / 中断信号）——
 		// 与卡片标题芯片同一个方法（决策 43），别写成两份。
@@ -525,34 +525,31 @@ public final class ArmEntryText {
 			.equals(retryForever))
 			return "「攻击」的「失败后 停下」被写成了「一直重试」—— 硬失败没有重试窗口";
 
-		// ★ 用户本轮口径：「个数」升级成**基础内容** ⇒ 它**永远**出现在第一行（含默认值），
+		// ★ 用户口径：「个数」升级成**基础内容** ⇒ 它**永远**出现在第一行（含默认值），
 		//   第二行的胶囊里**一个都不许再有**（同一个数出现两遍就是这次要修的东西）。
-		//   ① 取出默认（count=1 ATMOST）第一行必须含「最多 1 个」；
-		//   ② 放入默认（count=64 ATMOST）第一行必须含「最多 64 个」——
+		//   ① 取出默认 = **等于 1 个**（用户 2026-10-19："取出操作默认使用等于1个"）
+		//      ⇒ 第一行必须含「等于 1 个」；
+		//   ② 放入默认 = 最多 64 个 ⇒ 第一行必须含「最多 64 个」——
 		//      这条正是用户说的"防止忘记放入默认 64"；
 		//   ③ 两者的属性胶囊里必须没有个数那枚（props() 里那两支已删）。
 		//   反证：把 props() 里的 `case TAKE, DEPOSIT` 加回来 ⇒ ③ 立刻红；
-		//        把 base() 的 default 分支里那两行 `if (entry.op.hasCount())` 删掉 ⇒ ①② 立刻红。
-		ArmProgramEntry takeDefault = new ArmProgramEntry();
-		takeDefault.op = OperationType.TAKE;
-		// 默认值一律问 defaultCount（取出 1 / 放入 64）—— 别在夹具里写死数字
-		takeDefault.count = ArmProgramEntry.defaultCount(takeDefault.op);
+		//        把 base() 的 default 分支里那两行 `if (entry.op.hasCount())` 删掉 ⇒ ①② 立刻红；
+		//        把 defaultCountMode() 里取出那一支改成 ATMOST ⇒ ① 与下面那条"取出默认模式"红。
+		if (ArmProgramEntry.defaultCountMode(OperationType.TAKE) != ArmProgramEntry.CountMode.EXACT)
+			return "取出的默认模式不是「等于」—— 用户口径是「取出操作默认使用等于 1 个」";
+		// 默认值一律从 fresh(op) 取（= defaultCount + defaultCountMode），别在夹具里写死数字
+		ArmProgramEntry takeDefault = ArmProgramEntry.fresh(OperationType.TAKE);
 		String takeBase = base(takeDefault).getString();
-		String takeCount = tr("chip.count_atmost", 1).getString();
+		String takeCount = tr("chip.count_exact", ArmProgramEntry.defaultCount(OperationType.TAKE)).getString();
 		if (!takeBase.contains(takeCount))
-			return "取出默认（个数 1 / 小于等于）的第一行里没有「" + takeCount + "」：" + takeBase;
+			return "取出默认（个数 1 / 等于）的第一行里没有「" + takeCount + "」：" + takeBase;
 		if (props(takeDefault).stream()
 			.anyMatch(c -> c.getString()
-				.contains(tr("chip.count_atmost", 1).getString())))
+				.contains(takeCount)))
 			return "个数已经进了第一行，属性胶囊里不该再有它：" + props(takeDefault);
-		ArmProgramEntry depositDefault = new ArmProgramEntry();
-		depositDefault.op = OperationType.DEPOSIT;
-		// ⚠️ 默认值按操作给：字段初值是 1，而「放入」的默认是 64（{@code defaultCount}）——
-		//   编辑器换操作 / 脚本没写 count= 时落进来的就是这个值。这里**问 defaultCount**，
-		//   别在夹具里写死 64（写死就不是在测"默认"了）。
-		depositDefault.count = ArmProgramEntry.defaultCount(depositDefault.op);
+		ArmProgramEntry depositDefault = ArmProgramEntry.fresh(OperationType.DEPOSIT);
 		String depositBase = base(depositDefault).getString();
-		String depositCount = tr("chip.count_atmost", 64).getString();
+		String depositCount = tr("chip.count_atmost", ArmProgramEntry.defaultCount(OperationType.DEPOSIT)).getString();
 		if (!depositBase.contains(depositCount))
 			return "放入默认（个数 64 / 小于等于）的第一行里没有「" + depositCount + "」：" + depositBase;
 		if (props(depositDefault).stream()
@@ -561,20 +558,17 @@ public final class ArmEntryText {
 			return "放入的个数已经进了第一行，属性胶囊里不该再有它：" + props(depositDefault);
 		// 个数在**坐标之前**：标题芯片的文字会被截断（renderChip 按 120px 裁），
 		// 顺序反了就会出现"坐标还在、个数被切掉"。反证：把 base() 里那两行挪到坐标之后 ⇒ 这里立刻红。
-		ArmProgramEntry takeAt = new ArmProgramEntry();
-		takeAt.op = OperationType.TAKE;
+		ArmProgramEntry takeAt = ArmProgramEntry.fresh(OperationType.TAKE);
 		takeAt.offset = new net.minecraft.core.BlockPos(1, 2, 3);
 		String atBase = base(takeAt).getString();
 		if (atBase.indexOf(takeCount) < 0 || atBase.indexOf("1,2,3") < 0 || atBase.indexOf(takeCount) > atBase.indexOf("1,2,3"))
 			return "第一行里「个数」必须排在坐标之前（芯片会被截断）：" + atBase;
-		// 个数的两种模式都要能读出来（等于模式写的是"等于 N 个"，不是"最多"）
-		ArmProgramEntry exactOne = new ArmProgramEntry();
-		exactOne.op = OperationType.TAKE;
-		exactOne.count = 1;
-		exactOne.countMode = ArmProgramEntry.CountMode.EXACT;
-		if (!base(exactOne).getString()
-			.contains(tr("chip.count_exact", 1).getString()))
-			return "个数=1 且「等于」模式的第一行没写成「等于 1 个」：" + base(exactOne).getString();
+		// 非默认模式也必须能读出来：取出 + 显式的「小于等于」要写成"最多 N 个"，不是"等于"
+		ArmProgramEntry atMostOne = ArmProgramEntry.fresh(OperationType.TAKE);
+		atMostOne.countMode = ArmProgramEntry.CountMode.ATMOST;
+		if (!base(atMostOne).getString()
+			.contains(tr("chip.count_atmost", ArmProgramEntry.defaultCount(OperationType.TAKE)).getString()))
+			return "取出 + 显式「小于等于」的第一行没写成「最多 1 个」：" + base(atMostOne).getString();
 
 		// ★ 「距离」同样升级成**基础内容**，且只对**收信号**有意义（用户口径：距离只约束收；
 		//   "中断信号不需要这个属性"）：

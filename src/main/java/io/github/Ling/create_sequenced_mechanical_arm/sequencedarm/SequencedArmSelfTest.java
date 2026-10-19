@@ -1290,24 +1290,31 @@ public class SequencedArmSelfTest {
 	 */
 	private static void checkCountMode(MinecraftServer server) {
 		// ——— ⑦ NBT 往返（不依赖世界，先跑：夹具坏了也不该把这条一起吞掉）———
-		// 反证：把 save() 里那句 `if (countMode != CountMode.ATMOST)` 去掉（无条件写 cmode）⇒
-		// 「小于等于不写键」红；把 load() 的 enumOf 默认值写成 EXACT ⇒「老卡读成小于等于」红。
-		ArmProgramEntry exactEntry = new ArmProgramEntry();
-		exactEntry.op = OperationType.TAKE;
+		// ⚠️ 默认模式**按操作给**（{@code defaultCountMode}：取出 = 等于、放入 = 小于等于）：
+		//   `save` 只在本操作默认模式下省略 `cmode`，`load` 缺键也回落到本操作默认模式。
+		// 反证：把 save() 里那句 `if (countMode != defaultCountMode(op))` 改成无条件写 ⇒「默认不写键」红；
+		//       把 load() 的 enumOf 兜底写死成 ATMOST ⇒「老抓取卡读成等于」红。
+		ArmProgramEntry exactEntry = ArmProgramEntry.fresh(OperationType.TAKE); // 取出默认就是「等于」
 		exactEntry.count = 3;
-		exactEntry.countMode = ArmProgramEntry.CountMode.EXACT;
 		CompoundTag exactTag = exactEntry.save(server.registryAccess());
 		ArmProgramEntry exactBack = ArmProgramEntry.load(exactTag.copy(), server.registryAccess());
 		boolean exactKept = exactBack.countIsExact() && exactBack.count == 3;
-		ArmProgramEntry atMostEntry = new ArmProgramEntry();
-		atMostEntry.op = OperationType.DEPOSIT;
+		boolean takeDefaultNoKey = !exactTag.contains("cmode");
+		ArmProgramEntry atMostEntry = ArmProgramEntry.fresh(OperationType.DEPOSIT);
 		atMostEntry.count = 3;
 		CompoundTag atMostTag = atMostEntry.save(server.registryAccess());
 		boolean keyAbsent = !atMostTag.contains("cmode") && !atMostEntry.countIsExact();
+		// 老卡：只有 count、没有 cmode 的**取出**条目 ⇒ 读成新默认「等于」（用户要的默认变了）
 		CompoundTag legacyTag = exactTag.copy();
-		legacyTag.remove("cmode"); // 老卡：只有 count、没有模式
+		legacyTag.remove("cmode");
 		ArmProgramEntry legacyBack = ArmProgramEntry.load(legacyTag, server.registryAccess());
-		boolean legacyAtMost = !legacyBack.countIsExact() && legacyBack.count == 3;
+		boolean legacyTakeExact = legacyBack.countIsExact() && legacyBack.count == 3;
+		// 老卡：没有 cmode 的**放入**条目 ⇒ 读成「小于等于」（= 有多少放多少）
+		CompoundTag legacyDepositTag = new CompoundTag();
+		legacyDepositTag.putString("op", OperationType.DEPOSIT.name());
+		legacyDepositTag.putInt("count", 3);
+		ArmProgramEntry legacyDepositBack = ArmProgramEntry.load(legacyDepositTag, server.registryAccess());
+		boolean legacyDepositAtMost = !legacyDepositBack.countIsExact() && legacyDepositBack.count == 3;
 
 		// ——— ⑧ 「个数」的默认值**按操作给**（用户口径：放入默认 64 = 整摞 = 改造前行为）———
 		// 反证：
@@ -1336,8 +1343,9 @@ public class SequencedArmSelfTest {
 		ArmProgramEntry exactOneBack = ArmProgramEntry.load(exactOneTag, server.registryAccess());
 		boolean exactOneKept = exactOneBack.count == 1 && exactOneBack.countIsExact();
 
-		LOGGER.info("[selftest] 个数模式 NBT: 等于模式往返={} 小于等于不写键={} 老卡读成小于等于={}", exactKept, keyAbsent,
-			legacyAtMost);
+		LOGGER.info("[selftest] 个数模式 NBT: 等于模式往返={} 取出的默认等于不写键={} 放入的默认小于等于不写键={} "
+			+ "老卡·取出读成等于={} 老卡·放入读成小于等于={}", exactKept, takeDefaultNoKey, keyAbsent, legacyTakeExact,
+			legacyDepositAtMost);
 		LOGGER.info("[selftest] 个数默认值: 放入默认=64 且 取出默认=1={} 默认值不算非默认={} 老卡的放入迁成整摞={} 等于1的放入没被迁移={}",
 			depositDefault, depositDefaultQuiet, legacyDepositMigrated, exactOneKept);
 		if (!depositDefault)
@@ -1350,10 +1358,14 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 显式选了「放入·等于 1 个」的条目被迁移改成了 64（cmode 键的判据丢了）");
 		if (!exactKept)
 			LOGGER.error("[selftest] 个数模式「等于」过不了 NBT 往返（存了 EXACT、读回来是别的模式）");
+		if (!takeDefaultNoKey)
+			LOGGER.error("[selftest] 「取出」的默认模式（等于）被写进了 cmode —— 默认值不该占 NBT 键");
 		if (!keyAbsent)
-			LOGGER.error("[selftest] 默认的「小于等于」把 cmode 键写进了 NBT —— 老卡存取前后就不再逐字节相同");
-		if (!legacyAtMost)
-			LOGGER.error("[selftest] 没有 cmode 键的老卡没有读成「小于等于」—— 老程序的取出行为会被改掉");
+			LOGGER.error("[selftest] 「放入」的默认模式（小于等于）把 cmode 键写进了 NBT —— 默认值不该占 NBT 键");
+		if (!legacyTakeExact)
+			LOGGER.error("[selftest] 没有 cmode 键的老「取出」卡没有读成「等于」—— 用户口径是「取出默认等于」");
+		if (!legacyDepositAtMost)
+			LOGGER.error("[selftest] 没有 cmode 键的老「放入」卡没有读成「小于等于」（应当是「有多少放多少」）");
 
 		ServerLevel level = server.overworld();
 		BlockPos spawn = level.getSharedSpawnPos();
@@ -8104,14 +8116,15 @@ public class SequencedArmSelfTest {
 			task 子任务
 			  throw     "没材料了"
 			""");
-		// 个数模式（用户本轮口径：等于 / 小于等于，取出与放入共用）。三行各钉一种写法：
-		// ① 取出 · 等于 + 非 1 个数 ⇒ `count=` 与 `countmode=exact` 两个键都要写、且要读回同一种模式；
-		// ② 放入 · 等于 + **个数 1** ⇒ 只写 `countmode=exact`（这一行就是"不写模式就丢语义"的反证：
-		//    把 ScriptDecompiler 里 `if (entry.countIsExact())` 删掉 ⇒ 不变量①报「个数模式变了」）；
-		// ③ 手写 `countmode=atmost` 是默认值 ⇒ 反编译器**不写**它（规范形式里应当只剩 `count=5`）。
+		// 个数模式（用户口径：等于 / 小于等于，取出与放入共用）。三行各钉一种写法：
+		// ⚠️ 默认模式**按操作给**（{@code defaultCountMode}：**取出 = 等于、放入 = 小于等于**）：
+		// ① 取出 · 等于 + 非 1 个数 ⇒ 只写 `count=3`（等于已是取出的默认，模式键**省略**）；
+		// ② 放入 · 等于 + **个数 1** ⇒ 模式键必须写出来（`countmode=exact`）—— 这一行正是
+		//    "非默认模式不写就丢语义"的反证：把 ScriptDecompiler 里那段 countmode 删掉 ⇒ 不变量①报「个数模式变了」；
+		// ③ 取出 · 小于等于 + 个数 5 ⇒ `countmode=atmost` **必须写**（它才是非默认那一态）。
 		corpus.put("个数模式", """
 			task 主任务
-			  take 1 0 0 count=3 countmode=exact
+			  take 1 0 0 count=3
 			  deposit 0 0 2 count=1 countmode=exact
 			  take 0 0 -2 count=5 countmode=atmost
 			""");

@@ -2741,6 +2741,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					//   ⚠️ 判据用 defaultCount，别在这里硬编码 1 / 64 两份。
 					if (entry.op.hasCount() && entry.count == ArmProgramEntry.defaultCount(previousOp))
 						entry.count = ArmProgramEntry.defaultCount(entry.op);
+					// ★ 模式同理（{@link ArmProgramEntry#defaultCountMode}：**取出 = 等于 / 放入 = 小于等于**）：
+					//   仍停在"上一个操作的默认模式"时换成新操作的默认模式，玩家改过就保留。
+					//   反证：删掉这一句 ⇒ 从「放入（小于等于）」切到「取出」会停在"最多 N 个"，
+					//   与"取出默认等于"这条口径对不上（自检 op 切换那条会红）。
+					if (entry.op.hasCount() && entry.countMode == ArmProgramEntry.defaultCountMode(previousOp))
+						entry.countMode = ArmProgramEntry.defaultCountMode(entry.op);
 					rebuildPending = true;
 					dirty = true;
 				});
@@ -3640,7 +3646,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		//   与"录一条"的直觉一致（等价于当场录了一条只有位置、还没选动作的条目）。
 		//   ⚠️ 原点没设时退回 (0,0,0)（裸坐标），与世界内录制那边"没设就不让录"不同：这里只是给一个
 		//      默认落点，玩家接着就会在第二行把它改掉，没必要为此堵住"新建条目"。
-		ArmProgramEntry created = new ArmProgramEntry();
+		// 新建条目走 fresh(op)：个数与模式都取该操作的默认值（**取出的默认是「等于 1 个」**，
+		// 而字段初始值是"小于等于" —— 直接 new 会得到与口径不符的一条，见 ArmProgramEntry.fresh）。
+		ArmProgramEntry created = ArmProgramEntry.fresh(OperationType.TAKE);
 		created.offset = defaultNewEntryWorldPos()
 			.subtract(cardOriginOrZero());
 		task.entries.add(index, created);

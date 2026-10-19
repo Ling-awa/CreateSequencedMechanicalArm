@@ -199,13 +199,16 @@ public final class ScriptDecompiler {
 				//   所以判据必须问 defaultCount(op)，不能写死 `!= 1` —— 否则每条默认的放入
 				//   都会被强制写成 `count=64`，而省略 count 的放入读回来又是 64，往返依然一致
 				//   但文本里全是噪声；反过来若这里写死 1、解析侧默认 64，往返就会静默改数。
-				// ⚠️ 模式却**只要非默认就必须写**，哪怕 count 还是默认值 —— "必须恰好 N 个"与"最多 N 个"
-				// 是两种行为，不写就把语义丢了（而往返不变量①正是盯着这种静默丢失）。
+				// ⚠️ 模式同样"只要偏离本操作的默认就必须写"（{@link ArmProgramEntry#defaultCountMode}：
+				//   取出 = 等于、放入 = 小于等于）。**必须写出真实的模式名**，不能只写 `exact`：
+				//   取出的默认已经变成"等于"，那么"取出 + 小于等于"这一态才是需要显式表达的
+				//   （写成 `countmode=atmost`）——只写 exact 会让它读回来变回"等于"。
 				if (entry.count != ArmProgramEntry.defaultCount(entry.op))
 					out.append(" count=")
 						.append(entry.count);
-				if (entry.countIsExact())
-					out.append(" countmode=exact");
+				if (entry.countMode != ArmProgramEntry.defaultCountMode(entry.op))
+					out.append(" countmode=")
+						.append(entry.countIsExact() ? "exact" : "atmost");
 			}
 			case UNLOAD -> {
 				out.append(" repeat=")

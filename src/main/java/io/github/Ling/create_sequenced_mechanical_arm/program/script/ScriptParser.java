@@ -1748,7 +1748,7 @@ public final class ScriptParser {
 		SkipAction onTimeout = SkipAction.NONE;
 		String timeoutTarget = "";
 		int count = 1;
-		/** 个数的模式（TAKE / DEPOSIT）：缺省 ATMOST = "有多少动多少"，`countmode=exact` 才要求恰好 count 个。 */
+		/** 个数的模式（TAKE / DEPOSIT）：缺键 = 本操作的默认模式（取出 等于 / 放入 小于等于）。 */
 		ArmProgramEntry.CountMode countMode = ArmProgramEntry.CountMode.ATMOST;
 		int waitAmount = 20;
 		WaitUnit waitUnit = WaitUnit.TICK;
@@ -1789,6 +1789,9 @@ public final class ScriptParser {
 			// "一次只放 1 个"，与旧行为（整摞）和编辑器显示都对不上。
 			// ⚠️ 别在这里写死 1 / 64：默认值的唯一定义处是 defaultCount()。
 			this.count = ArmProgramEntry.defaultCount(op);
+			// 模式同理（**取出 = 等于 / 放入 = 小于等于**，见 defaultCountMode）：脚本没写
+			// `countmode=` 时落在本操作的默认模式上，反编译器也只在"偏离默认"时才写这个键。
+			this.countMode = ArmProgramEntry.defaultCountMode(op);
 		}
 	}
 

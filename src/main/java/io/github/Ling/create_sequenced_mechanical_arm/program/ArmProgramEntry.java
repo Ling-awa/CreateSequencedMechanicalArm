@@ -216,19 +216,50 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * 个数的**模式**（用户本轮口径：等于 / 小于等于）。
+	 * 新建一条**带该操作默认值**的条目：{@code op} 按传入的定，`count` / `countMode` 取
+	 * {@link #defaultCount} / {@link #defaultCountMode}。
 	 *
-	 * <p><b>默认 {@link CountMode#ATMOST} 是有意的</b>：它正好等于“取出”改造前的行为
-	 * （{@code Math.min(可用, N)}，有多少拿多少、上限 N），所以老卡 / 老脚本读进来
-	 * <b>一个字都不用迁移</b>；要“必须够数才动”才显式切到 EXACT。
-	 * 枚举顺序即界面选择框的选中下标（{@code ordinal}）：ATMOST 在前 = 默认项。
+	 * <p>为什么需要这个工厂：{@code new ArmProgramEntry()} 的字段初始值是"取出 1 个 + 小于等于"，
+	 * 而**取出的默认模式是「等于」** —— 谁在别处直接 {@code new} 再改 {@code op}，
+	 * 就会得到一条"新建的取出是小于等于"的条目（脚本 / 预设 / 界面三处口径不一致，
+	 * 症状只有实机搬运时才发现）。所有"替玩家新建条目"的地方都走这里。
+	 */
+	public static ArmProgramEntry fresh(OperationType op) {
+		ArmProgramEntry entry = new ArmProgramEntry();
+		entry.op = op;
+		entry.count = defaultCount(op);
+		entry.countMode = defaultCountMode(op);
+		return entry;
+	}
+
+	/**
+	 * 个数的**模式**（用户口径：等于 / 小于等于）。
+	 *
+	 * <p><b>默认值按操作给</b>，见 {@link #defaultCountMode(OperationType)}：取出 = 等于、放入 = 小于等于。
+	 * 这里的字段初始值只是"还没套上操作默认"的占位（{@code new ArmProgramEntry()} 之后由编辑器 /
+	 * 脚本解析 / 载入统一套默认），真正决定"用哪种模式"的那处永远是 {@link #defaultCountMode}。
 	 *
 	 * <p>★ 判据<b>只此一处</b>（{@link #countIsExact()}）：运行时（前置检查 / 取出 / 放入）、
-	 * 编辑器第二行的模式框、卡片胶囊、{@code describe()}、脚本的写出与解析全都问那一个方法。
-	 * <br>NBT 键 {@code cmode}，<b>默认值（ATMOST）不写</b> —— 与 sigmode / fsrc / coff 同一手法：
-	 * 只写在小于等于模式下的老卡存取前后 NBT 逐字节不变。
+	 * 编辑器第二行的模式框、卡片文案、{@code describe()}、脚本的写出与解析全都问那一个方法。
+	 * <br>NBT 键 {@code cmode}，<b>本操作的默认模式不写</b>（与 sigmode / fsrc / coff 同一手法）。
 	 */
 	public CountMode countMode = CountMode.ATMOST;
+
+	/**
+	 * 个数的**默认模式**（用户 2026-10-19 定稿）：<b>取出 = 等于</b>、<b>放入 = 小于等于</b>。
+	 *
+	 * <p>为什么取出改成「等于」：取出 1 个时两种模式没有区别（凑不出 1 个两种都算失败），
+	 * 差别只在玩家把个数调大之后 —— 默认「等于」= "够数才动手"，不会悄悄取走不足量的那一点；
+	 * 想要"有多少拿多少"自己切到小于等于。
+	 * 放入保持小于等于 = 有多少放多少、上限 64（= 整摞，改造前的行为）。
+	 *
+	 * <p>★ 与 {@link #defaultCount(OperationType)} 同一类：这是"默认模式"的<b>唯一定义处</b>
+	 * （{@code save} 用它决定写不写 {@code cmode}、{@code load} 用它填缺键、脚本解析 / 反编译、
+	 * 编辑器换操作时的重置、{@link #countIsSet()} 全都问它）。
+	 */
+	public static CountMode defaultCountMode(OperationType op) {
+		return op == OperationType.TAKE ? CountMode.EXACT : CountMode.ATMOST;
+	}
 
 	/**
 	 * 个数模式：小于等于（默认）/ 等于。
@@ -269,7 +300,7 @@ public class ArmProgramEntry {
 	 * 也不能只跟 1 比：放入的默认是 64（见 {@link #defaultCount(OperationType)}）。
 	 */
 	public boolean countIsSet() {
-		return count != defaultCount(op) || countIsExact();
+		return count != defaultCount(op) || countMode != defaultCountMode(op);
 	}
 
 	/**
@@ -634,9 +665,9 @@ public class ArmProgramEntry {
 		tag.putString("tot", timeoutTarget);
 		tag.putString("note", note);
 		tag.putInt("count", count);
-		// 个数模式：**默认（ATMOST）不写这个键** —— 与 sigmode / fsrc / coff 同一手法：
-		// 老卡（只有 count、没有模式）存取前后 NBT 逐字节不变。写枚举**名字**，不用 ordinal。
-		if (countMode != CountMode.ATMOST)
+		// 个数模式：**本操作的默认模式不写这个键**（见 defaultCountMode：取出 = 等于、放入 = 小于等于）
+		// —— 与 sigmode / fsrc / coff 同一手法。写枚举**名字**，不用 ordinal。
+		if (countMode != defaultCountMode(op))
 			tag.putString("cmode", countMode.name());
 		tag.putInt("waitt", waitAmount);
 		tag.putString("wunit", waitUnit.name());
@@ -689,14 +720,16 @@ public class ArmProgramEntry {
 		// 下次发送时让编码器抛异常（见 NOTE_MAX 的说明）。这是**兜底**，正常路径不会触发。
 		entry.note = clipNote(tag.getString("note"));
 		entry.count = Math.max(1, tag.getInt("count"));
-		// 个数模式：**缺键（老卡）= ATMOST** ⇒ 语义与改造前完全一致（“有多少拿多少、上限 count”）。
+		// 个数模式：**缺键（老卡）= 本操作的默认模式**（取出 = 等于、放入 = 小于等于，见 defaultCountMode）。
 		// 用 enumOf 而不是 ordinal：枚举增删项不会把老数据读成另一种模式（与 op / sigmode 同一惯例）。
-		entry.countMode = enumOf(CountMode.class, tag.getString("cmode"), CountMode.ATMOST);
+		// ⚠️ 用户 2026-10-19 明确了取出的默认是「等于」：老抓取卡（没有 cmode）读进来就是"够数才动手"，
+		//    这是**有意的行为变更**（不再兼容"有多少拿多少"的旧默认）—— 想要旧行为就显式写 countmode=atmost。
+		entry.countMode = enumOf(CountMode.class, tag.getString("cmode"), defaultCountMode(entry.op));
 		// ★ 「放入」的个数：改造前这个字段**运行时根本不读**（整摞塞），所以老卡里那个 1 是
 		//   "字段初始值"，不是玩家选的数 —— 它必须迁成 64（= 整摞 = 旧行为，见 defaultCount）。
-		//   ⚠️ 判据要带上 `cmode` 键：EXACT 一定写过它，所以"放入 + 等于模式 + 恰好 1 个"
-		//   （玩家真的选了 1）不会被这条迁移改成 64。小于等于 + 1 的放入则会变 64 —— 这是
-		//   有意的取舍：旧数据里它无法与"没设过"区分，而"一次只放 1 个"几乎必然是误伤。
+		//   ⚠️ 判据是"没写过 cmode"：写过 cmode 说明玩家在新版里明确选过模式，个数 1 是他的选择。
+		//   小于等于 + 1 的放入则会变 64 —— 这是有意的取舍：旧数据里它无法与"没设过"区分，
+		//   而"一次只放 1 个"几乎必然是误伤。
 		if (entry.op == OperationType.DEPOSIT && entry.count == 1 && !tag.contains("cmode"))
 			entry.count = defaultCount(OperationType.DEPOSIT);
 		// waitt 以前是"ticks"，现在带单位：老卡片没有 wunit → 数值就是 tick 数，语义不变

@@ -333,15 +333,12 @@ public final class DevPresets {
 	}
 
 	private static ArmProgramEntry entry(OperationType op, int x, int y, int z) {
-		ArmProgramEntry entry = new ArmProgramEntry();
-		entry.op = op;
+		// 走 fresh(op)：个数（取出 1 / 放入 64）与模式（**取出 等于 / 放入 小于等于**）都取该操作的默认值。
+		// 不这么做的后果是**存读不对称**：`save` 只在本操作默认模式下省略 `cmode`，而直接 new 的
+		// 取出条目是"小于等于" ⇒ 存出来带 `countmode=atmost`、读回来还原成同一个值 —— 看着没坏，
+		// 但只要哪次忘了补，`preset … nbtRoundTrip` 就会当场变红（它就是为这类不对称设的）。
+		ArmProgramEntry entry = ArmProgramEntry.fresh(op);
 		entry.offset = new BlockPos(x, y, z);
-		// ★ 「个数」的默认值**按操作给**（取出 1 / 放入 64，唯一来源 ArmProgramEntry.defaultCount）：
-		//   代码里 new 出来的条目拿的是字段初始值 1，而「放入」的默认必须是 64（= 整摞 = 改造前行为）。
-		//   不补这一句，预设存读就会不对称 —— load() 里那条"老卡的放入 count==1 且没写过 cmode ⇒ 64"
-		//   的迁移会把预设里的放入从 1 改成 64，`preset … nbtRoundTrip` 当场变红（就是这条）。
-		//   ⚠️ 别的"代码里直接造条目"的地方同理，一律走 defaultCount，别写死 1 / 64。
-		entry.count = ArmProgramEntry.defaultCount(op);
 		return entry;
 	}
 
