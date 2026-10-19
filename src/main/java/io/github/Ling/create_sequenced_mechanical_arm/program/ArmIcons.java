@@ -11,7 +11,7 @@ import net.minecraft.world.item.Items;
  * 卡片胶囊上的默认图标（PLAN.md §5.2）。
  *
  * <p>用户提的做法：动作能用"虚拟物品图标"表示 —— 取物像置物台、**组装像机械手（{@code create:deployer}，
- * Create 官方中文名就是"机械手"）**、**使用 / 潜行使用像黄铜手部零件（{@code item.create.brass_hand}）**、
+ * Create 官方中文名就是"机械手"）**、**使用像黄铜手部零件（{@code item.create.brass_hand}）**、
  * 攻击像铁镐……（第二十二轮按用户指定改过这三个）
  * 没设自定义图标时用这里的默认值；设了就用玩家在编辑器幽灵槽里放的那个物品。
  *
@@ -62,14 +62,15 @@ public final class ArmIcons {
 			case STASH -> of("create:item_vault", Items.CHEST);
 			case UNLOAD -> of("create:brass_funnel", Items.HOPPER);
 			// 组装 = **机械手**（create:deployer，Create 官方中文名就是"机械手"），
-			// 使用 / 潜行使用 = **黄铜手部零件**（item.create.brass_hand）—— 用户第二十二轮指定的对应关系：
-			// "组装"是机械手，"使用"是黄铜手部件，潜行使用也是黄铜手部件。
+			// 使用 = **黄铜手部零件**（item.create.brass_hand）—— 用户第二十二轮指定的对应关系：
+			// "组装"是机械手，"使用"是黄铜手部件。
 			case DEPLOY -> of("create:deployer", Items.SHEARS);
 			// v27 拆开后：攻击 = 剑（打格里实体），挖掘 = 镐（只挖方块）
 			case ATTACK -> of("minecraft:iron_sword", Items.IRON_SWORD);
 			case MINE -> of("minecraft:iron_pickaxe", Items.IRON_PICKAXE);
+			// 「潜行使用」已经并进「使用」（同一条操作 + 一个潜行开关，判据 ArmProgramEntry.isSneakUse）
+			// ⇒ 图标只有这一行：潜行与否不该让卡片换个图标（那是**同一个操作**的两种参数）。
 			case USE -> of("create:brass_hand", Items.LEVER);
-			case USE_SNEAK -> of("create:brass_hand", Items.LEVER);
 			// 过滤 = **Create 的滤波器物品本身**（create:filter，列表过滤器）——
 			// 图标就是"这条在用一个过滤器"这件事，比另找一个原版物品更直观。
 			// 查不到（Create 被换版本/改名）就退回漏斗：图标只是显示，绝不该让界面炸掉。

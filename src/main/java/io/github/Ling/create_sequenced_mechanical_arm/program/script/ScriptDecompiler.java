@@ -192,6 +192,15 @@ public final class ScriptDecompiler {
 			out.append(" face=")
 				.append(entry.face.getName()
 					.toLowerCase(Locale.ROOT));
+		// ★ 「使用」的**潜行开关**（用户本轮口径：使用 / 潜行使用合成一个操作 + 一个开关）：
+		//   **只有真的潜行才写** `sneak=true` —— 默认（false）不进文本，与 repeat=1 / count=1 同一惯例。
+		//   判据只问 {@link ArmProgramEntry#isSneakUse()}（= USE 且 sneaking）：规范的写法**永远**是
+		//   `use … sneak=true`，**不会**再写出老名字 `use_sneak`（那只在解析侧作为别名被接受，
+		//   见 {@code OperationType.byName} / {@code isLegacySneakUse}）—— 两种写法编译出的模型
+		//   必须逐字段相同，自检 checkSneakUseMerge 钉着这条。
+		//   反证：把这三行删掉 ⇒ 语料「潜行使用」的不变量①报「潜行开关变了：true → false」。
+		if (entry.isSneakUse())
+			out.append(" sneak=true");
 		switch (entry.op) {
 			case TAKE, DEPOSIT, STASH -> {
 				// 个数（取出 / 放入 / 收存共用）：**本操作的默认值不写**（与 repeat=1 同一惯例）。

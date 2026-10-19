@@ -160,7 +160,14 @@ public final class ArmEntryText {
 				.append(tr("opt." + entry.face.getName()).getString());
 		// 「收发信号」的**操作名**就是随模式变的短语（接收信号 / 发送信号 / 中断信号）——
 		// 与卡片标题芯片同一个方法（决策 43），别写成两份。
-		Component name = entry.op == OperationType.SIGNAL ? signalHeadText(entry) : opName(entry.op);
+		// ★ 「使用」这一条的名字**随潜行开关变**（用户本轮口径：一个操作 + 一个开关，但卡片要读得出差别）：
+		//   正常 → {@code opt.use}（「右键」/ Right-click）、潜行 → {@code opt.use_sneak}（「潜行右键」）。
+		//   ⚠️ {@code opt.use_sneak} 这个键**保留但改值**：它不再是枚举派生键（枚举里没有 USE_SNEAK 了），
+		//   只由这一处手动查 —— 所以**不要**把它加进 {@code ArmProgramScreen} 那个死键守卫的 dead[]。
+		//   判据只问 {@link ArmProgramEntry#isSneakUse()}（= USE 且 sneaking），别在这里再写一遍。
+		//   反证：把这一支删掉（一律走 opName）⇒ 自检"潜行那条的第一行要以 opt.use_sneak 开头"立刻红。
+		Component name = entry.op == OperationType.SIGNAL ? signalHeadText(entry)
+			: entry.isSneakUse() ? tr("opt.use_sneak") : opName(entry.op);
 		return tr("chip.entry", name, suffix.toString());
 	}
 
@@ -172,8 +179,7 @@ public final class ArmEntryText {
 	 * 臂解析交互点时照旧用得到它，但它不是这个操作要玩家关心的东西。
 	 */
 	public static boolean needsFace(OperationType op) {
-		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK;
+		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE;
 	}
 
 	/**
@@ -445,7 +451,14 @@ public final class ArmEntryText {
 		};
 	}
 
-	/** 操作的中文名（DEPLOY=组装：Create 的 deploying 官方译名"使用"给了 USE）。 */
+	/**
+	 * 操作的显示名（派生键 {@code opt.<小写枚举名>}）。
+	 *
+	 * <p>⚙ 三个值得记住的口径：{@code DEPLOY} = 「组装」（Create 的 deploying 官方译名"使用"让给了
+	 * {@code USE}）；{@code USE} 现在是「<b>右键</b>」（用户本轮把「使用 / 潜行使用」并成
+	 * 一个操作 + 一个潜行开关 ⇒ 名字直接说这一步在干什么，"潜行"那一态由
+	 * {@code opt.use_sneak}（「潜行右键」）在 {@link #base} 里替代它，不走这里）。
+	 */
 	public static Component opName(OperationType op) {
 		return tr("opt." + op.name()
 			.toLowerCase(java.util.Locale.ROOT));
@@ -633,7 +646,30 @@ public final class ArmEntryText {
 			.contains("9,8,7"))
 			return "调用偏移的胶囊文案里没有坐标：" + callShiftText(shiftedCall).getString();
 
-		return "OK(默认1行 / 设了3个属性=4行)";
+		// ★ 用户本轮口径：「使用」与「潜行使用」合成**一个操作 + 一个潜行开关**
+		//   ⇒ 卡片第一行的操作名必须随开关变：正常是「右键」（opt.use）、潜行是「潜行右键」（opt.use_sneak）。
+		//   ⚠️ 这两个键都是**手动查**的（opt.use_sneak 不再是枚举派生键：枚举里没有 USE_SNEAK 了），
+		//   判据只问 {@link ArmProgramEntry#isSneakUse()}（= USE 且 sneaking）。
+		//   反证：把 base() 里那一支 `entry.isSneakUse() ? tr("opt.use_sneak") : opName(...)`
+		//   改回一律走 opName ⇒ ② 立刻红；改成恒走 opt.use_sneak ⇒ ① 立刻红；
+		//   把两份语言文件里的 opt.use / opt.use_sneak 改成同一个词 ⇒ ③ 立刻红。
+		ArmProgramEntry useNormal = ArmProgramEntry.fresh(OperationType.USE);
+		ArmProgramEntry useSneak = ArmProgramEntry.fresh(OperationType.USE);
+		useSneak.sneaking = true;
+		String normalHead = tr("opt.use").getString();
+		String sneakHead = tr("opt.use_sneak").getString();
+		String normalBase = base(useNormal).getString();
+		String sneakBase = base(useSneak).getString();
+		if (!normalBase.startsWith(normalHead) || normalBase.contains(sneakHead))
+			return "「使用」（不潜行）的第一行没有以「" + normalHead + "」开头：" + normalBase;
+		if (!sneakBase.startsWith(sneakHead))
+			return "「使用 + 潜行」的第一行没有以「" + sneakHead + "」开头：" + sneakBase;
+		// 两句必须是**两个词**：同一个词就分不出这一下是潜行还是不潜行（而两者行为不同 ——
+		// 有些交互只有潜行才生效，用户的原话就是"有些交互必须潜行"）。
+		if (normalHead.equals(sneakHead))
+			return "「右键」与「潜行右键」在语言文件里是同一个词（" + normalHead + "）—— 卡片分不出潜行与否";
+
+		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开)";
 	}
 
 }

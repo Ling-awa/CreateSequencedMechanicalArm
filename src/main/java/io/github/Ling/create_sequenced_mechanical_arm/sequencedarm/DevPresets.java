@@ -171,10 +171,18 @@ public final class DevPresets {
 		return single(task);
 	}
 
-	/** 右键的潜行变体：某些交互必须潜行才生效。 */
+	/**
+	 * 潜行右键：某些交互必须潜行才生效（用户口径）。
+	 *
+	 * <p>★ 「潜行使用」已经并进「使用」（同一条操作 + 一个潜行开关）⇒ 这里是一条 {@code USE}
+	 * 外加 {@code sneaking = true}。预设的 **key 保留 {@code use_sneak}**（命令里那个名字是玩家
+	 * 熟悉的、也是自检 {@code nbtRoundTrip} 一直在跑的那条），变的是它造出来的模型。
+	 */
 	public static ArmProgram useSneak() {
 		ArmProgramTask task = task("use_sneak");
-		task.entries.add(entry(OperationType.USE_SNEAK, 2, 0, 0));
+		ArmProgramEntry entry = entry(OperationType.USE, 2, 0, 0);
+		entry.sneaking = true;
+		task.entries.add(entry);
 		return single(task);
 	}
 

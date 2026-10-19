@@ -217,6 +217,8 @@ public class SequencedArmSelfTest {
 		checkEffects(server);
 		checkEditorSavePath(server);
 		checkEntryMigration();
+		// 「使用」+「潜行开关」的合并（用户本轮口径）：别名等价 / 老卡迁移 / 规范形式
+		checkSneakUseMerge(server);
 		checkIcons();
 		checkTaskLimit();
 		checkNotesClip();
@@ -2251,8 +2253,9 @@ public class SequencedArmSelfTest {
 	/**
 	 * 「对任意方块也能动手」的自检（用户第二轮反馈）。
 	 *
-	 * <p>守两件事：① 操作分类正确 —— 只有需要交换物品的四类要求 Create 交互点，攻击 / 使用 /
-	 * 潜行使用不要求（这个分类在录入与运行时<b>共用</b>，写错一边就是"能录但跑不动"）；
+	 * <p>守两件事：① 操作分类正确 —— 只有需要交换物品的四类要求 Create 交互点，攻击 / 使用
+	 * 不要求（这个分类在录入与运行时<b>共用</b>，写错一边就是"能录但跑不动"；
+	 * 「潜行使用」已并入「使用 + 一个潜行开关」⇒ 这里只剩「使用」一条要判）；
 	 * ② {@link AnyBlockInteractionPoint} 对一个**普通方块**（石头，不是 Create 交互点）能给出可用的
 	 * 爪子目标，而且取物点真的在方块<b>外面</b> —— 退化成"方块中心"的话爪子会插进方块里
 	 * （阶段 1 实测过这个现象）。
@@ -2261,7 +2264,7 @@ public class SequencedArmSelfTest {
 		boolean split = OperationType.TAKE.needsInteractionPoint() && OperationType.DEPOSIT.needsInteractionPoint()
 			&& OperationType.UNLOAD.needsInteractionPoint() && OperationType.DEPLOY.needsInteractionPoint()
 			&& !OperationType.MINE.needsInteractionPoint() && !OperationType.ATTACK.needsInteractionPoint()
-			&& !OperationType.USE.needsInteractionPoint() && !OperationType.USE_SNEAK.needsInteractionPoint();
+			&& !OperationType.USE.needsInteractionPoint();
 
 		// v27：旧的混合操作 PUNCH 必须迁到挖掘（老卡因此继续只挖方块、不会突然开始打实体）
 		boolean legacyPunch = OperationType.byName("PUNCH", null) == OperationType.MINE;
@@ -3181,7 +3184,7 @@ public class SequencedArmSelfTest {
 	/**
 	 * 「使用」打在**空气格**上时真的能把方块放进去吗（用户第二十二轮："使用也可以是放置方块"）。
 	 *
-	 * <p>为什么值得真跑一遍：运行时前置检查以前对 USE/USE_SNEAK 也要求"目标位置有方块"，
+	 * <p>为什么值得真跑一遍：运行时前置检查以前对 USE 也要求"目标位置有方块"，
 	 * 而这轮的修法只是**放开那条检查** —— 放置能否成立取决于原版机制
 	 * （`BlockPlaceContext`：点到的位置**可以替换**时，`getClickedPos()` 就是那一格本身，空气正好满足），
 	 * 以及我们 `RightClickBridge.use` 里那条 `stack.useOn(context)` 分支。
@@ -4858,6 +4861,160 @@ public class SequencedArmSelfTest {
 		if (!timeoutKept || !jumpKept || !explicitWins || !v3RoundTrip || !distinct)
 			LOGGER.error("[selftest] 迁移坏了：timeoutKept={} jumpKept={} explicitWins={} v3RoundTrip={} distinct={}",
 				timeoutKept, jumpKept, explicitWins, v3RoundTrip, distinct);
+	}
+
+	/**
+	 * 「使用」+「潜行开关」的合并自检（用户本轮口径：使用 / 潜行使用合成<b>一个操作 + 一个开关</b>）。
+	 *
+	 * <p>为什么必须有一条专门的：这次合并在**模型层**动了三处（枚举少一项、条目多一个布尔、
+	 * 脚本多一个后缀），而三处里任何一处漏改的症状都**是静默的** ——
+	 * 老卡里的「潜行使用」变成普通右键 = 某些交互突然打不开（炒锅那类），卡片上却看不出来。
+	 *
+	 * <p>三条断言：
+	 * <ol>
+	 *   <li><b>两种写法等价</b>：{@code use_sneak 1 0 0 face=north}（老写法）与
+	 *       {@code use 1 0 0 face=north sneak=true}（新写法）编译出的条目 {@code save()}
+	 *       <b>逐字段相同</b>，且都 {@code isSneakUse()}；而 {@code use 1 0 0 face=north}
+	 *       （= {@code sneak=false}）与它们只差这一个布尔 —— 合并没有把"潜行与否"这个区别弄丢。
+	 *       ⚠️ 口径更正：需求原文把"三种写法逐字段相同"并列写了，但 {@code use 不带 sneak} 与
+	 *       另外两种**本来就该不同**（一个是普通右键、一个是潜行右键）⇒ 这里按两两分组判，
+	 *       比"三种全等"更严（它同时钉住了"区别还在"）。</li>
+	 *   <li><b>老卡迁移</b>：NBT 里 {@code op = USE_SNEAK}、其余默认 ⇒ {@code load} 出来是
+	 *       {@code op == USE && sneaking}（{@code byName} 只回得来类型，"要潜行"那一半由
+	 *       {@code isLegacySneakUse} 补）；并且 {@code sneak} 键**只在 true 时才写**
+	 *       （false 不写：只含正常右键的老卡存取前后逐字节不变）。</li>
+	 *   <li><b>规范形式</b>：{@code use … sneak=true} 反编译出来**只**是 {@code use … sneak=true}
+	 *       （不带 {@code use_sneak}），再编译回来模型一致 —— 老名字只活在解析侧。</li>
+	 *   <li><b>写错操作要报错</b>：{@code take 0 0 0 sneak=true} 必须报"sneak 只对 use 有意义"。</li>
+	 * </ol>
+	 *
+	 * <p>反证：① 把 {@code ScriptParser.parseEntry} 里那两行
+	 * {@code if (OperationType.isLegacySneakUse(opName)) parsed.sneaking = true;} 删掉 ⇒ 第一条红
+	 * （老写法编译出来 {@code isSneakUse()=false}）；② 把 {@code ArmProgramEntry.load} 里那句
+	 * {@code || OperationType.isLegacySneakUse(...)} 删掉 ⇒ 第二条红（老卡降级成普通右键）；
+	 * ③ 把 {@code ScriptDecompiler} 里 {@code if (entry.isSneakUse()) out.append(" sneak=true")}
+	 * 删掉 ⇒ 第三条与语料「潜行使用」的不变量①同时红；④ 把 {@code ScriptParser} 里那个
+	 * {@code if (parsed.op != OperationType.USE)} 守卫删掉 ⇒ 第四条红。
+	 */
+	private static void checkSneakUseMerge(MinecraftServer server) {
+		HolderLookup.Provider registries = server.registryAccess();
+
+		// ——— ① 两种写法等价（老写法 / 新写法 / 显式 false） ———
+		String legacy = "task main\n  use_sneak 1 0 0 face=north\n";
+		String explicitSneak = "task main\n  use 1 0 0 face=north sneak=true\n";
+		String explicitNormal = "task main\n  use 1 0 0 face=north sneak=false\n";
+		ArmProgramEntry legacyEntry = firstEntry(registries, legacy);
+		ArmProgramEntry sneakEntry = firstEntry(registries, explicitSneak);
+		ArmProgramEntry normalEntry = firstEntry(registries, explicitNormal);
+		// 别名本身也要解析得出来（PUNCH / WAIT_SIGNAL 的别名表旁边新加的那一条）
+		boolean aliasType = OperationType.byName(OperationType.LEGACY_USE_SNEAK, null) == OperationType.USE
+			&& OperationType.isLegacySneakUse("use_sneak");
+		boolean legacySneaks = legacyEntry != null && legacyEntry.isSneakUse();
+		boolean sameModel = legacyEntry != null && sneakEntry != null
+			&& legacyEntry.save(registries)
+				.equals(sneakEntry.save(registries));
+		// 显式 false（与干脆不写）都是普通右键，且**与潜行那条只差这一个布尔**
+		boolean normalStaysNormal = normalEntry != null && !normalEntry.isSneakUse() && onlySneakDiffers(normalEntry)
+			&& sneakEntry != null && sneakEntry.isSneakUse();
+
+		// ——— ② 老卡迁移（NBT 里的 op = USE_SNEAK） ———
+		CompoundTag legacyTag = new CompoundTag();
+		legacyTag.putString("op", OperationType.LEGACY_USE_SNEAK);
+		ArmProgramEntry migrated = ArmProgramEntry.load(legacyTag, registries);
+		boolean migratedToUse = migrated.op == OperationType.USE && migrated.sneaking && migrated.isSneakUse();
+		// sneak 键：true 才写、false 不写（与 sigmode / cmode / range 同一手法）
+		ArmProgramEntry plainUse = ArmProgramEntry.fresh(OperationType.USE);
+		ArmProgramEntry sneakUse = ArmProgramEntry.fresh(OperationType.USE);
+		sneakUse.sneaking = true;
+		boolean normalNoKey = !plainUse.save(registries)
+			.contains("sneak");
+		boolean sneakWritesKey = sneakUse.save(registries)
+			.getBoolean("sneak");
+		// 非 USE 的操作上残留的 true 一律自愈成 false（模型定义的一部分，与 offset 自愈同一条）
+		ArmProgramEntry residual = ArmProgramEntry.fresh(OperationType.TAKE);
+		residual.sneaking = true;
+		boolean residueHealed = !ArmProgramEntry.load(residual.save(registries), registries).sneaking;
+
+		// ——— ③ 规范形式：只写 use … sneak=true，不再冒出 use_sneak ———
+		String canonical = sneakEntry == null ? "" : ScriptCompiler.decompile(programOf(sneakEntry), registries);
+		boolean canonicalUsesNewForm = canonical.contains("sneak=true") && !canonical.contains("use_sneak");
+		ScriptResult<ArmProgram> back = ScriptCompiler.compile(canonical, registries);
+		ArmProgramEntry reborn = back.hasErrors() || back.value().tasks.isEmpty()
+			|| back.value().tasks.get(0).entries.isEmpty() ? null : back.value().tasks.get(0).entries.get(0);
+		boolean canonicalRoundTrip = sneakEntry != null && reborn != null
+			&& sneakEntry.save(registries)
+				.equals(reborn.save(registries));
+		// ——— ④ 写在别的操作上必须**报错**（静默收下会让玩家以为那条会潜行，而运行时既不读、
+		//   反编译器也不写） ———
+		boolean wrongOpReported = reportsAt(registries, "task main\n  take 0 0 0 sneak=true\n", 2, "sneak");
+
+		LOGGER.info("[selftest] 使用+潜行开关: 别名解析={} 老写法潜行={} 两种写法同一模型={} 正常/潜行分得开={} "
+			+ "老卡迁到 USE={} 正常不写键={} 潜行写键={} 残留自愈={} 规范形式={} 再编译一致={} 写错操作报错={}", aliasType,
+			legacySneaks, sameModel, normalStaysNormal, migratedToUse, normalNoKey, sneakWritesKey, residueHealed,
+			canonicalUsesNewForm, canonicalRoundTrip, wrongOpReported);
+		if (!aliasType)
+			LOGGER.error("[selftest] USE_SNEAK 别名没有解析成 USE（老卡 / 老脚本会读成未知操作）");
+		if (!legacySneaks || !sameModel)
+			LOGGER.error("[selftest] `use_sneak` 与 `use … sneak=true` 编译出的模型不相同"
+				+ "（老写法会把潜行那一半丢掉 ⇒ 某些交互突然打不开）：老写法={} 新写法={}", legacyEntry == null ? "null"
+					: legacyEntry.save(registries),
+				sneakEntry == null ? "null" : sneakEntry.save(registries));
+		if (!normalStaysNormal)
+			LOGGER.error("[selftest] 普通右键被当成了潜行右键（或反过来）—— 合并把两者的区别弄丢了");
+		if (!migratedToUse)
+			LOGGER.error("[selftest] 老卡（op = USE_SNEAK）没有迁成「使用 + 潜行」：op={} sneaking={}", migrated.op,
+				migrated.sneaking);
+		if (!normalNoKey || !sneakWritesKey)
+			LOGGER.error("[selftest] sneak 键的写入口径不对（正常={} 潜行={}）", normalNoKey, sneakWritesKey);
+		if (!residueHealed)
+			LOGGER.error("[selftest] 非「使用」条目上残留的 sneaking=true 没有自愈（模型里出现一个跑不到的状态）");
+		if (!canonicalUsesNewForm)
+			LOGGER.error("[selftest] 反编译出来的文本不是 `use … sneak=true`（还在写 use_sneak？）：[{}]",
+				canonical.replace("\n", " ⏎ "));
+		if (!canonicalRoundTrip)
+			LOGGER.error("[selftest] `use … sneak=true` 反编译再编译之后模型变了：[{}]", canonical.replace("\n", " ⏎ "));
+		if (!wrongOpReported)
+			LOGGER.error("[selftest] `sneak=` 写在 take 上没有被报错（静默收下会让玩家以为那条会潜行）");
+	}
+
+	/** 编译一小段脚本并取第一个条目的模型（编译失败 / 空程序返回 {@code null}）。 */
+	@Nullable
+	private static ArmProgramEntry firstEntry(HolderLookup.Provider registries, String text) {
+		ScriptResult<ArmProgram> result = ScriptCompiler.compile(text, registries);
+		if (result.hasErrors() || result.value().tasks.isEmpty() || result.value().tasks.get(0).entries.isEmpty())
+			return null;
+		return result.value().tasks.get(0).entries.get(0);
+	}
+
+	/**
+	 * 把一个条目包成一份最小程序（自检里"把某一条再反编译一次"用；注册表只有反编译物品时才用得到，
+	 * 所以不接参数）。
+	 */
+	private static ArmProgram programOf(ArmProgramEntry entry) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "main";
+		task.entries.add(entry);
+		program.tasks.add(task);
+		return program;
+	}
+
+	/**
+	 * 自检用：把这个条目改成"潜行"之后，两边的 NBT **除了 {@code sneak} 之外完全一样** ——
+	 * 用来证明"普通右键与潜行右键只差这一个布尔"（合并要是把别的字段也弄乱了，这条会红）。
+	 */
+	private static boolean onlySneakDiffers(ArmProgramEntry normal) {
+		ArmProgramEntry sneaking = new ArmProgramEntry();
+		sneaking.op = normal.op;
+		sneaking.offset = normal.offset;
+		sneaking.face = normal.face;
+		sneaking.sneaking = true;
+		CompoundTag a = normal.save(RegistryAccess.EMPTY);
+		CompoundTag b = sneaking.save(RegistryAccess.EMPTY);
+		boolean sneakDiffers = a.getBoolean("sneak") != b.getBoolean("sneak");
+		a.remove("sneak");
+		b.remove("sneak");
+		return sneakDiffers && a.equals(b);
 	}
 
 	/**
@@ -8397,6 +8554,13 @@ public class SequencedArmSelfTest {
 			return where + "delay 变了：" + a.delay + " → " + b.delay;
 		if (a.face != b.face)
 			return where + "朝向变了：" + a.face + " → " + b.face;
+		// ★ 「潜行开关」必须逐字段往返 —— 但判据只问 {@link ArmProgramEntry#isSneakUse()}
+		//   （= USE 且 sneaking）：非「使用」的条目上残留的 true 不进文本、读回来由 load 自愈成 false
+		//   （模型定义的一部分，与 offset 自愈同一条），拿原始字段比等于把这条定义判红。
+		//   反证：把 ScriptDecompiler 里 `if (entry.isSneakUse()) out.append(" sneak=true")` 删掉
+		//   ⇒ 语料「潜行使用」的不变量①报「潜行开关变了：true → false」。
+		if (a.isSneakUse() != b.isSneakUse())
+			return where + "潜行开关变了：" + a.isSneakUse() + " → " + b.isSneakUse();
 		if (a.failAmount != b.failAmount)
 			return where + "时限变了：" + a.failAmount + " → " + b.failAmount;
 		if (a.failUnit != b.failUnit)
@@ -8550,7 +8714,7 @@ public class SequencedArmSelfTest {
 			  attack    10 64 -3 face=north
 			  mine      10 64 -3 face=down
 			  use       10 64 -3 face=east
-			  use_sneak 10 64 -3 face=west
+			  use       10 64 -3 face=west sneak=true
 			  wait      5s
 			  signal    recv on freq=iron_ingot + copper_ingot
 			  call      子任务 repeat=2
@@ -8579,6 +8743,19 @@ public class SequencedArmSelfTest {
 			task 主任务
 			  stash
 			  stash count=16 countmode=exact
+			""");
+		// 「潜行开关」（用户本轮口径：使用 / 潜行使用合成一个操作 + 一个开关）。
+		// 这一份同时钉两件事：
+		//   ① **老写法** `use_sneak` 还能编译（别名表在 OperationType.byName 里）；
+		//   ② 它的规范形式**只会**是 `use … sneak=true` —— 反编译器不再写老名字。
+		// 不变量①（compile(canonical) ≡ compile(t)）在这里正是"两种写法 = 同一个模型"的机器证明：
+		// 把 ScriptParser 里 `isLegacySneakUse` 那两行删掉 ⇒ 老写法编译出 sneaking=false，
+		// 与规范形式（true）不同 ⇒ 这一份立刻报「潜行开关变了：true → false」。
+		corpus.put("潜行使用", """
+			task main
+			  use_sneak 10 64 -3 face=west
+			  use 10 64 -3 face=west sneak=true
+			  use 0 0 2
 			""");
 		// 调用次数的两个端点（用户第四十轮：0 = 无限循环、上限 64）—— 这两个值进文本再出来必须一字不变
 		corpus.put("调用次数端点", """

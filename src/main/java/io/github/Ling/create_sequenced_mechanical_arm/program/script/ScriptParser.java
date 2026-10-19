@@ -54,6 +54,7 @@ import net.minecraft.world.item.component.DyedItemColor;
  *     deposit  0 0 0 count=3 countmode=exact        &ast;/ 目标必须吃下恰好 3 个 &ast;/
  *     unload   0 0 2 repeat=until_empty amount=max
  *     attack   0 0 0 face=up ok=goto 清理 fail=skip timeout=5s
+ *     use      10 64 -3 face=north sneak=true      &ast;/ 潜行右键（老写法 `use_sneak` 也吃） &ast;/
  *     wait     5s
  *     signal   recv on freq=iron_ingot + copper_ingot
  *     signal   recv on range=16 freq=iron_ingot + copper_ingot   &ast;/ 只收 16 格内的来源（含边界） &ast;/
@@ -719,6 +720,12 @@ public final class ScriptParser {
 		}
 
 		Parsed parsed = new Parsed(op, line);
+		// ★ 老写法 `use_sneak`：`byName` 把它解析成 USE（别名表与 NBT 迁移同源），但"要潜行"这一半
+		//   它**带不回来**（只返回类型）⇒ 按**原始关键字**再问一次（判据 isLegacySneakUse 只此一处）。
+		//   新写法是 `use … sneak=true`（见 suffixes 的 "sneak" 分支），两种写法编译出的模型必须
+		//   **逐字段相同** —— 自检 checkSneakUseMerge 的第一条钉的就是它。
+		if (OperationType.isLegacySneakUse(opName))
+			parsed.sneaking = true;
 		List<Token> rest = new ArrayList<>(tokens.subList(1, tokens.size()));
 
 		if (op.requiresTarget()) {
@@ -767,6 +774,8 @@ public final class ScriptParser {
 		entry.offset = parsed.offset;
 		entry.delay = parsed.delay;
 		entry.face = parsed.face;
+		// 「使用」的潜行开关（老写法 use_sneak 与 sneak=true 都落在 parsed.sneaking 上）
+		entry.sneaking = parsed.sneaking;
 		entry.failAmount = parsed.failAmount;
 		entry.failUnit = parsed.failUnit;
 		entry.onSuccess = parsed.onSuccess;
@@ -948,6 +957,27 @@ public final class ScriptParser {
 						return false;
 					}
 					parsed.face = dir;
+					index++;
+				}
+				// 「使用」的**潜行开关**（用户本轮口径：使用 / 潜行使用合成一个操作 + 一个开关）。
+				// 与 `face=north` 同一类后缀：**只对 use 有意义** —— 写在别的操作上**报错**，
+				// 不静默收下（收下会让玩家以为那条会潜行，而运行时既不读、反编译器也不写）。
+				// 真值表复用 {@link #polarity}（on/true 与 off/false，与 redpow 的写法同一张表）：
+				// 两个消费方（这里 / 反编译器的 `sneak=true`）只需要两态，多一张表就是多一个分叉点。
+				//   ⚠️ 反证两条：把这一整支删掉 ⇒ 语料「潜行使用」的第 2 行报"不认识的属性：sneak"
+				//   （整份语料编译不过）；把 `op != USE` 那行守卫删掉 ⇒ checkSneakUseMerge 的
+				//   "sneak 写在 take 上没有报错"那条立刻红。
+				case "sneak" -> {
+					if (parsed.op != OperationType.USE) {
+						error(token.line(), "sneak 只对 use 有意义（它是「使用」的潜行开关）");
+						return false;
+					}
+					Boolean picked = polarity(value);
+					if (picked == null) {
+						error(token.line(), "未知潜行写法：" + value + "（可用 true / false，或 on / off）");
+						return false;
+					}
+					parsed.sneaking = picked;
 					index++;
 				}
 				case "count" -> {
@@ -1740,6 +1770,11 @@ public final class ScriptParser {
 		BlockPos offset = BlockPos.ZERO;
 		int delay;
 		Direction face = Direction.UP;
+		/**
+		 * 「使用」的潜行开关（老写法 {@code use_sneak} 与后缀 {@code sneak=true} 都写到这里）——
+		 * 落到模型上是 {@code ArmProgramEntry.sneaking}，判据只有 {@code isSneakUse()} 一处。
+		 */
+		boolean sneaking;
 		int failAmount = -1;
 		boolean failAmountSeen;
 		WaitUnit failUnit = WaitUnit.TICK;

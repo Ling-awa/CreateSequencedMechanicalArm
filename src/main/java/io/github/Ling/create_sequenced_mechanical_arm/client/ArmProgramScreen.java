@@ -292,6 +292,44 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int COUNT_MODE_INLINE_X = COUNT_INLINE_X - 2 - COUNT_MODE_INLINE_W;
 	private static final int COUNT_COORD_W = COUNT_MODE_INLINE_X - 2 - FIELD_X;
 	/**
+	 * 朝向框的宽：<b>32</b>（攻击 / 挖掘 / 使用 共用同一个宽度 —— 它是同一套控件）。
+	 *
+	 * <p>提成常量是为了让「使用」那条三格的算式能引用它（{@link #USE_COORD_W}）——
+	 * 原来它是 {@code buildBaseControls} 里的一个局部字面量，两处各写一个 32 就会在
+	 * 改宽度时只改到一处（判据/常量抄两份必然分叉，决策 68/85）。
+	 */
+	private static final int FACE_W = 32;
+	/**
+	 * 「使用」第二行的**三格**：坐标 {@code 44} + 2 + 潜行开关 {@code 40} + 2 + 朝向 {@code 32}。
+	 *
+	 * <p>★ 用户本轮口径：把「使用」与「潜行使用」合成<b>一个操作 + 一个潜行开关</b>，而且
+	 * "在编辑操作的时候编辑正常和潜行" ⇒ 那个开关必须**显式摆在动作头这一行**，
+	 * 不能塞回属性胶囊（胶囊是"可选属性"，而潜行与否直接决定这一下右键到底是什么动作）。
+	 *
+	 * <p>算式（右沿仍是 {@code FIELD_X + FIELD_W = 197}，不新造一个 197）：
+	 * <pre>
+	 * 77  ..121  坐标框 44（{@link #USE_COORD_W} = 120 − 4 − 40 − 32）
+	 * 123 ..163  潜行开关框 40（{@link #USE_SNEAK_W}）
+	 * 165 ..197  朝向框 32（{@link #FACE_W}）
+	 * </pre>
+	 * 相邻两格之间固定 <b>2px</b>（与 {@code rowBoxesProblem} 的判据一致）。
+	 *
+	 * <p>⚠️ 开关框只有 <b>40</b> ⇒ 框里放得下的文字 ≤ {@code 40 - 10 = 30}（Create 的 {@code Label}
+	 * <b>不裁剪</b>、画超出盒子）：中文「正常 / 潜行」2 字 = 18 ✔；英文用**短名**
+	 * （{@code Normal} 按原版字体约 33 放不下 ⇒ {@code Norm} 约 24 / {@code Sneak} 约 29，
+	 * 写在两份语言文件的 {@code opt.normal} / {@code opt.sneak} 里）。
+	 * ⚠️ 上面这几个像素数是按原版字体宽度（多数小写 6px、{@code i/l/t/f/k} 更窄）**估**的：
+	 * 真正的判据是 {@code useSneakRowProblem()} 在运行期用 {@code font.width(...)} 实测 —— 那条红了
+	 * 说明这里的估算偏乐观，按它打印的实测值改短名即可。
+	 *
+	 * <p>⚠️ 只有 {@code USE} 是三格：攻击 / 挖掘照旧两格（判据只有 {@code op == OperationType.USE}
+	 * 一处，见 {@code buildBaseControls}）。
+	 */
+	private static final int USE_SNEAK_W = 40;
+	private static final int USE_COORD_W = FIELD_W - 4 - USE_SNEAK_W - FACE_W;
+	private static final int USE_SNEAK_X = FIELD_X + USE_COORD_W + 2;
+	private static final int USE_FACE_X = USE_SNEAK_X + USE_SNEAK_W + 2;
+	/**
 	 * 「收存」第二行的两个控件：它**没有坐标**，所以两个框直接铺满整行 ——
 	 * 模式框 {@code 77..133}（56）＋ 2 ＋ 数值框 {@code 135..197}（62）。
 	 *
@@ -2748,6 +2786,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					//   ⚠️ 判据用**条目级**的 needsTarget()：过滤的容器模式有坐标（它是数据参数），不能清。
 					if (!entry.needsTarget())
 						entry.offset = BlockPos.ZERO;
+					// ★ 「潜行开关」**只对「使用」有意义**（判据 isSneakUse）⇒ 切到别的操作就归零，
+					//   与上面那条"不需要坐标就清坐标"同一条纪律：模型里不留"存不下来、也跑不到"的字段。
+					//   （读盘那一侧由 ArmProgramEntry.load 的自愈兜着，两处口径相同。）
+					if (!entry.isSneakUse())
+						entry.sneaking = false;
 					// ★ 「个数」的默认值**按操作变**（取出 1 / 放入 64 / 收存 64，见 defaultCount）：
 					//   切操作时把仍是"上一个操作的默认值"的个数换成新操作的默认值 ——
 					//   否则从「取出 1」切到「放入」会变成"一次只放 1 个"（旧行为是一整摞），
@@ -3269,14 +3312,25 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				//   用户第四十二轮附了张"潜行使用"的截图："因为现在不用选择相对/绝对了，所以可以把输入框的
 				//   长度调整得更长，让整体上下两行对齐" —— 原来坐标框只有 32 宽、朝向框 32 宽，到 145 就断了，
 				//   而第一行到 197；相对/绝对那个选择框删掉（§19.7）之后这块本来就空着。
-				//   ⚠️ 所有"同时要坐标与朝向"的操作都是这一条路（攻击 / 挖掘 / 使用 / 潜行使用 / 组装…），
+				//   ⚠️ 所有"同时要坐标与朝向"的操作都是这一条路（攻击 / 挖掘 / 使用 / 组装…），
 				//   用户特意说明过"这个在所有要同时选择坐标和方向的 UI 都会出现"。
-				final int faceW = 32;
+				final int faceW = FACE_W;
+				// ★ 「使用」多出**第三格 = 潜行开关**（用户本轮口径：「使用」与「潜行使用」合成
+				//   一个操作 + 一个开关，而且"在编辑操作的时候编辑正常和潜行"）——
+				//   它必须显式摆在动作头，**不能**塞回属性胶囊（胶囊是可选属性，而这一格决定这一下
+				//   右键到底是什么动作）。判据只有 `op == OperationType.USE` **这一处**：
+				//   攻击 / 挖掘照旧两格（它们没有潜行这个维度）。
+				//   反证：把这一行改成 `ArmEntryText.needsFace(entry.op)`（三种操作都变三格）⇒
+				//   useSneakRowProblem() 的「攻击 / 挖掘仍是两格」那条立刻红。
+				final boolean sneak = entry.op == OperationType.USE;
+				final int sneakW = USE_SNEAK_W;
 				// ★ 「个数」（取出 / 放入）现在也长在**这一行**（用户本轮口径：从属性升级为基础内容）。
 				//   右端留出模式框 + 数值框，剩下的全给坐标框（77..137 = 60）；
 				//   不需要个数的操作照旧用满整行（{@code FIELD_W}）。判据只有 {@code hasCount()} 一处。
 				boolean count = entry.op.hasCount();
-				int coordW = count ? COUNT_COORD_W : face ? FIELD_W - 4 - faceW : FIELD_W;
+				int coordW = count ? COUNT_COORD_W
+					: sneak ? USE_COORD_W
+						: face ? FIELD_W - 4 - faceW : FIELD_W;
 				// ★ 用户本轮口径：框里显示 / 回填的是**相对坐标**（模型里的 offset），世界坐标只进悬停提示：
 				//   "玩家编辑的时候此处不再根据原点计算真实坐标，而是直接显示和编辑相对坐标，
 				//    这样应该可以更短并且更便于编辑，当鼠标移动上去的时候提示框额外显示对应的世界坐标"
@@ -3292,9 +3346,27 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 							entry.offset = parsed;
 						}
 					});
+				if (sneak)
+					// 「正常 / 潜行」二选一（下标与 ArmProgramEntry.SneakMode 的 ordinal 同一套：
+					// 0 = NORMAL = 默认项，1 = SNEAK）。选项名走 labels(...) 的 `opt.<小写>` 派生，
+					// 与别的选择框同一惯例 —— 这里**不**另写一份"正常/潜行"的字面文案。
+					// ⚠️ 值直接写回模型那个**布尔**（不是另存一个枚举字段）：模型里只有一个真相
+					// （sneaking），判据只有一个（isSneakUse）—— 枚举只服务这个框的下标。
+					inlinePicker(USE_SNEAK_X, sneakW, tr("entry.sneak_mode"), tr("hint.entry_sneak_mode"),
+						labels(ArmProgramEntry.SneakMode.values()), entry.sneaking ? 1 : 0, i -> {
+							final boolean picked = i == 1;
+							if (entry.sneaking == picked)
+								return;
+							pushUndo();
+							entry.sneaking = picked;
+							dirty = true;
+							// 卡片第一行的操作名会跟着变（右键 ↔ 潜行右键），所以要重排卡片；
+							// 盒子数**不变**（三格一直在），重建只是为了重画那几句话。
+							rebuildPending = true;
+						});
 				if (face)
-					inlinePicker(FIELD_X + coordW + 4, faceW, tr("entry.face"), tr("hint.entry_face"),
-						labels(Direction.values()), entry.face.ordinal(), i -> {
+					inlinePicker(sneak ? USE_FACE_X : FIELD_X + coordW + 4, faceW, tr("entry.face"),
+						tr("hint.entry_face"), labels(Direction.values()), entry.face.ordinal(), i -> {
 							pushUndo();
 							entry.face = Direction.values()[i];
 							rebuildPending = true;
@@ -4125,6 +4197,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String stashRow = screen.stashRowProblem();
 			if (stashRow != null && problem == null)
 				problem = "收存的个数: " + stashRow;
+			// ★ 「使用」：第二行三格（坐标 44 + **潜行开关 40** + 朝向 32；用户本轮口径：
+			//   使用 / 潜行使用合成一个操作 + 一个开关，开关必须显式摆在动作头）
+			String useSneakRow = screen.useSneakRowProblem();
+			if (useSneakRow != null && problem == null)
+				problem = "使用的潜行开关: " + useSneakRow;
 			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
 			String exitRow = screen.exitRowProblem();
 			if (exitRow != null && problem == null)
@@ -4922,6 +4999,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			// 第二行的 DATA_AREA 盒子数（§19 坐标统一之后："坐标空间"选择框已删，坐标只剩一个框）：
 			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；**取出 / 放入 = 坐标 + 个数模式 + 个数 = 3**
 			// （用户本轮：个数从属性升级为基础内容）；**收存 = 个数模式 + 个数 = 2**（它没有坐标）；
+			// **使用 = 坐标 + 潜行开关 + 朝向 = 3**（用户本轮：使用 / 潜行使用合成一个操作 + 一个开关）；
 			// 等待 = 时长 + 单位 = 2；
 			// 收发信号 = 模式 +（**接收**才有）距离 **或**（只有发送通电才有）数值 + 单位
 			// ⇒ 接收 = 2、发送 = 3、中断 = 1（两个频率格是**菜单幽灵槽**，不算盒子）；
@@ -4935,6 +5013,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// 取出 / 放入：坐标框收窄让出右端，再并排两个控件的盒子（模式 30 + 数值 26）。
 				// 反证：把 buildBaseControls 里那个 `if (count)` 删掉 ⇒ 这两类立刻报"应当是 3、实际 1"。
 				case TAKE, DEPOSIT -> 3;
+				// 「使用」：坐标 44 + **潜行开关 40** + 朝向 32（用户本轮：一个操作 + 一个开关）。
+				// 反证：把 buildBaseControls 里那个 `if (sneak)` 删掉 ⇒ 这里立刻报"应当是 3、实际 2"；
+				// 几何与两个模式标签的宽度由 useSneakRowProblem() 逐格量。
+				case USE -> 3;
 				// 收存：没有坐标 ⇒ 只有"模式 + 个数"两格（几何由 stashRowProblem 逐格量）。
 				// 反证：把 buildBaseControls 里的 `case STASH` 删掉（掉进 default 的 needsTarget 早退）
 				// ⇒ 这里立刻报"应当是 2、实际 0"。
@@ -5492,6 +5574,94 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * 自检：「使用」第二行是**三格** —— 坐标 44 + 潜行开关 40 + 朝向 32（右沿仍是 197）。
+	 *
+	 * <p>★ 用户本轮口径：把「使用」与「潜行使用」合成<b>一个操作 + 一个潜行开关</b>，而且
+	 * "在编辑操作的时候编辑正常和潜行" ⇒ 那个开关必须**显式摆在动作头这一行**（不能塞回属性胶囊）。
+	 * 于是这一行从两格变三格，坐标框让出 40+2 给开关。
+	 *
+	 * <p>断言四件事：
+	 * <ol>
+	 *   <li><b>正常与潜行两种状态下都是这三格</b>，几何与常量逐一对上（走通用的
+	 *       {@link #rowBoxesProblem}：盒子数 / 每格左沿与宽 / 相邻恰 2px / 右沿 197）；</li>
+	 *   <li>两个模式标签（{@code opt.normal} / {@code opt.sneak}）在 {@code 40 - 10 = 30} 里
+	 *       <b>实测</b>放得下（Create 的 {@code Label} 不裁剪、画超出盒子）；</li>
+	 *   <li><b>攻击 / 挖掘仍是两格</b> —— 三格只属于「使用」（判据只有 {@code op == USE} 一处）；</li>
+	 *   <li>那三个常量本身自洽（{@code 44 + 2 + 40 + 2 + 32 == 120} = {@code FIELD_W}）。</li>
+	 * </ol>
+	 *
+	 * <p>反证（每条都能单独把这里弄红）：
+	 * ① 把 {@code USE_SNEAK_W} 改回 0（不建开关那格）⇒ ① 红（盒子数 2 ≠ 3）；
+	 * ② 把 {@code USE_COORD_W} 写回 {@code FIELD_W - 4 - FACE_W}（坐标框不让位）⇒ ① 红
+	 * （第 2 格左沿 163 ≠ 123，最后一格右沿 237 &gt; 197）；
+	 * ③ 把两个语言文件里的 {@code opt.sneak} 改成 {@code Sneaking}（8 个字母，约 43px）⇒ ② 红；
+	 * ④ 把 {@code buildBaseControls} 里的判据改成 {@code ArmEntryText.needsFace(entry.op)} ⇒ ③ 红；
+	 * ⑤ 把 {@code USE_SNEAK_W} 改成 41 ⇒ ④ 红（三格加起来 121 ≠ 120，且右沿 198）。
+	 */
+	@Nullable
+	private String useSneakRowProblem() {
+		if (program.tasks.isEmpty())
+			return "自检前提不成立：烟雾程序里没有任务";
+		// ④ 常量自洽（先算账，控件建不建得出来是后面的事）
+		int span = USE_COORD_W + 2 + USE_SNEAK_W + 2 + FACE_W;
+		if (span != FIELD_W)
+			return "「使用」三格加起来不等于 FIELD_W（" + USE_COORD_W + "+2+" + USE_SNEAK_W + "+2+" + FACE_W
+				+ "=" + span + " ≠ " + FIELD_W + "）";
+		if (USE_FACE_X + FACE_W != FIELD_X + FIELD_W)
+			return "「使用」的朝向框右沿不对（" + (USE_FACE_X + FACE_W) + " ≠ " + (FIELD_X + FIELD_W) + "）";
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry probe = ArmProgramEntry.fresh(OperationType.USE);
+		task.entries.add(probe);
+		int index = task.entries.size() - 1;
+		try {
+			// ① 两种状态都是三格（潜行与否只改那格的值，不改布局）
+			for (boolean sneaking : new boolean[] { false, true }) {
+				probe.sneaking = sneaking;
+				editingProp = null;
+				editing = new EditTarget(false, 0, index, null);
+				init(minecraft, 427, 240);
+				String problem = rowBoxesProblem("使用（潜行=" + sneaking + "）", new int[][] {
+					{ FIELD_X, USE_COORD_W }, { USE_SNEAK_X, USE_SNEAK_W }, { USE_FACE_X, FACE_W } });
+				if (problem != null) {
+					editing = null;
+					editingProp = null;
+					return problem;
+				}
+				// ② 两个模式标签必须真的放得下（Create 的 Label 不裁剪、画超出盒子）
+				for (Component option : labels(ArmProgramEntry.SneakMode.values())) {
+					int w = font.width(option);
+					if (w > USE_SNEAK_W - 10) {
+						editing = null;
+						editingProp = null;
+						return "「使用」的潜行开关标签放不下（" + option.getString() + " " + w + " > "
+							+ (USE_SNEAK_W - 10) + "）—— 英文要用短名，见 USE_SNEAK_W 的说明";
+					}
+				}
+			}
+			// ③ 另外两个"要朝向"的操作照旧**两格**：三格只属于「使用」
+			for (OperationType op : new OperationType[] { OperationType.ATTACK, OperationType.MINE }) {
+				probe.op = op;
+				probe.sneaking = false;
+				probe.face = Direction.NORTH;
+				editingProp = null;
+				editing = new EditTarget(false, 0, index, null);
+				init(minecraft, 427, 240);
+				if (editorBoxes.size() != 2) {
+					editing = null;
+					editingProp = null;
+					return op + " 的第二行应当仍是 2 格（坐标 + 朝向），实际 " + editorBoxes.size()
+						+ " —— 三格只给「使用」（判据 op == USE 一处）";
+				}
+			}
+		} finally {
+			editing = null;
+			editingProp = null;
+			task.entries.remove(index);
+		}
+		return null;
+	}
+
+	/**
 	 * 自检 9：收发信号第二行那 **82px** 的算术（用户反馈第二轮：模式 30 + 2 + 数值 30 + 2 + 单位 18）。
 	 *
 	 * <p>为什么必须自动验：第二行可用宽度只有 {@code FIELD_W - 38 = 82}（左侧三个幽灵槽压到 GUI 111），
@@ -5821,6 +5991,22 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	};
 
 	/**
+	 * 「使用」的**潜行开关**那一组键（用户本轮口径：使用 / 潜行使用合成一个操作 + 一个开关）。
+	 *
+	 * <p>⚠️ {@code opt.use_sneak} 在这一组里是**必须存在**的：它是卡片第一行"潜行右键"那句话
+	 * （{@code ArmEntryText.base} 里手动查）。它**不再是枚举派生键**（枚举里没有 USE_SNEAK 了），
+	 * 所以它**不在** {@code dead[]} 里 —— 反过来，它必须留在这里一起守"两份语言文件都有"。
+	 * {@code opt.use} / {@code opt.normal} / {@code opt.sneak} 则是派生键（操作选择框 / 潜行开关框）。
+	 *
+	 * <p>反证：把 {@code opt.sneak} 从**任一份**语言文件里删掉 ⇒ 这条立刻报"缺键"（而界面上只会
+	 * 显示裸键名，编译与运行都不报错 —— 这正是要守它的理由）。
+	 */
+	private static final String[] USE_SNEAK_LANG_KEYS = {
+		"opt.use", "opt.use_sneak", "opt.normal", "opt.sneak",
+		"entry.sneak_mode", "hint.entry_sneak_mode"
+	};
+
+	/**
 	 * 自检 12：两个语言文件的**键集必须完全一致**，且本轮要用的键都得在（§7.16b 四 断言 12）。
 	 *
 	 * <p>为什么值得一条断言：`opt.<枚举小写>` 是**派生**出来的键，枚举一改名（`WAIT_SIGNAL → SIGNAL`）
@@ -5863,6 +6049,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			}
 			// 坐标框那一组（用户本轮：框里编辑相对坐标，世界坐标进悬停提示）
 			for (String key : COORD_LANG_KEYS) {
+				String full = prefix + key;
+				if (!zh.containsKey(full))
+					missing.add("zh:" + key);
+				if (!en.containsKey(full))
+					missing.add("en:" + key);
+			}
+			// 「使用」的潜行开关那一组（含卡片第一行那句「潜行右键」的 opt.use_sneak）
+			for (String key : USE_SNEAK_LANG_KEYS) {
 				String full = prefix + key;
 				if (!zh.containsKey(full))
 					missing.add("zh:" + key);
@@ -5914,6 +6108,13 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String goggleLoop = "create_sequenced_mechanical_arm.gui.arm.loop";
 			if (zh.containsKey(goggleLoop) || en.containsKey(goggleLoop))
 				return "残留死键 gui.arm.loop（护目镜那行「循环 x / y」已随任务级循环删除）";
+			// ★ 「潜行使用」并进「使用 + 潜行开关」之后，护目镜那条**按枚举名派生**的提示键
+			//   （{@code OperationSelectionOverlay} 的 {@code hud.op.<小写枚举名>}）再也产不出它
+			//   —— 留着它只会在下一次改名时变成"看起来还在"。
+			//   反证：把 hud.op.use_sneak 加回任意一份语言文件 ⇒ 这条立刻红。
+			String deadSneakHint = "create_sequenced_mechanical_arm.hud.op.use_sneak";
+			if (zh.containsKey(deadSneakHint) || en.containsKey(deadSneakHint))
+				return "残留死键 hud.op.use_sneak（「潜行使用」已并入「使用 + 潜行开关」，枚举里没有它了）";
 			return null;
 		} catch (Throwable t) {
 			return "读语言文件时异常 " + t;

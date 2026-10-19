@@ -60,8 +60,22 @@ public enum OperationType {
 	 * 不会因为这次拆分突然开始打实体。
 	 */
 	MINE(true),
+	/**
+	 * 使用（右键）：伸到目标那一格、对那一面做<b>一次</b>右键。
+	 *
+	 * <p>★ 「潜行右键」<b>不再是单独的操作</b>（用户本轮口径：合成「一个操作 + 一个开关」）：
+	 * 它是同一条 {@code USE} 加上条目上的 {@code ArmProgramEntry.sneaking}，判据只有
+	 * {@code ArmProgramEntry.isSneakUse()} 一处。这条合并**对行为零影响** —— 底层
+	 * {@code RightClickBridge.use(pos, face, sneak)} 本来就只差这一个布尔。
+	 *
+	 * <p>合并的理由是**列表自动收敛**：操作选择框走 {@code labels(OperationType.values())}、
+	 * 录入轮选走 {@link #recordable()}、脚本关键字由枚举名小写派生 —— 枚举少一项，这三处
+	 * 自动只剩一个「使用」，不需要任何"隐藏某项"的特例。
+	 *
+	 * <p>⚠️ 老卡 / 老脚本里的 {@code USE_SNEAK} 照旧能读：名字在 {@link #byName} 里解析成 {@code USE}，
+	 * "要潜行"那一半由 {@link #isLegacySneakUse} 补回（类型解析带不回一个布尔）。
+	 */
 	USE(true),
-	USE_SNEAK(true),
 	/**
 	 * 过滤：拿一份物品去比"幽灵过滤器物品"，按 Create 本体那套过滤规则判符合 / 不符合。
 	 *
@@ -168,7 +182,7 @@ public enum OperationType {
 	 * <p>用户实测反馈（第二轮）："右键、潜行右键、攻击这种操作是不需要 create 交互方块的，
 	 * 或者说是对任意方块都可以尝试"。所以只有真正需要跟方块**交换物品**的四类操作
 	 * （取出 / 放入 / 卸货 / 组装）才要求它是交互点 —— 它们的实现要拿 `IItemHandler`，
-	 * 而通用方块根本没有那个能力；攻击 / 挖掘 / 使用 / 潜行使用只是"伸过去对那个位置做一次动作"，
+	 * 而通用方块根本没有那个能力；攻击 / 挖掘 / 使用（正常与潜行都是它）只是"伸过去对那个位置做一次动作"，
 	 * 任何方块都能试（成败交给 {@code RightClickBridge} 判）。
 	 *
 	 * <p>这个判定在**两处**必须一致：录入时（能不能录进卡里）与运行时（伸不伸得过去）。
@@ -200,6 +214,28 @@ public enum OperationType {
 		return this == WAIT || this == SIGNAL;
 	}
 
+	/**
+	 * 被删掉的旧枚举名 {@code USE_SNEAK}（本轮并入「使用 + 潜行开关」）—— 迁移用的**唯一**字面量。
+	 *
+	 * <p>为什么它值得一个常量而不是散落的字面量：解析它需要**两处**协作 ——
+	 * {@link #byName} 把名字解析成 {@link #USE}、{@link #isLegacySneakUse} 把"要潜行"那一半交给
+	 * 读盘 / 脚本解析；两处各打一遍字符串，改一次名字就会只改到一处（决策 68/85）。
+	 */
+	public static final String LEGACY_USE_SNEAK = "USE_SNEAK";
+
+	/**
+	 * 这个名字是不是**老写法** {@code USE_SNEAK}（已并入「使用 + 潜行开关」）—— <b>只有一个判据</b>。
+	 *
+	 * <p>为什么必须有它：类型解析（{@link #byName}）只会回得来 {@link #USE}，<b>回不来一个布尔</b> ——
+	 * 于是"老卡 / 老脚本要潜行"这件事只能由调用方按**原始名字**再问一次。两个消费方
+	 * （{@code ArmProgramEntry.load} 与 {@code ScriptParser.parseEntry}）都问这一个方法，
+	 * 漏掉任何一处，那一侧的老数据就会从「潜行右键」静默变成「普通右键」（症状是"炒锅打不开"这类，
+	 * 而卡片上看不出任何异常）。
+	 */
+	public static boolean isLegacySneakUse(String name) {
+		return name != null && name.equalsIgnoreCase(LEGACY_USE_SNEAK);
+	}
+
 	/** 宽松解析：未知名字回落到 {@code fallback}，不让坏数据把存档读崩。 */
 	public static OperationType byName(String name, OperationType fallback) {
 		if (name != null) {
@@ -211,6 +247,12 @@ public enum OperationType {
 			// 老名照旧解析到 SIGNAL，而老卡没有 sigmode 键 ⇒ 模式 = RECEIVE ⇒ 行为一字不变（兼容清单 1/2）。
 			if (name.equalsIgnoreCase("WAIT_SIGNAL"))
 				return SIGNAL;
+			// ★ 旧名字 "USE_SNEAK"（本轮并入「使用 + 潜行开关」）：老卡 / 老脚本照旧能读，解析成 USE。
+			//   ⚠️ 但「要潜行」这一半**回不去**（本方法只返回类型）⇒ 调用方必须再问一次
+			//   {@link #isLegacySneakUse}（读盘 = ArmProgramEntry.load，脚本 = ScriptParser），
+			//   两处都问同一个方法，别名表与"潜行那一半"的判据才不会分叉。
+			if (name.equalsIgnoreCase(LEGACY_USE_SNEAK))
+				return USE;
 			for (OperationType type : values()) {
 				if (type.name()
 					.equalsIgnoreCase(name))

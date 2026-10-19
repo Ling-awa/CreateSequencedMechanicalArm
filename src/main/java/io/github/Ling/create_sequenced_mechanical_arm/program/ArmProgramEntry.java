@@ -18,7 +18,7 @@ import net.minecraft.world.item.ItemStack;
 /**
  * 操作表里的一条操作（PLAN.md §4.1 的 Entry）。
  *
- * <p>NBT 键刻意短（这是会被反复存读的结构）：{@code op/off/delay/wt/to/tunit/timeout/onok/
+ * <p>NBT 键刻意短（这是会被反复存读的结构）：{@code op/off/delay/sneak/wt/to/tunit/timeout/onok/
  * okt/tot/note/count/waitt/wunit/redpow/urep/uamt}。
  *
  * <p><b>§7.7 v2 的成败语义（用户定的）</b>：一条操作只有两个出口 —— <b>成功</b>与<b>超时</b>。
@@ -48,6 +48,57 @@ public class ArmProgramEntry {
 	public int delay;
 	/** 攻击 / 挖掘 / 使用 的交互面（配合方块与面共同决定动作）。 */
 	public Direction face = Direction.UP;
+
+	/**
+	 * 「使用」的<b>潜行开关</b>（用户本轮口径：把「使用」与「潜行使用」合成<b>一个操作 + 一个开关</b>）。
+	 *
+	 * <p><b>只对 {@link OperationType#USE} 有意义</b> —— 判据只有 {@link #isSneakUse()} 一处，
+	 * 别在任何地方再写 {@code op == USE && sneaking}（卡片文案、运行时、脚本写出 / 解析、
+	 * {@link #describe()} 全都问那一个方法）。其它操作上这个字段残留的 true 一律视为无意义
+	 * （{@link #load} 读完就归零，与"不需要坐标的条目 offset 恒为 0"同一条纪律）。
+	 *
+	 * <p><b>它落到世界里是什么</b>：{@code RightClickBridge.use(pos, face, sneak)} 里
+	 * {@code player.setShiftKeyDown(sneak)} —— 也就是"这次右键是潜行右键"。这条合并**对行为零影响**：
+	 * 底层本来就只差这一个布尔（改造前运行时写的是 {@code entry.op == USE_SNEAK}）。
+	 *
+	 * <p>NBT 键 {@code sneak}，<b>false（默认）不写</b> —— 与 {@code sigmode} / {@code cmode} /
+	 * {@code range} 同一手法：只含"正常右键"的老卡存取前后 NBT 逐字节不变。
+	 */
+	public boolean sneaking;
+
+	/**
+	 * <b>这一条是不是「潜行右键」</b> —— 唯一的判据。
+	 *
+	 * <p>为什么必须收成一个方法：这条判据的消费方有四处（卡片第一行的文案、运行时那个 {@code sneak}
+	 * 实参、脚本的写出与解析、{@link #describe()} 的调试摘要）。各写一个
+	 * {@code op == USE && sneaking} 的话，"卡片写着潜行右键、实际按普通右键跑"这种分裂
+	 * 只有等某个交互打不开才会被发现。
+	 *
+	 * <p>⚠️ {@code op == USE} 这一半不是多余的：{@code sneaking} 只对「使用」有意义，
+	 * 别的操作上那个字段是残留值（见字段说明）。
+	 */
+	public boolean isSneakUse() {
+		return op == OperationType.USE && sneaking;
+	}
+
+	/**
+	 * 「潜行开关」在编辑器那个二选一框里的两项（正常 / 潜行）。
+	 *
+	 * <p>★ 它<b>只服务界面</b>：模型的字段仍是 {@link #sneaking} 那个布尔，
+	 * 这里枚举的 {@code ordinal} 就是选择框的下标（{@code NORMAL} 在前 = 默认项，
+	 * 与 {@link CountMode} 同一惯例）。<b>不要</b>把它变成第二个字段 —— 那就又出现两个真相了。
+	 *
+	 * <p>选项名走 {@code labels(...)} 的 {@code opt.<小写>} 派生（{@code opt.normal} / {@code opt.sneak}），
+	 * 与别的选择框同一惯例；两个名字都必须真的塞进 {@code 40 - 10 = 30}（Create 的 {@code Label}
+	 * 不裁剪、画超出盒子），所以英文用的是短名 —— 数字见 {@code ArmProgramScreen} 的
+	 * {@code USE_SNEAK_W} 说明与 {@code useSneakRowProblem()} 的实测断言。
+	 */
+	public enum SneakMode {
+		/** 正常右键（默认）。 */
+		NORMAL,
+		/** 潜行右键（= {@code setShiftKeyDown(true)}）。 */
+		SNEAK
+	}
 
 	/**
 	 * 失败出口（{@code -1} = 失败就**一直重试**，默认）。与"时限"合成一个属性后，
@@ -647,6 +698,10 @@ public class ArmProgramEntry {
 		tag.put("off", NbtUtils.writeBlockPos(offset));
 		tag.putInt("delay", delay);
 		tag.putString("face", face.getName());
+		// 「使用」的潜行开关：**false（默认）不写这个键** —— 与 sigmode / cmode / range 同一手法：
+		// 只含"正常右键"的老卡存取前后 NBT 逐字节不变（相容性清单：不许静默扰动老数据）。
+		if (sneaking)
+			tag.putBoolean("sneak", true);
 		tag.putInt("to", failAmount);
 		tag.putString("tunit", failUnit.name());
 		tag.putString("onok", onSuccess.name());
@@ -699,6 +754,10 @@ public class ArmProgramEntry {
 	public static ArmProgramEntry load(CompoundTag tag, HolderLookup.Provider registries) {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = OperationType.byName(tag.getString("op"), OperationType.TAKE);
+		// ★ 老卡迁移：「潜行使用」已并入「使用 + 潜行开关」—— byName 把旧名字解析成 USE，
+		//   但"要潜行"这一半带不回来（它只返回类型）⇒ 按**原始名字**再问一次
+		//   （判据 isLegacySneakUse 只此一处）。缺键（老卡 / 没设过）= false。
+		entry.sneaking = OperationType.isLegacySneakUse(tag.getString("op")) || tag.getBoolean("sneak");
 		entry.offset = NBTHelper.readBlockPos(tag, "off");
 		entry.delay = Math.max(0, tag.getInt("delay"));
 		Direction parsedFace = Direction.byName(tag.getString("face"));
@@ -771,6 +830,11 @@ public class ArmProgramEntry {
 		//   要看它是手持还是容器，容器模式的坐标是**数据参数**，一个字都不能动。
 		if (!entry.needsTarget())
 			entry.offset = BlockPos.ZERO;
+		// ★ 自愈：**潜行开关只对「使用」有意义**（判据 isSneakUse）⇒ 别的操作上残留的 true 归 false。
+		//   与上面 offset 自愈同一条纪律：写出侧（save / ScriptDecompiler）根本不为它们写这个键，
+		//   留着它就等于"读一次变一次"（模型里出现一个永远存不下来、也永远跑不到的状态）。
+		if (!entry.isSneakUse())
+			entry.sneaking = false;
 
 		// ——— v1 → v2 迁移（§7.7 语义改版）———
 		// v1 有 force/forceTimeout（"重试到限时"）与 onFail（"立刻失败时怎么办"）两个分支。
@@ -837,6 +901,10 @@ public class ArmProgramEntry {
 		if (delay > 0)
 			sb.append(" delay=")
 				.append(delay);
+		// 潜行开关（只有「使用」有）：与下面 shift= 同一手法 —— **非默认（= 真的潜行）才报**，
+		// 否则每一条正常右键都拖一段 noise。判据只问 isSneakUse()（= USE 且 sneaking）。
+		if (isSneakUse())
+			sb.append(" sneak");
 		if (op == OperationType.WAIT)
 			sb.append(" wait=")
 				.append(waitAmount)

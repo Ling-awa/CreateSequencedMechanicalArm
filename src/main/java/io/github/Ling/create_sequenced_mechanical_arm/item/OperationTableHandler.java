@@ -383,21 +383,24 @@ public class OperationTableHandler {
 	}
 
 	/**
-	 * 「使用 / 潜行使用」可以对着**空气**录入（用户第二十二轮："使用也不一定目的地必须有方块，
+	 * 「使用」可以对着**空气**录入（用户第二十二轮："使用也不一定目的地必须有方块，
 	 * 使用也可以是放置方块"）：把方块放进那一格，或者用掉手上的物品（`Item#use`）。
+	 *
+	 * <p>「潜行使用」已经并进这一条（同一条操作 + 一个潜行开关，见 {@code ArmProgramEntry.isSneakUse()}），
+	 * 所以这里只剩一个判据。
 	 *
 	 * <p>其它操作不行：取出/放入/卸货/组装要跟方块交换物品，攻击对着空气没有意义 ——
 	 * 它们指空气时只提示"要对着方块"。
 	 */
 	private static boolean allowsAirTarget() {
-		return currentOp() == OperationType.USE || currentOp() == OperationType.USE_SNEAK;
+		return currentOp() == OperationType.USE;
 	}
 
 	/**
 	 * 录一条到"当前任务"。
 	 *
-	 * <p><b>只有</b>需要跟方块交换物品的四类操作才要求目标是 Create 交互点；攻击 / 使用 / 潜行使用
-	 * 对**任意方块**都能试（用户第二轮反馈："对任意方块都可以尝试而不需要是 create 交互方块"）。
+	 * <p><b>只有</b>需要跟方块交换物品的四类操作才要求目标是 Create 交互点；攻击 / 使用
+	 * （含潜行右键 —— 那是同一条操作的一个开关）对**任意方块**都能试（用户第二轮反馈："对任意方块都可以尝试而不需要是 create 交互方块"）。
 	 * 这个判定与运行时用的是同一个 {@link OperationType#needsInteractionPoint()}，免得两处各写一份。
 	 *
 	 * <p>★ <b>没设原点时不发录制包</b>（§19.7）：操作里写的全是相对坐标，没有原点就没有相对坐标。

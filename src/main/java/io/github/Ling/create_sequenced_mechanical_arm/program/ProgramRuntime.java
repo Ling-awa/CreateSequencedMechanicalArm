@@ -897,7 +897,7 @@ public class ProgramRuntime {
 	 * 的语义在<b>手臂没动</b>的情况下就生效。
 	 *
 	 * <p><b>只有需要交换物品的四个操作</b>（{@link OperationType#needsInteractionPoint()}）才要求目标是
-	 * Create 交互点；攻击 / 使用 / 潜行使用<b>对任意方块都能试</b>（用户第二轮反馈），
+	 * Create 交互点；攻击 / 使用<b>对任意方块都能试</b>（用户第二轮反馈；潜行右键就是「使用」加一个开关），
 	 * 这里只要求那个位置确实有方块 —— 成败交给 {@code RightClickBridge} 判（它本来就能对任意坐标干活）。
 	 */
 	@Nullable
@@ -1151,7 +1151,7 @@ public class ProgramRuntime {
 			case DEPLOY -> deploy(arm, task, entry);
 			case ATTACK -> attack(arm, task, entry);
 			case MINE -> mine(arm, task, entry);
-			case USE, USE_SNEAK -> use(arm, task, entry);
+			case USE -> use(arm, task, entry);
 			case FILTER -> filter(arm, task, entry);
 			case WAIT -> {
 				timer = entry.waitTicks();
@@ -1730,11 +1730,23 @@ public class ProgramRuntime {
 		}
 	}
 
-	/** 右键：一次调用 = 一次右键。决策上左右键无法客观判定成败，因此只要没被取消就算完成。 */
+	/**
+	 * 右键：一次调用 = 一次右键。<b>潜行不潜行只差一个布尔</b>（用户本轮口径：一个操作 + 一个开关）。
+	 *
+	 * <p>决策上右键无法客观判定成败，因此只要没被取消就算完成。
+	 *
+	 * @see ArmProgramEntry#isSneakUse() 潜行开关的唯一判据（卡片文案 / 脚本 / 这里共用）
+	 */
 	private void use(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		BlockPos target = arm.getBlockPos()
 			.offset(offsetOf(arm, entry));
-		boolean sneak = entry.op == OperationType.USE_SNEAK;
+		// ★ 潜行与否问**条目**（isSneakUse = USE 且 sneaking），不是问操作类型：
+		//   「潜行使用」这个操作已经删掉了，运行时这里只负责把这个布尔传下去。
+		//   ⚠️ 反证放在**模型层**（这一行本身没有可观测的副作用，自检只能证明那个布尔是对的）：
+		//   checkSneakUseMerge 的「老写法潜行 / 两种写法同一模型 / 普通与潜行只差这一个布尔」三条
+		//   钉住 isSneakUse() 的值，ArmEntryText.selfCheck 钉住卡片上那句话 —— 两者合起来才是
+		//   "卡片说潜行、跑起来也潜行"。把这里改成恒 false 只有实机才能看出来（待游戏内验证）。
+		boolean sneak = entry.isSneakUse();
 		RightClickBridge.Result result = arm.rightClick.use(target, entry.face, sneak);
 		switch (result) {
 			// 右键**不幂等**（拉杆会被反复拨、按钮会被反复按），所以硬失败也只能走出口，不能重试

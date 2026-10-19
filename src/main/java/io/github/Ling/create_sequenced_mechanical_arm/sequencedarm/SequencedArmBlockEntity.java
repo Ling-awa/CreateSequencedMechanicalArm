@@ -485,7 +485,7 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	}
 
 	/**
-	 * 带交互面的版本：只有"对任意方块"的操作（攻击 / 使用 / 潜行使用）才用得上它 ——
+	 * 带交互面的版本：只有"对任意方块"的操作（攻击 / 使用，含潜行右键那个开关）才用得上它 ——
 	 * 那些操作的爪子要停在玩家点的那一面外侧，而不是 Create 交互点自己算好的取物位。
 	 *
 	 * @param face 玩家录下来的点击面；是 Create 交互点时忽略（交互点自己知道从哪侧接）

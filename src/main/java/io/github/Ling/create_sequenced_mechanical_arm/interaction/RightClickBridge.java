@@ -229,7 +229,7 @@ public class RightClickBridge {
 		breakingProgress = 0;
 	}
 
-	// ————————————————————————— 右键（USE / USE_SNEAK） —————————————————————————
+	// ————— 右键（USE：正常 / 潜行由 ArmProgramEntry.isSneakUse() 决定，这里只管那个布尔） —————
 
 	public Result use(BlockPos clickedPos, Direction face, boolean sneak) {
 		if (!(arm.getLevel() instanceof ServerLevel level))
