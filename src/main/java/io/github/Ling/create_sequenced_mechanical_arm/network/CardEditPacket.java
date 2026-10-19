@@ -151,8 +151,8 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		program.editorTask = index;
 		ArmProgramTask task = program.tasks.get(index);
 
-		// 走 fresh(op)：个数与模式都取该操作的默认值（**取出默认「等于 1 个」**；字段初始值是
-		// "小于等于"，直接 new 会得到与口径不符的一条，见 ArmProgramEntry.fresh）。
+		// 走 fresh(op)：个数取该操作的默认值（取出 1 / 放入 64 / 收存 64），模式固定「小于等于」；
+		// 直接 new + 改 op 会得到一条个数是字段初始值 1 的「放入」（见 ArmProgramEntry.fresh）。
 		ArmProgramEntry entry = ArmProgramEntry.fresh(packet.op());
 		// ★ 条目坐标**一律相对执行它的那条臂**（PLAN.md §19.7），所以录制时用**卡上的原点**把世界位置
 		// 换算成偏移：`offset = 世界位置 − origin`。注意 origin 在这里是**纯录制参考点**，

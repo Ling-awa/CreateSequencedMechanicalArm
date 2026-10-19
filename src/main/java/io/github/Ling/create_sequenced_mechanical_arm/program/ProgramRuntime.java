@@ -1137,6 +1137,8 @@ public class ProgramRuntime {
 		switch (entry.op) {
 			case TAKE -> take(arm, task, entry);
 			case DEPOSIT -> deposit(arm, task, entry);
+			// 收存：把手持物品挪进溢出库存（无动作、无需坐标，见 stash 的判定链）
+			case STASH -> stash(arm, task, entry);
 			case UNLOAD -> unload(arm, task, entry);
 			case DEPLOY -> deploy(arm, task, entry);
 			case ATTACK -> attack(arm, task, entry);
@@ -1367,6 +1369,65 @@ public class ProgramRuntime {
 			handleFailure(arm, task, entry, "目标放不下 " + amount + " 个（只进去了 " + inserted + " 个）");
 			return;
 		}
+		succeed(arm, task, entry);
+	}
+
+	/**
+	 * 收存（用户口径）：把**手上那一摞**挪进臂自己的溢出库存 —— <b>无世界动作、不移动手臂、不读坐标</b>。
+	 *
+	 * <p>判定链（「等于 / 小于等于」的判据都只有 {@link ArmProgramEntry#countIsExact()} 一处）：
+	 * <ol>
+	 *   <li>手上是空的 ⇒ 失败（与「放入」同一句「手上没有物品」）；</li>
+	 *   <li>这次搬几个：小于等于 = {@code min(手上, count)}；等于 = 必须手上够 {@code count} 个，
+	 *       不够就失败（**一个都不搬**）；</li>
+	 *   <li><b>等于模式先模拟</b>：{@code insertIntoOverflow(moving, true)} 还有剩 ⇒ 失败
+	 *       （**不许先塞一部分** —— 那会让「等于 N 个」退化成「塞了多少算多少」）；</li>
+	 *   <li>真塞：{@code insertIntoOverflow(moving, false)}，{@code moved = amount − 剩余}；</li>
+	 *   <li>小于等于：{@code moved == 0} ⇒ 失败「溢出库存已满」；{@code moved > 0} ⇒ 成功
+	 *       （搬几个算几个，与取出 / 放入的 ATMOST 同一条语义）；</li>
+	 *   <li>手上扣掉 {@code moved}，扣空了就 {@code EMPTY}（与「放入」同一写法：别丢物品）。</li>
+	 * </ol>
+	 *
+	 * <p>⚠️ 必须走 {@code insertIntoOverflow}，**不能**用 {@code SequencedArmItemHandler.insert(...)}：
+	 * 后者会**先补手持格**，而这次要搬的正是手上那一摞（同种）⇒ 又并回手上，等于什么都没搬。
+	 * <p>⚠️ handler 一律从 {@link SequencedArmBlockEntity#itemHandler()} 取（懒建单例）：
+	 * 自己 {@code new} 一个也能用，但那份对象不会替臂做别的事，日后加状态就会分叉。
+	 *
+	 * <p>失败一律走 {@link #handleFailure}（「收存」有重试窗口：溢出满了 = 「还没到时候」，
+	 * 等卸货 / 等手上那一摞被别的条目换掉，与取出 / 放入同一条失败语义）。
+	 */
+	private void stash(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
+		ItemStack held = arm.getHeldItem();
+		if (held.isEmpty()) {
+			handleFailure(arm, task, entry, "手上没有物品");
+			return;
+		}
+		int amount;
+		if (entry.countIsExact()) {
+			if (held.getCount() < entry.count) {
+				handleFailure(arm, task, entry, "数量不足（需要 " + entry.count + " 个）");
+				return;
+			}
+			amount = entry.count;
+			// ★ 等于模式先模拟：放不下就整批不搬（否则就是把一摞拆成两处的一半）
+			ItemStack probeLeft = arm.itemHandler()
+				.insertIntoOverflow(held.copyWithCount(amount), true);
+			if (probeLeft.getCount() > 0) {
+				handleFailure(arm, task, entry, "溢出库存放不下 " + amount + " 个");
+				return;
+			}
+		} else {
+			amount = Math.min(held.getCount(), entry.count);
+		}
+		ItemStack remainder = arm.itemHandler()
+			.insertIntoOverflow(held.copyWithCount(amount), false);
+		int moved = amount - remainder.getCount();
+		if (moved <= 0) {
+			handleFailure(arm, task, entry, "溢出库存已满");
+			return;
+		}
+		int left = held.getCount() - moved;
+		arm.setHeldItem(left <= 0 ? ItemStack.EMPTY : held.copyWithCount(left));
 		succeed(arm, task, entry);
 	}
 

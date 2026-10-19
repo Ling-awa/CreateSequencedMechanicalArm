@@ -77,6 +77,7 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.contents.TranslatableContents;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -206,6 +207,8 @@ public class SequencedArmSelfTest {
 		checkDeployPrecheckScansAllSlots(server);
 		checkRetractBeforeNextMove(server);
 		checkCountMode(server);
+		// 「收存」：把手持物品挪进溢出库存（无动作、无需坐标），与「个数模式」同一套夹具
+		checkStash(server);
 		checkMovePoseTimeline();
 		checkClaimPositionPolicy();
 		checkEffects(server);
@@ -215,6 +218,8 @@ public class SequencedArmSelfTest {
 		checkTaskLimit();
 		checkNotesClip();
 		checkArmInventory(server);
+		// 漏斗 / 溜槽的外部输入只能进手持格（溢出格拒收），臂自己的路径照常
+		checkHeldOnlyInput(server);
 		checkFakePlayerDrain(server);
 		checkStructureTransform();
 		checkLegacyJumpShift();
@@ -1279,7 +1284,11 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
-	 * 「个数模式」自检（用户本轮口径：<b>等于 / 小于等于</b>，且这条属性**同时服务取出与放入**）。
+	 * 「个数模式」自检（用户本轮口径：<b>等于 / 小于等于</b>，且这条属性**同时服务取出 / 放入 / 收存**）。
+	 *
+	 * <p>默认模式**固定是「小于等于」**（用户 2026-10-19 二次确认：「还是改成默认小于等于吧，
+	 * 用到等于的情况更少」）：上一版「按操作给默认（取出 = 等于）」已经取消，所以下面的 NBT 段
+	 * 断的是"取出与放入**都不写键**、老卡的缺键**都读成小于等于**"。
 	 *
 	 * <p>语义（已与用户对过，别再改）：<b>等于</b> = 必须能完成恰好 N 个，不够就走「失败后」（默认重试）；
 	 * <b>小于等于</b> = 有多少动多少、上限 N，不足 N <b>不算失败</b>，也就是取出操作改造前的行为。
@@ -1290,41 +1299,48 @@ public class SequencedArmSelfTest {
 	 */
 	private static void checkCountMode(MinecraftServer server) {
 		// ——— ⑦ NBT 往返（不依赖世界，先跑：夹具坏了也不该把这条一起吞掉）———
-		// ⚠️ 默认模式**按操作给**（{@code defaultCountMode}：取出 = 等于、放入 = 小于等于）：
-		//   `save` 只在本操作默认模式下省略 `cmode`，`load` 缺键也回落到本操作默认模式。
-		// 反证：把 save() 里那句 `if (countMode != defaultCountMode(op))` 改成无条件写 ⇒「默认不写键」红；
-		//       把 load() 的 enumOf 兜底写死成 ATMOST ⇒「老抓取卡读成等于」红。
-		ArmProgramEntry exactEntry = ArmProgramEntry.fresh(OperationType.TAKE); // 取出默认就是「等于」
+		// ⚠️ 默认模式**固定是「小于等于」**（用户 2026-10-19 二次确认：「还是改成默认小于等于吧，
+		//   用到等于的情况更少」）：`save` 只在**非** ATMOST 时写 `cmode`，`load` 缺键也回落 ATMOST，
+		//   与操作无关（上一版「取出 = 等于」的按操作默认已取消）。
+		// 反证：把 save() 里那句 `if (countMode != CountMode.ATMOST)` 改成无条件写 ⇒「默认不写键」红；
+		//       把 load() 的 enumOf 兜底写死成 EXACT ⇒「老卡读成小于等于」红。
+		ArmProgramEntry exactEntry = ArmProgramEntry.fresh(OperationType.TAKE);
+		exactEntry.countMode = ArmProgramEntry.CountMode.EXACT;
 		exactEntry.count = 3;
 		CompoundTag exactTag = exactEntry.save(server.registryAccess());
 		ArmProgramEntry exactBack = ArmProgramEntry.load(exactTag.copy(), server.registryAccess());
 		boolean exactKept = exactBack.countIsExact() && exactBack.count == 3;
-		boolean takeDefaultNoKey = !exactTag.contains("cmode");
+		boolean exactWroteKey = exactTag.contains("cmode");
+		// 默认（小于等于）**不该**占 cmode 这个键 —— 取出与放入都一样（模式不再按操作区分）
+		ArmProgramEntry takeAtMostEntry = ArmProgramEntry.fresh(OperationType.TAKE);
+		takeAtMostEntry.count = 3;
+		CompoundTag takeAtMostTag = takeAtMostEntry.save(server.registryAccess());
 		ArmProgramEntry atMostEntry = ArmProgramEntry.fresh(OperationType.DEPOSIT);
 		atMostEntry.count = 3;
 		CompoundTag atMostTag = atMostEntry.save(server.registryAccess());
-		boolean keyAbsent = !atMostTag.contains("cmode") && !atMostEntry.countIsExact();
-		// 老卡：只有 count、没有 cmode 的**取出**条目 ⇒ 读成新默认「等于」（用户要的默认变了）
-		CompoundTag legacyTag = exactTag.copy();
-		legacyTag.remove("cmode");
+		boolean keyAbsent = !takeAtMostTag.contains("cmode") && !atMostTag.contains("cmode")
+			&& !takeAtMostEntry.countIsExact() && !atMostEntry.countIsExact();
+		// 老卡：只有 count、没有 cmode 的**取出**条目 ⇒ 读成「小于等于」（= 有多少拿多少，老行为）
+		CompoundTag legacyTag = takeAtMostTag.copy();
 		ArmProgramEntry legacyBack = ArmProgramEntry.load(legacyTag, server.registryAccess());
-		boolean legacyTakeExact = legacyBack.countIsExact() && legacyBack.count == 3;
-		// 老卡：没有 cmode 的**放入**条目 ⇒ 读成「小于等于」（= 有多少放多少）
+		boolean legacyTakeAtMost = !legacyBack.countIsExact() && legacyBack.count == 3;
+		// 老卡：没有 cmode 的**放入**条目 ⇒ 同样读成「小于等于」（= 有多少放多少）
 		CompoundTag legacyDepositTag = new CompoundTag();
 		legacyDepositTag.putString("op", OperationType.DEPOSIT.name());
 		legacyDepositTag.putInt("count", 3);
 		ArmProgramEntry legacyDepositBack = ArmProgramEntry.load(legacyDepositTag, server.registryAccess());
 		boolean legacyDepositAtMost = !legacyDepositBack.countIsExact() && legacyDepositBack.count == 3;
 
-		// ——— ⑧ 「个数」的默认值**按操作给**（用户口径：放入默认 64 = 整摞 = 改造前行为）———
+		// ——— ⑧ 「个数」的默认值**按操作给**（用户口径：放入 / 收存默认 64 = 整摞）———
 		// 反证：
-		//   ① 把 defaultCount() 里的 DEPOSIT 分支删掉（放入也回落到 1）⇒「放入默认是 64」红；
+		//   ① 把 defaultCount() 里的 DEPOSIT / STASH 分支删掉（都回落到 1）⇒「放入 / 收存默认是 64」红；
 		//   ② 把 load() 里那条"放入 + 没写过 cmode + count==1 ⇒ 64"的迁移删掉 ⇒「老卡的放入迁成整摞」红；
 		//   ③ 把那句迁移的 `!tag.contains("cmode")` 去掉 ⇒「等于 1 的放入没被迁移」红（玩家真选的 1 被改掉）。
-		boolean depositDefault = ArmProgramEntry.defaultCount(OperationType.DEPOSIT) == 64
+		boolean countDefaults = ArmProgramEntry.defaultCount(OperationType.DEPOSIT) == 64
+			&& ArmProgramEntry.defaultCount(OperationType.STASH) == 64
 			&& ArmProgramEntry.defaultCount(OperationType.TAKE) == 1;
 		// 默认的放入**不该**算成"玩家改过"（countIsSet 要跟 defaultCount 比，不是跟 1 比）。
-		// ⚠️ 用户 2026-10-19 改了显示口径：个数属于**填写的内容**，「取出 / 放入」的第一行**永远**写出
+		// ⚠️ 用户 2026-10-19 改了显示口径：个数属于**填写的内容**，「取出 / 放入 / 收存」的第一行**永远**写出
 		//    「最多 N 个 / 等于 N 个」（`ArmEntryText.base`，见 `ArmEntryText.selfCheck` 里那条断言）——
 		//    所以这里钉的**不再是**"卡片上不显示"，而是"默认值不算非默认"（`describe()` 因此不拖 noise）。
 		ArmProgramEntry freshDeposit = new ArmProgramEntry();
@@ -1343,13 +1359,13 @@ public class SequencedArmSelfTest {
 		ArmProgramEntry exactOneBack = ArmProgramEntry.load(exactOneTag, server.registryAccess());
 		boolean exactOneKept = exactOneBack.count == 1 && exactOneBack.countIsExact();
 
-		LOGGER.info("[selftest] 个数模式 NBT: 等于模式往返={} 取出的默认等于不写键={} 放入的默认小于等于不写键={} "
-			+ "老卡·取出读成等于={} 老卡·放入读成小于等于={}", exactKept, takeDefaultNoKey, keyAbsent, legacyTakeExact,
-			legacyDepositAtMost);
-		LOGGER.info("[selftest] 个数默认值: 放入默认=64 且 取出默认=1={} 默认值不算非默认={} 老卡的放入迁成整摞={} 等于1的放入没被迁移={}",
-			depositDefault, depositDefaultQuiet, legacyDepositMigrated, exactOneKept);
-		if (!depositDefault)
-			LOGGER.error("[selftest] 「个数」的默认值不是「取出 1 / 放入 64」—— 默认的放入会从整摞变成一次 1 个");
+		LOGGER.info("[selftest] 个数模式 NBT: 等于模式往返={} 非默认（等于）写了 cmode={} 默认（小于等于）不写键={} "
+			+ "老卡·取出读成小于等于={} 老卡·放入读成小于等于={}", exactKept, exactWroteKey, keyAbsent,
+			legacyTakeAtMost, legacyDepositAtMost);
+		LOGGER.info("[selftest] 个数默认值: 放入=64 且 收存=64 且 取出=1={} 默认值不算非默认={} 老卡的放入迁成整摞={} 等于1的放入没被迁移={}",
+			countDefaults, depositDefaultQuiet, legacyDepositMigrated, exactOneKept);
+		if (!countDefaults)
+			LOGGER.error("[selftest] 「个数」的默认值不是「取出 1 / 放入 64 / 收存 64」—— 默认的放入 / 收存会变成一次 1 个");
 		if (!depositDefaultQuiet)
 			LOGGER.error("[selftest] 默认的「放入」被算成了「玩家改过」（countIsSet 在拿 1 当基准，应该问 defaultCount）");
 		if (!legacyDepositMigrated)
@@ -1358,12 +1374,12 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 显式选了「放入·等于 1 个」的条目被迁移改成了 64（cmode 键的判据丢了）");
 		if (!exactKept)
 			LOGGER.error("[selftest] 个数模式「等于」过不了 NBT 往返（存了 EXACT、读回来是别的模式）");
-		if (!takeDefaultNoKey)
-			LOGGER.error("[selftest] 「取出」的默认模式（等于）被写进了 cmode —— 默认值不该占 NBT 键");
+		if (!exactWroteKey)
+			LOGGER.error("[selftest] 「等于」没有写进 cmode —— 非默认模式不写就丢语义（读回来会变成小于等于）");
 		if (!keyAbsent)
-			LOGGER.error("[selftest] 「放入」的默认模式（小于等于）把 cmode 键写进了 NBT —— 默认值不该占 NBT 键");
-		if (!legacyTakeExact)
-			LOGGER.error("[selftest] 没有 cmode 键的老「取出」卡没有读成「等于」—— 用户口径是「取出默认等于」");
+			LOGGER.error("[selftest] 默认模式（小于等于）把 cmode 键写进了 NBT —— 默认值不该占 NBT 键（取出 / 放入都一样）");
+		if (!legacyTakeAtMost)
+			LOGGER.error("[selftest] 没有 cmode 键的老「取出」卡没有读成「小于等于」（应当是「有多少拿多少」）");
 		if (!legacyDepositAtMost)
 			LOGGER.error("[selftest] 没有 cmode 键的老「放入」卡没有读成「小于等于」（应当是「有多少放多少」）");
 
@@ -4863,6 +4879,259 @@ public class SequencedArmSelfTest {
 	}
 
 	/**
+	 * <b>外部输入只能进手持格</b>（用户口径：「给臂的漏斗输入添加一个限制，通过臂只能把物品输入到臂的
+	 * 手持槽位，溢出槽位不能被安山 / 黄铜漏斗等方式输入」）。
+	 *
+	 * <p>{@link SequencedArmItemHandler} 就是暴露给漏斗 / 溜槽 / 管道的那个 {@code IItemHandler}
+	 * （槽 0 = 手持、槽 1..10 = 溢出），所以"能不能进来"只需在这里判：
+	 * <ul>
+	 *   <li>① {@code insertItem(1, 5×铁, false)} 必须**原样退回 5 个**、溢出库存一个都不多；</li>
+	 *   <li>② {@code insertItem(0, 5×铁, false)} 必须真的进手持（手持已有同种时并堆）；</li>
+	 *   <li>③ {@code isItemValid(1, 任意) == false}、{@code isItemValid(0, …) == true}
+	 *       —— 漏斗的**预检**就走这个（有的自动化只问它、有的直接 insert，两道门都要有）；</li>
+	 *   <li>④ <b>内部路径仍然能用</b>：{@code insertIntoOverflow(5×铁, false)} 真的进溢出 ——
+	 *       否则"臂自己也装不进溢出"会悄悄坏掉（拒收只管**外部**那两道门）；</li>
+	 *   <li>⑤ {@code simulate=true} 时 ①②④ 都**一个字节都不改状态</b>。</li>
+	 * </ul>
+	 *
+	 * <p>反证：把 {@code insertItem} 里那句 {@code if (slot != 0) return stack;} 删掉（回到按槽号塞溢出）
+	 * ⇒ ① 红；把 {@code isItemValid} 改回 {@code true} ⇒ ③ 红；把内部调用改成走 {@code insertItem(1, …)}
+	 * ⇒ ④ 红（外部那道门会把臂自己也挡住）；把 {@code insertHeld} 的 {@code !simulate} 判断去掉
+	 * ⇒ ⑤ 红（模拟一次就把东西放进了手持格）。
+	 *
+	 * <p>夹具用 {@link #freshArm}（与其它夹具同一套「造臂」辅助方法，不另造世界）。
+	 */
+	private static void checkHeldOnlyInput(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 62, 200, spawn.getZ() + 62);
+		BlockState oldArm = level.getBlockState(armPos);
+		boolean overflowRejected = false;
+		boolean heldAccepted = false;
+		boolean heldMerged = false;
+		boolean validitySplit = false;
+		boolean internalStillWorks = false;
+		boolean simulateClean = false;
+		String detail;
+		try {
+			level.getChunkAt(armPos);
+			SequencedArmBlockEntity arm = freshArm(level, armPos);
+			// 走 capability 拿 handler：这才是漏斗 / 溜槽真正看到的那个实例
+			IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, armPos, Direction.UP);
+			if (arm == null || handler == null) {
+				detail = arm == null ? "臂的方块实体没建出来" : "getCapability 返回 null";
+			} else {
+				ItemStack iron5 = new ItemStack(Items.IRON_INGOT, 5);
+				ItemStack stone = new ItemStack(Items.STONE);
+				arm.setHeldItem(ItemStack.EMPTY);
+				arm.getOverflow()
+					.clear();
+				// ① 溢出格拒收：返回值还是 5 个、溢出库存没变
+				ItemStack overflowLeft = handler.insertItem(1, iron5.copy(), false);
+				overflowRejected = overflowLeft.getCount() == 5 && arm.getOverflow()
+					.isEmpty();
+				// ③ 预检：溢出 false / 手持 true
+				validitySplit = !handler.isItemValid(1, stone) && handler.isItemValid(0, stone);
+				// ② 手持格收下（并堆）：先占位再补同一摞
+				handler.insertItem(0, iron5.copy(), false);
+				boolean firstIntoHand = arm.getHeldItem()
+					.getCount() == 5;
+				handler.insertItem(0, new ItemStack(Items.IRON_INGOT, 2), false);
+				heldMerged = firstIntoHand && arm.getHeldItem()
+					.getCount() == 7;
+				heldAccepted = !arm.getHeldItem()
+					.isEmpty();
+				// ④ 内部路径：臂自己往溢出里装（「取出」/「组装」/「收存」用的就是它）
+				ItemStack innerLeft = arm.itemHandler()
+					.insertIntoOverflow(new ItemStack(Items.STONE, 5), false);
+				internalStillWorks = innerLeft.isEmpty() && overflowItems(arm) == 5;
+				// ⑤ 模拟不改状态：把三条都再模拟一次，逐项比对前后的手持 / 溢出
+				arm.setHeldItem(ItemStack.EMPTY);
+				arm.getOverflow()
+					.clear();
+				ItemStack simOverflow = handler.insertItem(1, iron5.copy(), true);
+				ItemStack simHeld = handler.insertItem(0, iron5.copy(), true);
+				ItemStack simInner = arm.itemHandler()
+					.insertIntoOverflow(new ItemStack(Items.STONE, 5), true);
+				simulateClean = simOverflow.getCount() == 5 && simHeld.isEmpty() && simInner.isEmpty()
+					&& arm.getHeldItem()
+						.isEmpty()
+					&& arm.getOverflow()
+						.isEmpty();
+				detail = "溢出退回=" + overflowLeft.getCount() + " 手持=" + arm.getHeldItem()
+					.getCount() + " 内部溢出=" + overflowItems(arm);
+			}
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 漏斗输入只进手持格: 溢出拒收={} 手持收下={} 手持并堆={} 预检分流={} 内部路径照常={} "
+			+ "模拟不改状态={} （{}）", overflowRejected, heldAccepted, heldMerged, validitySplit, internalStillWorks,
+			simulateClean, detail);
+		if (!overflowRejected)
+			LOGGER.error("[selftest] 外部插入**写进了溢出格** —— 漏斗 / 溜槽能绕过手臂直接塞满溢出库存（{}）", detail);
+		if (!heldAccepted || !heldMerged)
+			LOGGER.error("[selftest] 外部插入进不了手持格 / 同类不并堆（heldAccepted={} merged={}）—— "
+				+ "漏斗连正常的补料都做不到了", heldAccepted, heldMerged);
+		if (!validitySplit)
+			LOGGER.error("[selftest] isItemValid 没有按槽分流（溢出 true / 手持 false）—— 漏斗的预检会往溢出格里塞");
+		if (!internalStillWorks)
+			LOGGER.error("[selftest] **臂自己**也装不进溢出了 —— 拒收只管外部两道门，"
+				+ "insertIntoOverflow 必须照常可用（「取出」「组装」「收存」全都靠它）：{}", detail);
+		if (!simulateClean)
+			LOGGER.error("[selftest] simulate=true 改了状态 —— 漏斗模拟一次就把东西放进了臂里：{}", detail);
+	}
+
+	/** 溢出库存里现在一共有几个物品（收存 / 外部输入的断言都数它）。 */
+	private static int overflowItems(SequencedArmBlockEntity arm) {
+		int total = 0;
+		for (ItemStack stack : arm.getOverflow())
+			total += stack.getCount();
+		return total;
+	}
+
+	/**
+	 * 「收存」自检（用户口径：把手持物品收入臂的**溢出库存**，无动作、无需坐标）。
+	 *
+	 * <p>夹具与 {@link #checkCountMode} 同一套"造臂 + 真 {@code runtime.tick} ➜ 真结果"的手法
+	 * （{@link #runStashEntry}），每拍把 {@code chasedPointProgress} 当作"已到位"。
+	 *
+	 * <p>六条（前五条是行为、第六条是卡片文案）：
+	 * <ol>
+	 *   <li>手上 5 个、{@code count=3} **小于等于** ⇒ 溢出 +3、手上剩 2；</li>
+	 *   <li>手上 2 个、{@code count=3} **等于** ⇒ 一个都不搬、走失败（「数量不足」），溢出 / 手上都不变；</li>
+	 *   <li>手上 5 个、{@code count=3} **等于** ⇒ 溢出 +3、手上剩 2；</li>
+	 *   <li>溢出塞满（10 格全是别的物品）⇒ {@code count=3} 小于等于失败（「溢出库存已满」）、手上不变；</li>
+	 *   <li>空手 ⇒ 失败（「手上没有物品」）；</li>
+	 *   <li>卡片第一行是「收存 最多 64 个」—— 服务端读不到译文，断的是**送给客户端渲染的键与参数**。</li>
+	 * </ol>
+	 *
+	 * <p>反证：把 {@code stash} 里的 {@code insertIntoOverflow} 换成 {@code insert(...)} ⇒ ① 红
+	 * （那一摞并回手持、溢出还是 0）；把"等于模式先模拟"删掉 ⇒ 溢出塞满那条会用部分成功冒充成功；
+	 * 把"扣手上"删掉 ⇒ 物品凭空多一份；把 {@code hasCount()} 里的 STASH 删掉 ⇒ ⑥ 红。
+	 */
+	private static void checkStash(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos armPos = new BlockPos(spawn.getX() + 96, 200, spawn.getZ() + 96);
+		BlockState oldArm = level.getBlockState(armPos);
+		boolean atMostMoves = false;
+		boolean exactShortFails = false;
+		boolean exactMoves = false;
+		boolean fullFails = false;
+		boolean emptyHandFails = false;
+		boolean cardAtMost64 = false;
+		String detail;
+		try {
+			level.getChunkAt(armPos);
+			SequencedArmBlockEntity arm = freshArm(level, armPos);
+			if (arm == null) {
+				detail = "臂的方块实体没建出来";
+			} else {
+				arm.setSpeed(32); // 转速为 0 时解释器整 tick 跳过（与 checkCountMode 同一条纪律）
+				// ① 手上 5 个、count=3 小于等于 ⇒ 溢出 +3、手上剩 2
+				clearArm(arm);
+				arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 5));
+				runStashEntry(arm, 3, ArmProgramEntry.CountMode.ATMOST, () -> arm.getHeldItem()
+					.getCount() != 5, 80);
+				atMostMoves = overflowItems(arm) == 3 && arm.getHeldItem()
+					.getCount() == 2;
+				// ② 手上 2 个、count=3 等于 ⇒ 一个都不搬、走失败
+				clearArm(arm);
+				arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 2));
+				runStashEntry(arm, 3, ArmProgramEntry.CountMode.EXACT, () -> false, 80);
+				String shortFailure = arm.runtime.getLastFailure();
+				exactShortFails = overflowItems(arm) == 0 && arm.getHeldItem()
+					.getCount() == 2 && shortFailure != null && shortFailure.contains("数量不足");
+				// ③ 手上 5 个、count=3 等于 ⇒ 溢出 +3、手上剩 2
+				clearArm(arm);
+				arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 5));
+				runStashEntry(arm, 3, ArmProgramEntry.CountMode.EXACT, () -> arm.getHeldItem()
+					.getCount() != 5, 80);
+				exactMoves = overflowItems(arm) == 3 && arm.getHeldItem()
+					.getCount() == 2;
+				// ④ 溢出塞满（10 格各一摞**别的**物品）⇒ count=3 小于等也应该失败、手上不变
+				//   ⚠️ 必须用**别的物品**把 10 格占满：同种物品会先并堆，那样不算"满"。
+				clearArm(arm);
+				for (int i = 0; i < SequencedArmBlockEntity.MAX_OVERFLOW; i++)
+					arm.getOverflow()
+						.add(new ItemStack(Items.STONE, 64));
+				arm.setHeldItem(new ItemStack(Items.IRON_INGOT, 5));
+				runStashEntry(arm, 3, ArmProgramEntry.CountMode.ATMOST, () -> false, 80);
+				String fullFailure = arm.runtime.getLastFailure();
+				fullFails = arm.getHeldItem()
+					.getCount() == 5 && fullFailure != null && fullFailure.contains("溢出库存已满");
+				// ⑤ 空手 ⇒ 失败
+				clearArm(arm);
+				runStashEntry(arm, 3, ArmProgramEntry.CountMode.ATMOST, () -> false, 80);
+				String emptyFailure = arm.runtime.getLastFailure();
+				emptyHandFails = overflowItems(arm) == 0 && emptyFailure != null && emptyFailure.contains("手上没有物品");
+				// ⑥ 卡片第一行「收存 最多 64 个」：服务端读不到客户端译文（那是 assets 资源），
+				//   所以断的是**送给客户端渲染的那两样东西**：键（chip.count_atmost ⇒ 客户端写「最多」）
+				//   + 参数（defaultCount(STASH) = 64）。两件合起来与"含「最多 64 个」"等价，且与语言无关。
+				Component stashCount = ArmEntryText.countText(ArmProgramEntry.fresh(OperationType.STASH));
+				if (stashCount.getContents() instanceof TranslatableContents translatable) {
+					Object[] args = translatable.getArgs();
+					cardAtMost64 = translatable.getKey()
+						.endsWith("chip.count_atmost") && args.length == 1
+						&& String.valueOf(args[0])
+							.equals(String.valueOf(ArmProgramEntry.defaultCount(OperationType.STASH)));
+				}
+				detail = "手上余=" + arm.getHeldItem()
+					.getCount() + " 溢出=" + overflowItems(arm) + " 失败原因=" + text(shortFailure) + " / "
+					+ text(fullFailure) + " / " + text(emptyFailure) + " 卡片=" + stashCount.getString();
+			}
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(armPos, oldArm);
+		}
+
+		LOGGER.info("[selftest] 收存: 小于等于按上限搬={} 等于·不够就失败={} 等于·够数搬够={} 溢出满就失败={} "
+			+ "空手失败={} 卡片「最多 64 个」={} （{}）", atMostMoves, exactShortFails, exactMoves, fullFails,
+			emptyHandFails, cardAtMost64, detail);
+		if (!atMostMoves)
+			LOGGER.error("[selftest] 「收存 · 小于等于」没有把 min(手上, count) 挪进溢出（手上 5、个数 3 ⇒ 溢出 3、手上 2）：{}",
+				detail);
+		if (!exactShortFails)
+			LOGGER.error("[selftest] 「收存 · 等于」在手上不足时动了东西（手上 2、个数 3 ⇒ 应当一个都不搬并走失败）：{}",
+				detail);
+		if (!exactMoves)
+			LOGGER.error("[selftest] 「收存 · 等于」没有恰好搬 3 个（手上 5 ⇒ 溢出 3、手上 2）：{}", detail);
+		if (!fullFails)
+			LOGGER.error("[selftest] 溢出塞满时「收存」没有失败（应当报「溢出库存已满」且手上不变）：{}", detail);
+		if (!emptyHandFails)
+			LOGGER.error("[selftest] 空手时「收存」没有失败（应当报「手上没有物品」）：{}", detail);
+		if (!cardAtMost64)
+			LOGGER.error("[selftest] 「收存」的卡片个数文案不是「最多 64 个」（键 / 参数不对）：{}", detail);
+	}
+
+	/**
+	 * 把一条「收存」条目跑到**第一次有结果**为止 —— 手法与 {@link #runCountEntry} 完全相同
+	 * （自检不跑运动学：每拍把 {@code chasedPointProgress} 当作"已到位"）。
+	 *
+	 * <p>⚠️ 收存**没有坐标**：条目 offset 保持 0（它是"不读坐标"的操作，夹具也必须是模型定义内的状态）。
+	 */
+	private static void runStashEntry(SequencedArmBlockEntity arm, int count, ArmProgramEntry.CountMode mode,
+		BooleanSupplier stop, int maxTicks) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "自检收存";
+		ArmProgramEntry entry = ArmProgramEntry.fresh(OperationType.STASH);
+		entry.count = count;
+		entry.countMode = mode;
+		task.entries.add(entry);
+		program.tasks.add(task);
+		arm.setProgram(program); // 换程序会 resetToStart（游标归零、错误清空、收回）
+		for (int i = 0; i < maxTicks && !stop.getAsBoolean(); i++) {
+			arm.chasedPointProgress = 1f;
+			arm.runtime.tick(arm);
+		}
+	}
+
+	/**
 	 * 假玩家背包里的东西必须收回来（第二十五轮审计发现的"物品黑洞"），且**按用户定的规则归位**：
 	 * <b>手持格空 → 掉落物进手持格；手持格有东西 → 进溢出</b>。
 	 *
@@ -7975,7 +8244,8 @@ public class SequencedArmSelfTest {
 		// ★ 个数模式也必须逐字段往返（用户本轮口径：等于 / 小于等于）。
 		//   加了字段却忘了写进文本的症状**是静默的**：脚本里"等于 3 个"读回来变成"最多 3 个"，
 		//   于是这条操作从"必须够数才动"退化成"有多少拿多少"—— 只有丢过物品才会发现。
-		//   反证：把 ScriptDecompiler 里 `if (entry.countIsExact())` 那一段删掉 ⇒ 语料「个数模式」红。
+		//   反证：把 ScriptDecompiler 里那段 `if (entry.countMode != CountMode.ATMOST)` 删掉
+		//   ⇒ 语料「个数模式」/「收存」反编译回来就丢了「等于」，这里报「个数模式变了」。
 		//   （只在**两侧都**有 count 参数的操作上比：其它操作的这个字段从不进文本，比它等于把定义判红。）
 		if (a.op.hasCount() && b.op.hasCount() && a.countMode != b.countMode)
 			return where + "个数模式变了：" + a.countMode + " → " + b.countMode;
@@ -8116,17 +8386,27 @@ public class SequencedArmSelfTest {
 			task 子任务
 			  throw     "没材料了"
 			""");
-		// 个数模式（用户口径：等于 / 小于等于，取出与放入共用）。三行各钉一种写法：
-		// ⚠️ 默认模式**按操作给**（{@code defaultCountMode}：**取出 = 等于、放入 = 小于等于**）：
-		// ① 取出 · 等于 + 非 1 个数 ⇒ 只写 `count=3`（等于已是取出的默认，模式键**省略**）；
-		// ② 放入 · 等于 + **个数 1** ⇒ 模式键必须写出来（`countmode=exact`）—— 这一行正是
+		// 个数模式（用户口径：等于 / 小于等于，取出与放入共用）。
+		// ⚠️ 默认模式**固定是「小于等于」**（用户 2026-10-19 二次确认），不再按操作给：
+		// ① 取出 · 小于等于（默认）+ 个数 3 ⇒ 只写 `count=3`（模式键**省略**）；
+		// ② 放入 · 等于 + 个数 1 ⇒ 模式键**必须**写出来（`countmode=exact`）—— 这一行正是
 		//    "非默认模式不写就丢语义"的反证：把 ScriptDecompiler 里那段 countmode 删掉 ⇒ 不变量①报「个数模式变了」；
-		// ③ 取出 · 小于等于 + 个数 5 ⇒ `countmode=atmost` **必须写**（它才是非默认那一态）。
+		// ③ 取出 · 等于 + 个数 5 ⇒ 同样必须写 `countmode=exact`（非默认那一态永远显式表达）。
+		//   反证：把反编译器的判据写成"只写 atmost"⇒ ②③ 立刻报「个数模式变了：EXACT → ATMOST」。
 		corpus.put("个数模式", """
 			task 主任务
 			  take 1 0 0 count=3
 			  deposit 0 0 2 count=1 countmode=exact
-			  take 0 0 -2 count=5 countmode=atmost
+			  take 0 0 -2 count=5 countmode=exact
+			""");
+		// 「收存」（新操作）：关键词自动是 `stash`（枚举名小写），`count=` / `countmode=` 复用既有解析。
+		// ① 省掉一切 ⇒ 默认（最多 64 个），规范形式里 `count=` 一个字都不写；
+		// ② 非默认的个数 + 等于 ⇒ 两个键都写。
+		// 反证：把 ScriptDecompiler 的 `case TAKE, DEPOSIT, STASH` 里的 STASH 删掉 ⇒ ② 报「个数变了」。
+		corpus.put("收存", """
+			task 主任务
+			  stash
+			  stash count=16 countmode=exact
 			""");
 		// 调用次数的两个端点（用户第四十轮：0 = 无限循环、上限 64）—— 这两个值进文本再出来必须一字不变
 		corpus.put("调用次数端点", """

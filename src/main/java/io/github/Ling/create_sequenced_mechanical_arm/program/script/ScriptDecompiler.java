@@ -127,7 +127,7 @@ public final class ScriptDecompiler {
 		OperationType op = entry.op;
 		// ★ 坐标**只有需要目标的操作才写**（判据是**条目级**的 needsTarget()：过滤的容器模式需要坐标
 		//   —— 那是"读哪个容器"的数据参数，必须永远写；手持模式不需要）。
-		//   不需要坐标的操作（等待 / 信号 / 调用 / 退出 / 抛错）**一个数都不写**：
+		//   不需要坐标的操作（等待 / 信号 / 调用 / 退出 / 抛错 / 收存）**一个数都不写**：
 		//   这里原来还有一支"offset 非零也写出来"的写法，那是老口径（那会儿"新建条目默认取你正看着
 		//   的方块"，于是每条都带着一串坐标）。用户第四十一轮正是被这个问住的 —— 脚本里
 		//   `call 任务` 后面跟着 `-3 0 -1`，而「调用」是控制类操作：既不移动、也没有目标，
@@ -193,20 +193,20 @@ public final class ScriptDecompiler {
 				.append(entry.face.getName()
 					.toLowerCase(Locale.ROOT));
 		switch (entry.op) {
-			case TAKE, DEPOSIT -> {
-				// 个数（取出 / 放入共用）：**本操作的默认值不写**（与 repeat=1 同一惯例）。
-				// ⚠️ 默认值按操作给：取出 1 / **放入 64**（= 整摞 = 改造前行为，见 defaultCount）。
+			case TAKE, DEPOSIT, STASH -> {
+				// 个数（取出 / 放入 / 收存共用）：**本操作的默认值不写**（与 repeat=1 同一惯例）。
+				// ⚠️ 默认值按操作给：取出 1 / **放入 64** / **收存 64**（= 整摞 = 改造前行为，见 defaultCount）。
 				//   所以判据必须问 defaultCount(op)，不能写死 `!= 1` —— 否则每条默认的放入
 				//   都会被强制写成 `count=64`，而省略 count 的放入读回来又是 64，往返依然一致
 				//   但文本里全是噪声；反过来若这里写死 1、解析侧默认 64，往返就会静默改数。
-				// ⚠️ 模式同样"只要偏离本操作的默认就必须写"（{@link ArmProgramEntry#defaultCountMode}：
-				//   取出 = 等于、放入 = 小于等于）。**必须写出真实的模式名**，不能只写 `exact`：
-				//   取出的默认已经变成"等于"，那么"取出 + 小于等于"这一态才是需要显式表达的
-				//   （写成 `countmode=atmost`）——只写 exact 会让它读回来变回"等于"。
+				// ⚠️ 模式：默认**固定是「小于等于」**（用户 2026-10-19 二次确认：「还是改成默认小于等于吧，
+				//   用到等于的情况更少」），所以 `atmost` 一个字都不写、只有 `exact` 才写。
+				//   写的是**真实名字**（`entry.countIsExact() ? "exact" : "atmost"`）而不是只处理 exact ——
+				//   这样「偏离默认的那一态」永远有名字可写，将来默认若再变一次也不会写出一个不存在的词。
 				if (entry.count != ArmProgramEntry.defaultCount(entry.op))
 					out.append(" count=")
 						.append(entry.count);
-				if (entry.countMode != ArmProgramEntry.defaultCountMode(entry.op))
+				if (entry.countMode != ArmProgramEntry.CountMode.ATMOST)
 					out.append(" countmode=")
 						.append(entry.countIsExact() ? "exact" : "atmost");
 			}

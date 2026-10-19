@@ -291,6 +291,20 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int COUNT_INLINE_X = FIELD_X + FIELD_W - COUNT_INLINE_W;
 	private static final int COUNT_MODE_INLINE_X = COUNT_INLINE_X - 2 - COUNT_MODE_INLINE_W;
 	private static final int COUNT_COORD_W = COUNT_MODE_INLINE_X - 2 - FIELD_X;
+	/**
+	 * 「收存」第二行的两个控件：它**没有坐标**，所以两个框直接铺满整行 ——
+	 * 模式框 {@code 77..133}（56）＋ 2 ＋ 数值框 {@code 135..197}（62）。
+	 *
+	 * <p>为什么不复用 {@link #COUNT_MODE_INLINE_X}/{@link #COUNT_INLINE_X}（取出／放入那两格）：
+	 * 那一套是「坐标框 60 + 模式 30 + 数值 26」，专为「还有坐标要填」排的；
+	 * 收存把左半边空着会显得那一行缺了一块（用户口径：别把左半边空着）。
+	 * 宽度仍由既有的 {@code FIELD_X + FIELD_W = 197} 收口，并用 {@link #rowBoxesProblem} 验
+	 * （盒子数 / 左沿 / 宽 / 相邻 2px / 右沿 197）。
+	 */
+	private static final int STASH_MODE_X = FIELD_X;
+	private static final int STASH_MODE_W = 56;
+	private static final int STASH_COUNT_X = STASH_MODE_X + STASH_MODE_W + 2;
+	private static final int STASH_COUNT_W = FIELD_X + FIELD_W - STASH_COUNT_X;
 	/** 第二行的**可用宽度**（左侧三个幽灵槽压到 GUI 111 ⇒ 115..197 只有 82px）。 */
 	private static final int SIGNAL_ROW_W = FIELD_W - 38;
 	/**
@@ -2734,19 +2748,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					//   ⚠️ 判据用**条目级**的 needsTarget()：过滤的容器模式有坐标（它是数据参数），不能清。
 					if (!entry.needsTarget())
 						entry.offset = BlockPos.ZERO;
-					// ★ 「个数」的默认值**按操作变**（取出 1 / 放入 64，见 defaultCount）：
+					// ★ 「个数」的默认值**按操作变**（取出 1 / 放入 64 / 收存 64，见 defaultCount）：
 					//   切操作时把仍是"上一个操作的默认值"的个数换成新操作的默认值 ——
 					//   否则从「取出 1」切到「放入」会变成"一次只放 1 个"（旧行为是一整摞），
 					//   而玩家并没有动过那个数字。玩家自己改过的值（≠ 旧默认）原样保留。
 					//   ⚠️ 判据用 defaultCount，别在这里硬编码 1 / 64 两份。
+					// ⚠️ **模式不再跟着操作重置**（用户 2026-10-19 二次确认：默认固定「小于等于」）：
+					//   上一版按操作给默认模式、换操作时顺手重置，现在默认只有一个值 ⇒ 没有可重置的东西。
+					//   玩家选的「等于」在换操作后**原样保留**（那是他的选择，不是默认值）。
 					if (entry.op.hasCount() && entry.count == ArmProgramEntry.defaultCount(previousOp))
 						entry.count = ArmProgramEntry.defaultCount(entry.op);
-					// ★ 模式同理（{@link ArmProgramEntry#defaultCountMode}：**取出 = 等于 / 放入 = 小于等于**）：
-					//   仍停在"上一个操作的默认模式"时换成新操作的默认模式，玩家改过就保留。
-					//   反证：删掉这一句 ⇒ 从「放入（小于等于）」切到「取出」会停在"最多 N 个"，
-					//   与"取出默认等于"这条口径对不上（自检 op 切换那条会红）。
-					if (entry.op.hasCount() && entry.countMode == ArmProgramEntry.defaultCountMode(previousOp))
-						entry.countMode = ArmProgramEntry.defaultCountMode(entry.op);
 					rebuildPending = true;
 					dirty = true;
 				});
@@ -3177,6 +3188,23 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				});
 			// 退出是终结操作：第二行什么都不需要
 			case BREAK -> {
+			}
+			// 收存：**没有坐标**（它不碰世界、不移动手臂），所以第二行只有"个数模式 + 个数"，
+			// 两个控件把整行铺满（模式 77..133 宽 56、数值 135..197 宽 62）。
+			// 判据 / 标签 / 悬停都跟取出·放入**同一套**（{@link #countModeLabels}、{@code hint.entry_count}、
+			// 取值范围只从 {@code ScriptParser.COUNT_MIN/MAX} 取），不另写一份 —— 各写一份必然有一天分叉。
+			case STASH -> {
+				inlinePicker(STASH_MODE_X, STASH_MODE_W, tr("entry.count_mode"), tr("hint.entry_count_mode"),
+					countModeLabels(), entry.countMode.ordinal(), i -> {
+						pushUndo();
+						entry.countMode = ArmProgramEntry.CountMode.values()[i];
+						rebuildPending = true;
+					});
+				inlineInt(STASH_COUNT_X, STASH_COUNT_W, tr("entry.count"), tr("hint.entry_count"),
+					ScriptParser.COUNT_MIN, ScriptParser.COUNT_MAX, entry.count, v -> {
+						pushUndo();
+						entry.count = v;
+					});
 			}
 			// 过滤：第二行 = **过滤位置**（必填）+（容器模式才有的）坐标。
 			// ★ 起点 {@code FIELD_X_FILTER}（GUI 96）：这个操作占了两个幽灵槽，第二行必须让开它们 ——
@@ -3646,8 +3674,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		//   与"录一条"的直觉一致（等价于当场录了一条只有位置、还没选动作的条目）。
 		//   ⚠️ 原点没设时退回 (0,0,0)（裸坐标），与世界内录制那边"没设就不让录"不同：这里只是给一个
 		//      默认落点，玩家接着就会在第二行把它改掉，没必要为此堵住"新建条目"。
-		// 新建条目走 fresh(op)：个数与模式都取该操作的默认值（**取出的默认是「等于 1 个」**，
-		// 而字段初始值是"小于等于" —— 直接 new 会得到与口径不符的一条，见 ArmProgramEntry.fresh）。
+		// 新建条目走 fresh(op)：个数取该操作的默认值（取出 1 / 放入 64 / 收存 64），
+		// 模式固定「小于等于」（用户 2026-10-19 二次确认）—— 一律别自己 new + 改 op，
+		// 那样会得到一条个数是字段初始值 1 的「放入」（见 ArmProgramEntry.fresh）。
 		ArmProgramEntry created = ArmProgramEntry.fresh(OperationType.TAKE);
 		created.offset = defaultNewEntryWorldPos()
 			.subtract(cardOriginOrZero());
@@ -4092,6 +4121,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String countRow = screen.countInlineRowProblem();
 			if (countRow != null && problem == null)
 				problem = "取出 / 放入的个数: " + countRow;
+			// ★ 「收存」：没有坐标 ⇒ 第二行只有模式 56 + 数值 62，两个框铺满整行（右沿 197）
+			String stashRow = screen.stashRowProblem();
+			if (stashRow != null && problem == null)
+				problem = "收存的个数: " + stashRow;
 			// ★ 两个出口的落点框只在「跳转」时才建，剩下的控件跟着左移铺满（用户带截图指出的）
 			String exitRow = screen.exitRowProblem();
 			if (exitRow != null && problem == null)
@@ -4832,10 +4865,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 属性表 / 基础内容必须跟动作走（用户实测反馈："等待不该有超时，也不该有时限"、
 	 * "选了等待还让我填坐标"、"朝向应该放第二行"、"所有动作都能加完成后跳转"）。
 	 *
-	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出/放入/卸货/组装/过滤/收信号）
+	 * <p>正面断言：① **每个动作**都有「成功后」；② 只有有失败判定的动作（取出 / 放入 / <b>收存</b> / 卸货 / 组装 / 过滤 / 收信号）
 	 * 才有「超时后 + 时限」；③ 前摇已经删掉（任何动作都不该再有它）；④ 朝向**不在任何卡片的胶囊里**；
 	 * ⑤ 第二行的 DATA_AREA 盒子数：位置类 1（坐标）、左键/右键 2（坐标+朝向）、**取出/放入 3**
-	 * （坐标 + 个数模式 + 个数）、等待 2、收信号 2/3/1（接收 / 发送通电 / 中断）；
+	 * （坐标 + 个数模式 + 个数）、**收存 2**（个数模式 + 个数，它没有坐标）、等待 2、
+	 * 收信号 2/3/1（接收 / 发送通电 / 中断）；
 	 * ⑥ <b>「个数」与「收信号距离」都不在属性表里</b>（用户本轮：它们升级成基础内容）。
 	 */
 	@Nullable
@@ -4887,7 +4921,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				sawFace = true;
 			// 第二行的 DATA_AREA 盒子数（§19 坐标统一之后："坐标空间"选择框已删，坐标只剩一个框）：
 			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；**取出 / 放入 = 坐标 + 个数模式 + 个数 = 3**
-			// （用户本轮：个数从属性升级为基础内容）；等待 = 时长 + 单位 = 2；
+			// （用户本轮：个数从属性升级为基础内容）；**收存 = 个数模式 + 个数 = 2**（它没有坐标）；
+			// 等待 = 时长 + 单位 = 2；
 			// 收发信号 = 模式 +（**接收**才有）距离 **或**（只有发送通电才有）数值 + 单位
 			// ⇒ 接收 = 2、发送 = 3、中断 = 1（两个频率格是**菜单幽灵槽**，不算盒子）；
 			// 调用 = 目标 = 1；抛错 = 信息 = 1；退出 = 0（终结操作，第二行不需要任何东西）
@@ -4900,6 +4935,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// 取出 / 放入：坐标框收窄让出右端，再并排两个控件的盒子（模式 30 + 数值 26）。
 				// 反证：把 buildBaseControls 里那个 `if (count)` 删掉 ⇒ 这两类立刻报"应当是 3、实际 1"。
 				case TAKE, DEPOSIT -> 3;
+				// 收存：没有坐标 ⇒ 只有"模式 + 个数"两格（几何由 stashRowProblem 逐格量）。
+				// 反证：把 buildBaseControls 里的 `case STASH` 删掉（掉进 default 的 needsTarget 早退）
+				// ⇒ 这里立刻报"应当是 2、实际 0"。
+				case STASH -> 2;
 				case WAIT -> 2;
 				// 收发信号：模式 + 距离（接收）/ 数值 + 单位（发送通电）/ 什么都没有（中断）
 				case SIGNAL -> entry.hasSignalDuration() ? 3 : entry.isSignalReceive() ? 2 : 1;
@@ -5371,6 +5410,78 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					editingProp = null;
 					return op + " 的个数放不下（" + numWidth + " > " + (COUNT_INLINE_W - 10) + "）";
 				}
+			}
+		} finally {
+			editing = null;
+			editingProp = null;
+			task.entries.remove(index);
+		}
+		return null;
+	}
+
+	/**
+	 * 自检：「收存」第二行的几何（用户口径：它**没有坐标**，两个框铺满整行、别把左半边空着）。
+	 *
+	 * <p>期望（左起）：模式框 {@code 77..133}（56）＋ 2 ＋ 数值框 {@code 135..197}（62），右沿仍是
+	 * {@code FIELD_X + FIELD_W = 197}。判据走通用的 {@link #rowBoxesProblem}（盒子数 / 左沿 / 宽 /
+	 * 相邻 2px / 右沿 197 一次全查），所以这里只需要给出那一对期望值。
+	 *
+	 * <p>断言五件事：
+	 * <ol>
+	 *   <li>真建出 **2** 个 DATA_AREA 盒子，位置与宽逐一等于 {@code STASH_MODE_*}/{@code STASH_COUNT_*}；</li>
+	 *   <li>属性表里**没有**「个数」（它是基础内容，与取出 / 放入同一条）；</li>
+	 *   <li>模式的紧凑标签（{@code ≤} / {@code =}）在 {@code 56 - 10 = 46} 里放得下；</li>
+	 *   <li>数值框里最长的数（{@code "64"} = {@link ScriptParser#COUNT_MAX}）在 {@code 62 - 10 = 52} 里放得下；</li>
+	 *   <li>{@code opt.stash} 这个键**解得出来**（派生键打错的表现是选择框里画裸键名，编译与运行都不报错）。</li>
+	 * </ol>
+	 *
+	 * <p>反证：把 {@code case STASH} 从 {@code buildBaseControls} 删掉 ⇒ ① 红（盒子数 0 ≠ 2，
+	 * 掉进 default 的 {@code needsTarget()} 早退）；把 {@code STASH_MODE_W} 改回 30 ⇒ ① 红
+	 * （第 2 格左沿 109 ≠ 135）；把 {@code opt.stash} 从语言文件删掉 ⇒ ⑤ 红。
+	 */
+	@Nullable
+	private String stashRowProblem() {
+		if (program.tasks.isEmpty())
+			return "自检前提不成立：烟雾程序里没有任务";
+		ArmProgramTask task = program.tasks.get(0);
+		ArmProgramEntry probe = ArmProgramEntry.fresh(OperationType.STASH);
+		task.entries.add(probe);
+		int index = task.entries.size() - 1;
+		try {
+			// ⑤ 操作名（派生键 opt.stash）必须能解出来 —— 查不到时 Component 里就是裸键名本身
+			String opName = tr("opt.stash").getString();
+			if (opName.contains("opt.stash"))
+				return "操作名「收存」没有译文（语言文件里缺 opt.stash）：选择框会显示裸键名";
+			// ② 属性表里不许有「个数」
+			String countName = tr("entry.count").getString();
+			if (entryProps(probe).stream()
+				.anyMatch(p -> p.name.getString()
+					.equals(countName)))
+				return "STASH 的属性表里不该有「个数」（它是基础内容，见 buildBaseControls）";
+			// ① 动作头那一行的两格几何
+			editingProp = null;
+			editing = new EditTarget(false, 0, index, null);
+			init(minecraft, 427, 240);
+			String problem = rowBoxesProblem("STASH", new int[][] {
+				{ STASH_MODE_X, STASH_MODE_W }, { STASH_COUNT_X, STASH_COUNT_W } });
+			if (problem != null) {
+				editing = null;
+				return problem;
+			}
+			// ③ 模式的紧凑标签
+			for (Component option : countModeLabels()) {
+				int w = font.width(option);
+				if (w > STASH_MODE_W - 10) {
+					editing = null;
+					return "STASH 的个数模式标签放不下（" + option.getString() + " " + w + " > "
+						+ (STASH_MODE_W - 10) + "）";
+				}
+			}
+			// ④ 数值框里最长的那个数
+			int numWidth = font.width(String.valueOf(ScriptParser.COUNT_MAX));
+			if (numWidth > STASH_COUNT_W - 10) {
+				editing = null;
+				return "STASH 的个数放不下（" + numWidth + " > " + (STASH_COUNT_W - 10) + "）";
 			}
 		} finally {
 			editing = null;

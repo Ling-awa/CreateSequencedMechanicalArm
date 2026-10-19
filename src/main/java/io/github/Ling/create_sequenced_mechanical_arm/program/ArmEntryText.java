@@ -127,9 +127,10 @@ public final class ArmEntryText {
 				// ★ 个数先写、坐标在后（顺序**不能反**）：标题芯片宽度封顶（{@code renderChip} 那侧
 				//   文字按 120px 截断），个数是"这条要搬多少"的必读信息，必须留在前面；
 				//   坐标被截掉一截反而还能从编辑器里看全。
-				// ★ 个数**永远显示**（含默认值：取出 1 / 放入 64）：用户口径是"防止忘记放入默认 64 个"——
+				// ★ 个数**永远显示**（含默认值：取出 1 / 放入 64 / 收存 64）：用户口径是"防止忘记默认 64 个"——
 				//   藏起默认值就会让人以为这条没配过数量。判据只问 {@link OperationType#hasCount()}
-				//   （单点），别在这里写 `op == TAKE || op == DEPOSIT`。
+				//   （单点），别在这里写 `op == TAKE || op == DEPOSIT`（「收存」走的正是这一支：
+				//   它的第一行因此自然读作「收存 最多 64 个」，不需要为它写坐标 / 朝向）。
 				//   反证：把这两行删掉 ⇒ 自检里"取出默认必须含「最多 1 个」"那条立刻变红。
 				if (entry.op.hasCount())
 					suffix.append(" ")
@@ -253,7 +254,7 @@ public final class ArmEntryText {
 	 * 只列**偏离默认值**的可选属性，顺序与编辑器里一致：
 	 * 成功后 → 失败后 → 卸货方式 → 备注。
 	 *
-	 * <p>★ 用户本轮口径：**「个数」（取出 / 放入）与「收信号距离」不再是属性** ——
+	 * <p>★ 用户本轮口径：**「个数」（取出 / 放入 / 收存）与「收信号距离」不再是属性** ——
 	 * 它们升级成"基础内容"，只写在第一行（见 {@link #base}）。
 	 * 反证：把原来那两支 {@code case TAKE, DEPOSIT} / {@code case SIGNAL} 加回来 ⇒
 	 * 卡片上同一个数会出现两遍（第一行 + 一枚胶囊），自检
@@ -527,22 +528,21 @@ public final class ArmEntryText {
 
 		// ★ 用户口径：「个数」升级成**基础内容** ⇒ 它**永远**出现在第一行（含默认值），
 		//   第二行的胶囊里**一个都不许再有**（同一个数出现两遍就是这次要修的东西）。
-		//   ① 取出默认 = **等于 1 个**（用户 2026-10-19："取出操作默认使用等于1个"）
-		//      ⇒ 第一行必须含「等于 1 个」；
-		//   ② 放入默认 = 最多 64 个 ⇒ 第一行必须含「最多 64 个」——
-		//      这条正是用户说的"防止忘记放入默认 64"；
-		//   ③ 两者的属性胶囊里必须没有个数那枚（props() 里那两支已删）。
+		//   ① 取出的默认 = **最多 1 个**（用户 2026-10-19 二次确认：「还是改成默认小于等于吧，
+		//      用到等于的情况更少」—— 上一版「取出 = 等于」的按操作默认已取消）
+		//      ⇒ 第一行必须含「最多 1 个」；
+		//   ② 放入 / 收存的默认 = 最多 64 个 ⇒ 第一行必须含「最多 64 个」——
+		//      这条正是用户说的"防止忘记默认 64"；
+		//   ③ 三者的属性胶囊里必须没有个数那枚（props() 里那两支已删）。
 		//   反证：把 props() 里的 `case TAKE, DEPOSIT` 加回来 ⇒ ③ 立刻红；
 		//        把 base() 的 default 分支里那两行 `if (entry.op.hasCount())` 删掉 ⇒ ①② 立刻红；
-		//        把 defaultCountMode() 里取出那一支改成 ATMOST ⇒ ① 与下面那条"取出默认模式"红。
-		if (ArmProgramEntry.defaultCountMode(OperationType.TAKE) != ArmProgramEntry.CountMode.EXACT)
-			return "取出的默认模式不是「等于」—— 用户口径是「取出操作默认使用等于 1 个」";
-		// 默认值一律从 fresh(op) 取（= defaultCount + defaultCountMode），别在夹具里写死数字
+		//        把 `CountMode countMode = CountMode.ATMOST` 的初值改回 EXACT ⇒ ① 立刻红。
+		// 默认值一律从 fresh(op) 取（= defaultCount + 固定的 ATMOST 模式），别在夹具里写死数字
 		ArmProgramEntry takeDefault = ArmProgramEntry.fresh(OperationType.TAKE);
 		String takeBase = base(takeDefault).getString();
-		String takeCount = tr("chip.count_exact", ArmProgramEntry.defaultCount(OperationType.TAKE)).getString();
+		String takeCount = tr("chip.count_atmost", ArmProgramEntry.defaultCount(OperationType.TAKE)).getString();
 		if (!takeBase.contains(takeCount))
-			return "取出默认（个数 1 / 等于）的第一行里没有「" + takeCount + "」：" + takeBase;
+			return "取出默认（个数 1 / 小于等于）的第一行里没有「" + takeCount + "」：" + takeBase;
 		if (props(takeDefault).stream()
 			.anyMatch(c -> c.getString()
 				.contains(takeCount)))
@@ -563,12 +563,17 @@ public final class ArmEntryText {
 		String atBase = base(takeAt).getString();
 		if (atBase.indexOf(takeCount) < 0 || atBase.indexOf("1,2,3") < 0 || atBase.indexOf(takeCount) > atBase.indexOf("1,2,3"))
 			return "第一行里「个数」必须排在坐标之前（芯片会被截断）：" + atBase;
-		// 非默认模式也必须能读出来：取出 + 显式的「小于等于」要写成"最多 N 个"，不是"等于"
-		ArmProgramEntry atMostOne = ArmProgramEntry.fresh(OperationType.TAKE);
-		atMostOne.countMode = ArmProgramEntry.CountMode.ATMOST;
-		if (!base(atMostOne).getString()
-			.contains(tr("chip.count_atmost", ArmProgramEntry.defaultCount(OperationType.TAKE)).getString()))
-			return "取出 + 显式「小于等于」的第一行没写成「最多 1 个」：" + base(atMostOne).getString();
+		// ★ 非默认模式也必须能读出来（用户原话："显式等于要写成「等于 N 个」"）：
+		//   同一条取出切成「等于 1 个」之后，第一行必须是「等于 1 个」而不是「最多 1 个」——
+		//   两种模式**行为不同**（一个"有多少有多少"，一个"凑不出就走失败后"），写成同一句就是骗人。
+		//   反证：把 countText() 里的三元改成恒走 atmost ⇒ 这条立刻红；
+		//        把 countIsExact() 改成恒假 ⇒ 同样红。
+		ArmProgramEntry exactOne = ArmProgramEntry.fresh(OperationType.TAKE);
+		exactOne.countMode = ArmProgramEntry.CountMode.EXACT;
+		String exactOneText = tr("chip.count_exact", ArmProgramEntry.defaultCount(OperationType.TAKE)).getString();
+		if (!base(exactOne).getString()
+			.contains(exactOneText))
+			return "取出 + 显式「等于」的第一行没写成「" + exactOneText + "」：" + base(exactOne).getString();
 
 		// ★ 「距离」同样升级成**基础内容**，且只对**收信号**有意义（用户口径：距离只约束收；
 		//   "中断信号不需要这个属性"）：

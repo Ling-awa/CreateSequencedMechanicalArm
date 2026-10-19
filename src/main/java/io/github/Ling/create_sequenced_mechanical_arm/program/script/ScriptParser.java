@@ -732,7 +732,7 @@ public final class ScriptParser {
 			//   这一点是必须的：条目坐标只能有一种读法（写两份判据必然分叉，决策 68/85）。
 			optionalPosition(rest, parsed);
 		} else if (looksLikePosition(rest)) {
-			// ★ 其余"不需要坐标"的操作（等待 / 信号 / 调用 / 退出 / 抛错）**不接受**坐标。
+			// ★ 其余"不需要坐标"的操作（等待 / 信号 / 调用 / 退出 / 抛错 / 收存）**不接受**坐标。
 			//   它们以前被 optionalPosition 静默吃下（那时 NBT 的 `off` 是无条件写的，于是"非零偏移"
 			//   也能往返）—— 用户第四十一轮正是被这个问住的：脚本里 `call 任务` 后面那串 `-3 0 -1`
 			//   在运行时既不移动、也没有目标，纯是老数据留下的噪声。
@@ -951,10 +951,10 @@ public final class ScriptParser {
 					index++;
 				}
 				case "count" -> {
-					// 用户本轮口径：个数**取出 / 放入都行**（以前只有 take 认它）。
+					// 用户本轮口径：个数**取出 / 放入 / 收存都行**（以前只有 take 认它）。
 					// 判据是 OperationType.hasCount()（那一个方法的唯一定义处见枚举里）。
 					if (!parsed.op.hasCount()) {
-						error(token.line(), "count 只对 take / deposit 有意义");
+						error(token.line(), "count 只对 take / deposit / stash 有意义");
 						return false;
 					}
 					Integer n = intValue(token, COUNT_MIN, COUNT_MAX, "count");
@@ -964,11 +964,11 @@ public final class ScriptParser {
 					index++;
 				}
 				// 个数的**模式**（用户本轮口径：等于 / 小于等于）：`countmode=exact|atmost`。
-				// 语义：exact = 必须凑出恰好 count 个才动手；atmost（默认）= 有多少动多少、上限 count。
+				// 语义：exact = 必须凑出恰好 count 个才动手；atmost（默认，与操作无关）= 有多少动多少、上限 count。
 				// 反编译器**只写非默认**（atmost 一个字都不写）⇒ 手写省略时读回来必须落在同一个默认值上。
 				case "countmode" -> {
 					if (!parsed.op.hasCount()) {
-						error(token.line(), "countmode 只对 take / deposit 有意义");
+						error(token.line(), "countmode 只对 take / deposit / stash 有意义");
 						return false;
 					}
 					ArmProgramEntry.CountMode countMode = switch (value.toLowerCase(Locale.ROOT)) {
@@ -1748,7 +1748,7 @@ public final class ScriptParser {
 		SkipAction onTimeout = SkipAction.NONE;
 		String timeoutTarget = "";
 		int count = 1;
-		/** 个数的模式（TAKE / DEPOSIT）：缺键 = 本操作的默认模式（取出 等于 / 放入 小于等于）。 */
+		/** 个数的模式（TAKE / DEPOSIT / STASH）：缺键 = **小于等于**（固定默认，与操作无关）。 */
 		ArmProgramEntry.CountMode countMode = ArmProgramEntry.CountMode.ATMOST;
 		int waitAmount = 20;
 		WaitUnit waitUnit = WaitUnit.TICK;
@@ -1784,14 +1784,14 @@ public final class ScriptParser {
 		Parsed(OperationType op, int line) {
 			this.op = op;
 			this.line = line;
-			// 「个数」的默认值**按操作给**（取出 1 / 放入 64，见 ArmProgramEntry.defaultCount）：
+			// 「个数」的默认值**按操作给**（取出 1 / 放入 64 / 收存 64，见 ArmProgramEntry.defaultCount）：
 			// 脚本里没写 `count=` 时必须落在这个初值上 —— 否则 `deposit` 省掉 count 会变成
 			// "一次只放 1 个"，与旧行为（整摞）和编辑器显示都对不上。
 			// ⚠️ 别在这里写死 1 / 64：默认值的唯一定义处是 defaultCount()。
 			this.count = ArmProgramEntry.defaultCount(op);
-			// 模式同理（**取出 = 等于 / 放入 = 小于等于**，见 defaultCountMode）：脚本没写
-			// `countmode=` 时落在本操作的默认模式上，反编译器也只在"偏离默认"时才写这个键。
-			this.countMode = ArmProgramEntry.defaultCountMode(op);
+			// 模式：**固定「小于等于」**（用户 2026-10-19 二次确认），与操作无关。
+			// 脚本没写 `countmode=` 时落在它上面，反编译器也只在"非它"时才写这个键。
+			this.countMode = ArmProgramEntry.CountMode.ATMOST;
 		}
 	}
 

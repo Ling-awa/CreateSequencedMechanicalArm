@@ -57,6 +57,9 @@ public final class ArmIcons {
 		return switch (op) {
 			case TAKE -> of("create:depot", Items.HOPPER);
 			case DEPOSIT -> of("create:chute", Items.DROPPER);
+			// 收存 = **Create 的物品保险库**（一眼就是"把东西存起来"）；查不到退回原版箱子
+			// —— 图标只是显示，绝不该因为某个模组改了物品 id 就让界面炸掉。
+			case STASH -> of("create:item_vault", Items.CHEST);
 			case UNLOAD -> of("create:brass_funnel", Items.HOPPER);
 			// 组装 = **机械手**（create:deployer，Create 官方中文名就是"机械手"），
 			// 使用 / 潜行使用 = **黄铜手部零件**（item.create.brass_hand）—— 用户第二十二轮指定的对应关系：

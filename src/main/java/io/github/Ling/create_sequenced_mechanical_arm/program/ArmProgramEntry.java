@@ -183,7 +183,7 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * TAKE / DEPOSIT 的**个数上限**（1..64）。
+	 * TAKE / DEPOSIT / STASH 的**个数上限**（1..64）。
 	 *
 	 * <p>它的**语义**由 {@link #countMode} 决定，两个字段是一件事的两半：
 	 * <ul>
@@ -192,19 +192,20 @@ public class ArmProgramEntry {
 	 *       （默认重试，时限 / 去向照旧）。</li>
 	 * </ul>
 	 *
-	 * <p>也就是：这条属性**同时服务于「取出」与「放入」**。取值范围（1..64）只有一处来源：
+	 * <p>也就是：这条属性**同时服务于「取出」「放入」与「收存」**。取值范围（1..64）只有一处来源：
 	 * {@code ScriptParser.COUNT_MIN} / {@code COUNT_MAX}（编辑器控件与自检都问那里）。
 	 */
 	public int count = 1;
 
 	/**
-	 * 「个数」的<b>默认值按操作给</b>：取出 = 1、放入 = 64（用户口径）。
+	 * 「个数」的<b>默认值按操作给</b>：取出 = 1、放入 = 64、收存 = 64（用户口径）。
 	 *
-	 * <p><b>为什么放入的默认是 64 而不是 1</b>：改造前「放入」根本不读 {@code count}，
+	 * <p><b>为什么放入 / 收存的默认是 64 而不是 1</b>：改造前「放入」根本不读 {@code count}，
 	 * 它把手上那<b>整摞</b>塞给目标 —— 也就是实际行为是"一次一摞"。若沿用 1，
 	 * 所有既有卡片里的放入会静默变成"一次只放 1 个"（一晚上也搬不完一箱）。
 	 * 64 = 一摞（{@code COUNT_MAX}）= 与改造前**完全一致**的行为；
 	 * 想少放再自己调小。取出侧保持 1（与改造前一致）。
+	 * 「收存」同理：它的整个意义就是"手上那一摞挪进溢出"，默认 64 = 一摞。
 	 *
 	 * <p>★ 这个方法是"默认值"的<b>唯一定义处</b>：{@link #countIsSet()}（胶囊 / 属性表要不要显示）、
 	 * {@code ScriptParser}（脚本没写 {@code count=} 时的初值）、{@code ScriptDecompiler}
@@ -212,54 +213,42 @@ public class ArmProgramEntry {
 	 * 就会出现"界面显示未设置、脚本里写 count=64、读回来又变成未设置"的三方分叉。
 	 */
 	public static int defaultCount(OperationType op) {
-		return op == OperationType.DEPOSIT ? 64 : 1;
+		// ⚠️ 只有「放入 / 收存」是 64，其余（含**没有个数参数**的操作）一律 1：
+		//   {@code ScriptParser.Parsed} 对**每种**操作都要给 count 一个初值，而往返不变量
+		//   （{@code entryDifference}）逐字段比较 count —— 把 WAIT 这类操作的初值写成 64，
+		//   会让脚本里的 `wait 5s` 读回来与原文不同（count 从 1 变 64），整条不变量①当场变红。
+		return op == OperationType.DEPOSIT || op == OperationType.STASH ? 64 : 1;
 	}
 
 	/**
-	 * 新建一条**带该操作默认值**的条目：{@code op} 按传入的定，`count` / `countMode` 取
-	 * {@link #defaultCount} / {@link #defaultCountMode}。
+	 * 新建一条**带该操作默认值**的条目：{@code op} 按传入的定，{@code count} 取
+	 * {@link #defaultCount}，模式固定 {@link CountMode#ATMOST}。
 	 *
-	 * <p>为什么需要这个工厂：{@code new ArmProgramEntry()} 的字段初始值是"取出 1 个 + 小于等于"，
-	 * 而**取出的默认模式是「等于」** —— 谁在别处直接 {@code new} 再改 {@code op}，
-	 * 就会得到一条"新建的取出是小于等于"的条目（脚本 / 预设 / 界面三处口径不一致，
-	 * 症状只有实机搬运时才发现）。所有"替玩家新建条目"的地方都走这里。
+	 * <p>为什么需要这个工厂：所有"替玩家新建条目"的地方都走这里，
+	 * 「取出 1 / 放入 64 / 收存 64 + 最多」这一套默认值才不会在脚本 / 预设 / 界面三处各长一份。
+	 * 模式**不按操作区分**（用户 2026-10-19 二次确认：「还是改成默认小于等于吧，用到等于的情况更少」），
+	 * 所以这里写的是那个固定值，而不是另一个"问操作"的方法。
 	 */
 	public static ArmProgramEntry fresh(OperationType op) {
 		ArmProgramEntry entry = new ArmProgramEntry();
 		entry.op = op;
 		entry.count = defaultCount(op);
-		entry.countMode = defaultCountMode(op);
+		entry.countMode = CountMode.ATMOST;
 		return entry;
 	}
 
 	/**
 	 * 个数的**模式**（用户口径：等于 / 小于等于）。
 	 *
-	 * <p><b>默认值按操作给</b>，见 {@link #defaultCountMode(OperationType)}：取出 = 等于、放入 = 小于等于。
-	 * 这里的字段初始值只是"还没套上操作默认"的占位（{@code new ArmProgramEntry()} 之后由编辑器 /
-	 * 脚本解析 / 载入统一套默认），真正决定"用哪种模式"的那处永远是 {@link #defaultCountMode}。
+	 * <p>★ <b>默认模式固定 = 小于等于</b>（用户 2026-10-19 二次确认：「还是改成默认小于等于吧，
+	 * 用到等于的情况更少」）：上一版曾按操作给默认（取出 = 等于），那一版已取消 ——
+	 * 现在<b>所有操作、所有新建条目</b>都落在这里。
 	 *
-	 * <p>★ 判据<b>只此一处</b>（{@link #countIsExact()}）：运行时（前置检查 / 取出 / 放入）、
+	 * <p>★ 判据<b>只此一处</b>（{@link #countIsExact()}）：运行时（前置检查 / 取出 / 放入 / 收存）、
 	 * 编辑器第二行的模式框、卡片文案、{@code describe()}、脚本的写出与解析全都问那一个方法。
-	 * <br>NBT 键 {@code cmode}，<b>本操作的默认模式不写</b>（与 sigmode / fsrc / coff 同一手法）。
+	 * <br>NBT 键 {@code cmode}，<b>默认（ATMOST）不写</b>（与 sigmode / fsrc / coff 同一手法）。
 	 */
 	public CountMode countMode = CountMode.ATMOST;
-
-	/**
-	 * 个数的**默认模式**（用户 2026-10-19 定稿）：<b>取出 = 等于</b>、<b>放入 = 小于等于</b>。
-	 *
-	 * <p>为什么取出改成「等于」：取出 1 个时两种模式没有区别（凑不出 1 个两种都算失败），
-	 * 差别只在玩家把个数调大之后 —— 默认「等于」= "够数才动手"，不会悄悄取走不足量的那一点；
-	 * 想要"有多少拿多少"自己切到小于等于。
-	 * 放入保持小于等于 = 有多少放多少、上限 64（= 整摞，改造前的行为）。
-	 *
-	 * <p>★ 与 {@link #defaultCount(OperationType)} 同一类：这是"默认模式"的<b>唯一定义处</b>
-	 * （{@code save} 用它决定写不写 {@code cmode}、{@code load} 用它填缺键、脚本解析 / 反编译、
-	 * 编辑器换操作时的重置、{@link #countIsSet()} 全都问它）。
-	 */
-	public static CountMode defaultCountMode(OperationType op) {
-		return op == OperationType.TAKE ? CountMode.EXACT : CountMode.ATMOST;
-	}
 
 	/**
 	 * 个数模式：小于等于（默认）/ 等于。
@@ -287,20 +276,19 @@ public class ArmProgramEntry {
 	}
 
 	/**
-	 * 「个数」算不算<b>偏离默认值</b>（= 玩家改过、或选了「等于」模式）。
+	 * 「个数」算不算<b>偏离默认值</b>（= 玩家改过个数、或选了「等于」模式）。
 	 *
 	 * <p>★ <b>它已经不再决定"卡片上显不显示"</b>（用户 2026-10-19 的口径变了）：
 	 * 个数属于**填写的内容**，按"凡是填写的都写进第一行"这条规矩，{@code ArmEntryText.base}
-	 * 对取出/放入<b>永远</b>写出「最多 N 个 / 等于 N 个」—— 正是为了不让人忘记默认值（放入默认 64）。
+	 * 对取出/放入/收存<b>永远</b>写出「最多 N 个 / 等于 N 个」—— 正是为了不让人忘记默认值（默认 64）。
 	 * 现在的唯一消费方是 {@code describe()}（护目镜那一行调试摘要：非默认才多带一段，免得每条都拖 noise）。
-	 * 所以它的判据仍然是"跟 {@link #defaultCount(OperationType)} 比"，别改成跟 1 比。
 	 *
 	 * <p>⚠️ 判据也不能只是 {@code count != 1}：{@code count == 1 && EXACT}（“必须恰好 1 个”）与
 	 * {@code count == 1 && ATMOST}（“最多 1 个”）<b>行为不同</b>，当成"默认"就等于静默改掉语义。
-	 * 也不能只跟 1 比：放入的默认是 64（见 {@link #defaultCount(OperationType)}）。
+	 * 也不能只跟 1 比：放入 / 收存的默认是 64（见 {@link #defaultCount(OperationType)}）。
 	 */
 	public boolean countIsSet() {
-		return count != defaultCount(op) || countMode != defaultCountMode(op);
+		return count != defaultCount(op) || countMode != CountMode.ATMOST;
 	}
 
 	/**
@@ -533,7 +521,7 @@ public class ArmProgramEntry {
 	 * 这条操作失败时是"<b>重试到时限</b>"吗 —— 即它有没有一个**重试窗口**
 	 * （从 {@code OperationType} 的类型级谓词搬来，按**条目**判定：§7.16b 一.2、决策 73）。
 	 *
-	 * <p>取 / 放 / 卸 / 组装 / **过滤**：不成功就是"还没成功"，会原地重试到「失败后」的时限，
+	 * <p>取 / 放 / **收存** / 卸 / 组装 / **过滤**：不成功就是"还没成功"，会原地重试到「失败后」的时限，
 	 * 时限到了才走去向。没有重试窗口、但有失败出口的（攻击 / 调用）失败是**立刻有结论**的 ——
 	 * 挖不动、被领地保护、子任务抛错，等下去不会有任何变化。
 	 *
@@ -553,7 +541,9 @@ public class ArmProgramEntry {
 	 */
 	public boolean hasRetryWindow() {
 		return switch (op) {
-			case TAKE, DEPOSIT, UNLOAD, DEPLOY, FILTER -> true;
+			// 「收存」在列（用户口径）：溢出库存放不下就是"还没到时候"（等卸货 / 等手上腾出来），
+			// 与取出 / 放入同一条失败语义 —— 原地重试到「失败后」的时限，到点才走去向。
+			case TAKE, DEPOSIT, STASH, UNLOAD, DEPLOY, FILTER -> true;
 			case SIGNAL -> signalMode == SignalMode.RECEIVE;
 			default -> false;
 		};
@@ -665,9 +655,10 @@ public class ArmProgramEntry {
 		tag.putString("tot", timeoutTarget);
 		tag.putString("note", note);
 		tag.putInt("count", count);
-		// 个数模式：**本操作的默认模式不写这个键**（见 defaultCountMode：取出 = 等于、放入 = 小于等于）
-		// —— 与 sigmode / fsrc / coff 同一手法。写枚举**名字**，不用 ordinal。
-		if (countMode != defaultCountMode(op))
+		// 个数模式：**默认（小于等于）不写这个键** —— 与 sigmode / fsrc / coff 同一手法。
+		// 写枚举**名字**，不用 ordinal。默认模式**不按操作区分**（用户 2026-10-19 二次确认：
+		// 「还是改成默认小于等于吧，用到等于的情况更少」），所以判据是那个固定值，不是另一个方法。
+		if (countMode != CountMode.ATMOST)
 			tag.putString("cmode", countMode.name());
 		tag.putInt("waitt", waitAmount);
 		tag.putString("wunit", waitUnit.name());
@@ -720,11 +711,11 @@ public class ArmProgramEntry {
 		// 下次发送时让编码器抛异常（见 NOTE_MAX 的说明）。这是**兜底**，正常路径不会触发。
 		entry.note = clipNote(tag.getString("note"));
 		entry.count = Math.max(1, tag.getInt("count"));
-		// 个数模式：**缺键（老卡）= 本操作的默认模式**（取出 = 等于、放入 = 小于等于，见 defaultCountMode）。
+		// 个数模式：**缺键（老卡）= 小于等于**（用户 2026-10-19 二次确认的固定默认，与操作无关）。
 		// 用 enumOf 而不是 ordinal：枚举增删项不会把老数据读成另一种模式（与 op / sigmode 同一惯例）。
-		// ⚠️ 用户 2026-10-19 明确了取出的默认是「等于」：老抓取卡（没有 cmode）读进来就是"够数才动手"，
-		//    这是**有意的行为变更**（不再兼容"有多少拿多少"的旧默认）—— 想要旧行为就显式写 countmode=atmost。
-		entry.countMode = enumOf(CountMode.class, tag.getString("cmode"), defaultCountMode(entry.op));
+		// ⚠️ 上一版"取出默认 = 等于"已经取消：那不是老卡的默认（老卡从没写过 cmode），
+		//    按它读会让所有老的取出条目从"有多少拿多少"静默变成"够数才动手"。
+		entry.countMode = enumOf(CountMode.class, tag.getString("cmode"), CountMode.ATMOST);
 		// ★ 「放入」的个数：改造前这个字段**运行时根本不读**（整摞塞），所以老卡里那个 1 是
 		//   "字段初始值"，不是玩家选的数 —— 它必须迁成 64（= 整摞 = 旧行为，见 defaultCount）。
 		//   ⚠️ 判据是"没写过 cmode"：写过 cmode 说明玩家在新版里明确选过模式，个数 1 是他的选择。
@@ -768,7 +759,7 @@ public class ArmProgramEntry {
 			entry.filterItem = ItemStack.parseOptional(registries, tag.getCompound("fitem"));
 
 		// ★ 自愈：**不需要坐标的条目，offset 归零**（用户第四十一轮）。
-		//   这类操作（等待 / 信号 / 调用 / 退出 / 抛错 / 手持过滤）的坐标对运行时没有任何意义
+		//   这类操作（等待 / 信号 / 调用 / 退出 / 抛错 / **收存** / 手持过滤）的坐标对运行时没有任何意义
 		//   ——「调用」是控制类操作，既不移动、也没有目标，运行时**根本不读** {@link #offset}。
 		//   老卡 / 老文本里那串数字只是"这条曾经是别的操作"（或老版本"新建条目取你正看的方块"）
 		//   留下的残留：读进来就清掉，**下一次保存它就消失了**，脚本里也不会再冒出来
@@ -886,7 +877,7 @@ public class ArmProgramEntry {
 		if (op == OperationType.THROW)
 			sb.append(" error=")
 				.append(errorMessage);
-		// 个数（取出 / 放入）：与 shift= 同一手法 —— **非默认才报**。默认是"小于等于、1 个"，
+		// 个数（取出 / 放入 / 收存）：与 shift= 同一手法 —— **非默认才报**。默认是"小于等于、1 或 64 个"，
 		// 那时报个数只是给每一条取放拖一段 noise；而"等于"（非默认模式）必须露出来，
 		// 否则护目镜那行看起来与"有多少拿多少"一模一样。
 		if (op.hasCount() && countIsSet()) {

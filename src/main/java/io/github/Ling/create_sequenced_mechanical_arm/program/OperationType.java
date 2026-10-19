@@ -21,6 +21,24 @@ public enum OperationType {
 
 	TAKE(true),
 	DEPOSIT(true),
+	/**
+	 * 收存：把**手上那一摞**挪进臂自己的溢出库存（用户口径：「收存」= 把手持物品收入臂的溢出库存）。
+	 *
+	 * <p><b>它不做世界动作、不移动手臂、不读坐标</b>：
+	 * <ul>
+	 *   <li>不做世界动作 ⇒ {@code requiresTarget()} 为 false（{@link #needsInteractionPoint()} 也不涉及）；</li>
+	 *   <li>不移动手臂 ⇒ 没有"伸过去"这一步，{@code ArmProgramEntry.movesArm()} 随之恒假；</li>
+	 *   <li>不读坐标 ⇒ 条目 offset 恒为 0（与等待 / 信号 / 调用同一类，见 {@code ArmProgramEntry.load}
+	 *       的自愈与编辑器的清零）。</li>
+	 * </ul>
+	 *
+	 * <p>它唯一做的事：把手上那一摞塞进**溢出库存**（{@code SequencedArmBlockEntity.overflow}，
+	 * 最多 {@code MAX_OVERFLOW} 格）。所以它要「个数」（{@link #hasCount()}）与重试窗口
+	 * （放不下就是"还没到时候"，与取出 / 放入同一条失败语义）。
+	 * ⚠️ 走的是 {@code insertIntoOverflow}，**不是** {@code insert(...)} —— 后者会先补手持格，
+	 * 等于什么都没搬（见 {@code ProgramRuntime.stash}）。
+	 */
+	STASH(false),
 	UNLOAD(true),
 	DEPLOY(true),
 	/**
@@ -114,9 +132,10 @@ public enum OperationType {
 	}
 
 	/**
-	 * 这个操作有没有「个数」参数（取出 / 放入）—— <b>这一个判据的唯一定义处</b>。
+	 * 这个操作有没有「个数」参数（取出 / 放入 / 收存）—— <b>这一个判据的唯一定义处</b>。
 	 *
-	 * <p>用户本轮口径：个数属性<b>同时服务于取出与放入</b>（放入以前是"整摞都塞"，现在也受个数约束）。
+	 * <p>用户本轮口径：个数属性<b>同时服务于取出、放入与收存</b>（放入以前是"整摞都塞"，现在也受个数约束；
+	 * 收存的默认是「最多 64 个」= 手上那一整摞）。
 	 * 之所以收在枚举上而不是各处写 {@code op == TAKE || op == DEPOSIT}：它同时决定
 	 * 编辑器第二行要不要多建"模式 + 数值"两个控件（{@code ArmProgramScreen.buildBaseControls}）、
 	 * 坐标框要不要让位收窄（同一个方法里同一处判据）、卡片第一行要不要写个数
@@ -128,7 +147,7 @@ public enum OperationType {
 	 * {@code ArmProgramScreen.entryProps} 与 {@code ArmEntryText.props} 里都没有它了。
 	 */
 	public boolean hasCount() {
-		return this == TAKE || this == DEPOSIT;
+		return this == TAKE || this == DEPOSIT || this == STASH;
 	}
 
 	/**
