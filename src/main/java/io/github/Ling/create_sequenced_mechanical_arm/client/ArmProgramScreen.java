@@ -768,14 +768,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int BAR_W = 5;
 	private static final int BAR_MIN_THUMB = 12;
 
-	/** 当前列表的总内容高度（最后一张卡 + 末尾"新卡片"按钮 + 一点余量）。 */
+	/**
+	 * 当前列表的总内容高度（最后一张卡 + 末尾"新卡片"按钮 + 一点余量）。
+	 *
+	 * <p>★ <b>接 cards 的重载是"每帧只算一次"的关键</b>：滚动条那几个算式（{@code maxListScroll} /
+	 * {@code barThumbHeight} / {@code barThumbY} / {@code barHit} / {@code barScrollFor}）彼此互相调用，
+	 * 原来每一个都自己调 {@link #layout()}，一帧下来白建 6 次卡片列表（每次都 {@code new ArrayList}
+	 * + 每条目一个 {@code Card} 记录）。绘制路径上先把 {@code cards} 算一次、一路传下去；
+	 * 不带参数的重载留给"输入事件 / 自检"这类一次性的调用方（一帧一次无所谓）。
+	 */
+	private int listContentHeight(List<Card> cards) {
+		return newCardY(cards) + 30;
+	}
+
 	private int listContentHeight() {
-		return newCardY(layout()) + 30;
+		return listContentHeight(layout());
 	}
 
 	/** 当前列表能滚多远（装得下就是 0 —— 这时既不画滑块也不接受拖拽）。 */
+	private float maxListScroll(List<Card> cards) {
+		return Math.max(0, listContentHeight(cards) - LIST_VIEW_H);
+	}
+
 	private float maxListScroll() {
-		return Math.max(0, listContentHeight() - LIST_VIEW_H);
+		return maxListScroll(layout());
 	}
 
 	/**
@@ -798,36 +814,52 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			setListScroll(Mth.clamp(chaser.getChaseTarget(), 0, max));
 	}
 
-	private int barThumbHeight() {
-		int content = listContentHeight();
+	private int barThumbHeight(List<Card> cards) {
+		int content = listContentHeight(cards);
 		int h = content <= LIST_VIEW_H ? LIST_VIEW_H : (int) ((long) LIST_VIEW_H * LIST_VIEW_H / content);
 		return Mth.clamp(h, BAR_MIN_THUMB, LIST_VIEW_H);
 	}
 
+	private int barThumbHeight() {
+		return barThumbHeight(layout());
+	}
+
 	/** 滑块上沿的 y（相对 topPos）。{@code partialTicks} 只为让画出来的位置跟手。 */
-	private int barThumbY(float partialTicks) {
-		float max = maxListScroll();
+	private int barThumbY(List<Card> cards, float partialTicks) {
+		float max = maxListScroll(cards);
 		if (max <= 0)
 			return 16;
 		float t = Mth.clamp(listScroll().getValue(partialTicks) / max, 0, 1);
-		return 16 + (int) ((LIST_VIEW_H - barThumbHeight()) * t);
+		return 16 + (int) ((LIST_VIEW_H - barThumbHeight(cards)) * t);
+	}
+
+	private int barThumbY(float partialTicks) {
+		return barThumbY(layout(), partialTicks);
 	}
 
 	/** 鼠标点/拖到了滚动条上（只有内容装不下时才认）。 */
-	private boolean barHit(double mouseX, double mouseY) {
-		if (maxListScroll() <= 0)
+	private boolean barHit(List<Card> cards, double mouseX, double mouseY) {
+		if (maxListScroll(cards) <= 0)
 			return false;
 		int x = (int) mouseX - leftPos;
 		int y = (int) mouseY - topPos;
 		return x >= BAR_X && x < BAR_X + BAR_W && y >= 16 && y <= 189;
 	}
 
+	private boolean barHit(double mouseX, double mouseY) {
+		return barHit(layout(), mouseX, mouseY);
+	}
+
 	/** 滑块上沿放到 {@code thumbTop} 时对应的滚动量。 */
-	private float barScrollFor(int thumbTop) {
-		int span = LIST_VIEW_H - barThumbHeight();
+	private float barScrollFor(List<Card> cards, int thumbTop) {
+		int span = LIST_VIEW_H - barThumbHeight(cards);
 		if (span <= 0)
 			return 0;
-		return Mth.clamp((thumbTop - 16) / (float) span, 0, 1) * maxListScroll();
+		return Mth.clamp((thumbTop - 16) / (float) span, 0, 1) * maxListScroll(cards);
+	}
+
+	private float barScrollFor(int thumbTop) {
+		return barScrollFor(layout(), thumbTop);
 	}
 
 	/**
@@ -848,11 +880,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 那张渐隐贴图本来就是画在 z=200 让它压住卡片的（Create 的老规矩：z 越大越在上面），
 	 * 所以滚动条必须抬到它上面去。
 	 */
-	private void renderScrollBar(GuiGraphics graphics, float partialTicks) {
-		if (maxListScroll() <= 0)
+	private void renderScrollBar(GuiGraphics graphics, float partialTicks, List<Card> cards) {
+		if (maxListScroll(cards) <= 0)
 			return;
-		int thumbH = barThumbHeight();
-		int thumbY = topPos + barThumbY(partialTicks);
+		int thumbH = barThumbHeight(cards);
+		int thumbY = topPos + barThumbY(cards, partialTicks);
 		int x = leftPos + BAR_X;
 		graphics.pose()
 			.pushPose();
@@ -960,7 +992,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				.pushPose();
 			graphics.pose()
 				.translate(0, scrollOffset, 0);
-			renderCard(graphics, cards, i, y, partialTicks);
+			// ★ 这张卡的属性胶囊**每帧只建一次**，一路传给卡片内所有用到它的算式
+			//   （见 renderChips / rowScrollable / maxRowScroll / rowScrollOffset 的重载）。
+			renderCard(graphics, cards, i, y, partialTicks, shownProps(cards.get(i)));
 			graphics.pose()
 				.popPose();
 
@@ -993,11 +1027,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 		// 右侧滑块画在裁剪区之外（x=231..235 在卡片右侧那条空当里），所以放在 disableScissor 之后；
 		// 它自己再抬到 z=300（见 renderScrollBar 的说明）—— 不然上下那两条渐隐会盖住它。
-		renderScrollBar(graphics, partialTicks);
+		renderScrollBar(graphics, partialTicks, cards);
 	}
 
-	/** 上游 {@code renderScheduleEntry}（:487-537）+ 我们的"一行胶囊"。 */
-	private void renderCard(GuiGraphics graphics, List<Card> cards, int index, int y, float partialTicks) {
+	/** 上游 {@code renderScheduleEntry}（:487-537）+ 我们的"一行胶囊"。{@code props} = 本帧这卡的属性胶囊。 */
+	private void renderCard(GuiGraphics graphics, List<Card> cards, int index, int y, float partialTicks,
+		List<Prop> props) {
 		Card card = cards.get(index);
 		graphics.pose()
 			.pushPose();
@@ -1043,20 +1078,20 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// ⚠️ 胶囊区是**单独一块裁剪区**（上游 `ScheduleScreen:457`）：内容再宽也只裁到卡片内侧，
 		// 不会画到卡片外面去（用户反馈"图三"里胶囊越过卡片右边缘就是这个没做）。
 		graphics.enableScissor(leftPos + ROW_CLIP_LEFT, 0, leftPos + ROW_CLIP_RIGHT, 400);
-		renderChips(graphics, card, index, partialTicks);
+		renderChips(graphics, card, index, partialTicks, props);
 		graphics.disableScissor();
 
 		// 需要横向滚动时：卡片中间两侧画箭头（上游 :464-475）
 		// ⚠️ 上游是在**窗口**坐标画的（`leftPos + 40` / `leftPos + 203`），我们在卡片的位姿里
 		// （原点已经 translate 到 `leftPos + 25`），所以要减掉 25 → 15 / 178。
 		// 第一版直接抄了 40 / 203，于是画出来的箭头比它的热区（本来就按 15/178 算的）右移了 25px。
-		if (rowScrollable(card)) {
+		if (rowScrollable(props)) {
 			int center = scrollArrowY();
 			float target = rowScrolls.get(Math.min(index, rowScrolls.size() - 1))
 				.getChaseTarget();
 			if (!Mth.equal(target, 0))
 				ModGuiTextures.SCROLL_LEFT.render(graphics, SCROLL_LEFT_X, center);
-			if (!Mth.equal(target, maxRowScroll(card)))
+			if (!Mth.equal(target, maxRowScroll(props)))
 				ModGuiTextures.SCROLL_RIGHT.render(graphics, SCROLL_RIGHT_X, center);
 		}
 
@@ -1064,15 +1099,22 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			.popPose();
 	}
 
-	/** 一行胶囊 + 行尾"添加属性"＋（滚动与两端淡出都在这里）。 */
-	private void renderChips(GuiGraphics graphics, Card card, int index, float partialTicks) {
-		float rowOffset = rowScrollOffset(card, index, partialTicks);
+	/**
+	 * 一行胶囊 + 行尾"添加属性"＋（滚动与两端淡出都在这里）。
+	 *
+	 * <p>★ {@code props} 由调用方（{@link #renderCard}）算好传进来：这一行原来自己建一遍，
+	 * 而 {@link #rowScrollOffset} / {@link #rowScrollable} / 命中判定又各建一遍 ——
+	 * 同一帧同一张卡要把 3~5 个匿名 {@code Prop}（每个还带两个 {@code tr(...)} 和一个胶囊文案）
+	 * 造好几遍。现在整帧只造一次，一路传下去。
+	 */
+	private void renderChips(GuiGraphics graphics, Card card, int index, float partialTicks, List<Prop> props) {
+		float rowOffset = rowScrollOffset(card, index, partialTicks, props);
 		graphics.pose()
 			.pushPose();
 		graphics.pose()
 			.translate(-rowOffset, 0, 0);
 		int x = 26;
-		for (Prop prop : shownProps(card)) {
+		for (Prop prop : props) {
 			int width = chipWidth(prop);
 			renderChip(graphics, prop.chipIcon(), prop.chip, x, CARD_ROW_Y, x != 26, width);
 			x += width + CHIP_GAP;
@@ -1083,7 +1125,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// ⚠️ 原版 {@code fillGradient} 是**上下**渐变；我第一版把上游的旋转去掉、直接按坐标画，
 		// 于是渐变方向错了（用户实测："渐变边框确实在左右两边，但渐变是上下渐变的"）。
 		// 这里不用旋转，直接按列插值画一条水平渐变，方向和位置都一眼可读。
-		if (rowScrollable(card)) {
+		if (rowScrollable(props)) {
 			int z = 200;
 			hGradient(graphics, 18, 10, CARD_HEADER + 2, CARD_HEIGHT - 2, z, 0x44000000, 0x00000000);
 			hGradient(graphics, CARD_WIDTH - 26, 10, CARD_HEADER + 2, CARD_HEIGHT - 2, z, 0x00000000, 0x44000000);
@@ -1535,6 +1577,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		List<Card> cards = layout();
 		for (int i = 0; i < cards.size(); i++) {
 			Card card = cards.get(i);
+			// ★ 这张卡的属性胶囊**整帧只建一次**（原来 rowScrollable / rowScrollOffset / 命中判定
+			//   各建一遍，每帧每卡 4 次以上）。
+			List<Prop> props = shownProps(card);
 			int localY = y - cardY(i);
 			if (localY < 0 || localY > CARD_HEIGHT)
 				continue;
@@ -1589,19 +1634,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 			// 胶囊行横向滚动的左右箭头（上游 :741-757）—— 单位是"格"，一格一个胶囊
 			int center = scrollArrowY();
-			if (localY > center - 1 && localY <= center + 7 && rowScrollable(card)) {
+			if (localY > center - 1 && localY <= center + 7 && rowScrollable(props)) {
 				LerpedFloat chaser = rowScrolls.get(Math.min(i, rowScrolls.size() - 1));
 				float target = chaser.getChaseTarget();
 				if (x > SCROLL_LEFT_X - 3 && x <= SCROLL_LEFT_X + 4 && !Mth.equal(target, 0)) {
 					lastHit = "scrollleft";
 					if (click == 0)
-						chaser.chase(Mth.clamp(target - 1, 0, maxRowScroll(card)), 0.5f, Chaser.EXP);
+						chaser.chase(Mth.clamp(target - 1, 0, maxRowScroll(props)), 0.5f, Chaser.EXP);
 					return true;
 				}
-				if (x > SCROLL_RIGHT_X - 1 && x <= SCROLL_RIGHT_X + 6 && !Mth.equal(target, maxRowScroll(card))) {
+				if (x > SCROLL_RIGHT_X - 1 && x <= SCROLL_RIGHT_X + 6 && !Mth.equal(target, maxRowScroll(props))) {
 					lastHit = "scrollright";
 					if (click == 0)
-						chaser.chase(Mth.clamp(target + 1, 0, maxRowScroll(card)), 0.5f, Chaser.EXP);
+						chaser.chase(Mth.clamp(target + 1, 0, maxRowScroll(props)), 0.5f, Chaser.EXP);
 					return true;
 				}
 			}
@@ -1616,11 +1661,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			//   —— 绘制被 `enableScissor` 裁掉了，而命中没有，于是"看得见的那一半"之外还能点到。
 			boolean inChipClip = x >= ROW_CLIP_LEFT - 25 && x <= ROW_CLIP_RIGHT - 25;
 			if (inChipClip && cx >= 0 && cy >= 0 && cy < CARD_ROW) {
-				int rowOffset = (int) rowScrollOffset(card, i, 0);
+				int rowOffset = (int) rowScrollOffset(card, i, 0, props);
 				cx += rowOffset - 8;
 				int cursor = 0;
 				Prop hit = null;
-				for (Prop prop : shownProps(card)) {
+				for (Prop prop : props) {
 					int width = chipWidth(prop);
 					if (cx >= cursor && cx < cursor + width) {
 						hit = prop;
@@ -1780,6 +1825,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					continue;
 				if (!rowScrollable(card) || localY < 24)
 					break;
+
 				if (mouseX < leftPos + 25 || mouseX > leftPos + 205)
 					break;
 				LerpedFloat chaser = rowScrolls.get(Math.min(i, rowScrolls.size() - 1));
@@ -2393,12 +2439,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * <p>之前我们把滚动量当像素用，于是"一格 1px"—— 实测"滚半天几乎不动"；而且像素级偏移会把
 	 * 胶囊从中间切开。按格滚：一格 = 一个胶囊，滚到位就是整整一格，不会切半个。
 	 */
-	private float rowScrollOffset(Card card, int index, float partial) {
+	private float rowScrollOffset(Card card, int index, float partial, List<Prop> props) {
 		float scrollIndex = rowScrolls.isEmpty() ? 0
 			: rowScrolls.get(Math.min(index, rowScrolls.size() - 1))
 				.getValue(partial);
 		float offset = 0;
-		for (Prop prop : shownProps(card)) {
+		for (Prop prop : props) {
 			float part = Mth.clamp(scrollIndex, 0, 1);
 			offset += (chipWidth(prop) + CHIP_GAP) * part;
 			scrollIndex -= part;
@@ -2406,17 +2452,29 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return offset;
 	}
 
+	private float rowScrollOffset(Card card, int index, float partial) {
+		return rowScrollOffset(card, index, partial, shownProps(card));
+	}
+
 	/** 横向滚动最大格数（上游：右箭头在 {@code chaseTarget == 列数-1} 时消失）。 */
+	private int maxRowScroll(List<Prop> props) {
+		return Math.max(0, props.size() - 1);
+	}
+
 	private int maxRowScroll(Card card) {
-		return Math.max(0, shownProps(card).size() - 1);
+		return maxRowScroll(shownProps(card));
 	}
 
 	/** 一行胶囊是否超宽（上游 {@code isConditionAreaScrollable:582-587}）。 */
-	private boolean rowScrollable(Card card) {
+	private boolean rowScrollable(List<Prop> props) {
 		int width = 26;
-		for (Prop prop : shownProps(card))
+		for (Prop prop : props)
 			width += chipWidth(prop) + CHIP_GAP;
 		return width + 16 > CARD_WIDTH - 26;
+	}
+
+	private boolean rowScrollable(Card card) {
+		return rowScrollable(shownProps(card));
 	}
 
 	/** 整行的像素宽度（自检用）。 */
