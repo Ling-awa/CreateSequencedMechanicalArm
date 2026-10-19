@@ -1,10 +1,11 @@
 package io.github.Ling.create_sequenced_mechanical_arm.program;
 
+import java.util.EnumMap;
+
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * 卡片胶囊上的默认图标（PLAN.md §5.2）。
@@ -27,8 +28,32 @@ public final class ArmIcons {
 		return of("create:railway_casing", Items.MINECART);
 	}
 
+	/**
+	 * 默认图标的**惰性缓存**（一个操作类型一份）—— 卡片每帧都要画图标，
+	 * 而 {@link #buildDefaultIcon} 每次都要 {@code ResourceLocation.tryParse} + 注册表查找 + {@code new ItemStack}。
+	 *
+	 * <p>★ <b>只在这里的调用期填充</b>（第一次真的要用到某个操作时），**不放在静态初始化块里**：
+	 * 静态初始化可能在注册表还没就绪时跑（物品 id 查不到 ⇒ 会把"退回到原版物品"那张错误结果永久缓存下来）。
+	 * 调用期填充的时机是画界面 / 自检，那时注册表一定已经冻结。
+	 *
+	 * <p>返回值是**共享实例**，所以**只读**：调用方一律只 renderItem / getItem / isEmpty，
+	 * 谁要改它（setCount、复制成别的栈）必须自己 {@code copy()}。这是"默认图标"的本性 ——
+	 * 一个操作类型只需要一个常量栈。
+	 */
+	private static final EnumMap<OperationType, ItemStack> DEFAULT_ICONS = new EnumMap<>(OperationType.class);
+
 	/** 编辑器的"没有自定义图标"占位（同时也是空幽灵槽时显示的图标）。 */
 	public static ItemStack defaultIcon(OperationType op) {
+		ItemStack cached = DEFAULT_ICONS.get(op);
+		if (cached != null)
+			return cached;
+		ItemStack built = buildDefaultIcon(op);
+		DEFAULT_ICONS.put(op, built);
+		return built;
+	}
+
+	/** 这个操作的默认图标（按物品 id 查；查不到退回原版物品）。只由 {@link #defaultIcon} 调用。 */
+	private static ItemStack buildDefaultIcon(OperationType op) {
 		return switch (op) {
 			case TAKE -> of("create:depot", Items.HOPPER);
 			case DEPOSIT -> of("create:chute", Items.DROPPER);

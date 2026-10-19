@@ -104,7 +104,7 @@ public final class SequencedArmConfig {
 	 * {@value #MIN_ENTRIES_PER_TICK} – {@value #MAX_ENTRIES_PER_TICK}，理由见那两个常量的注释。
 	 *
 	 * <p>它只影响"一瞬间就出结果"的条目（控制类：过滤 / 收信号 / 调用 / 退出 / 抛错 / 发信号）。
-	 * <b>有动作的条目（移动 / 等待 / 等待红石 / 重试）一点都不变快</b>：它们照样按真实 tick 走
+	 * <b>有动作的条目（移动 / 等待 / 重试）一点都不变快</b>：它们照样按真实 tick 走
 	 * （判定在 {@code ProgramRuntime.isPaced}），所以抬手/等待的观感与旧版逐字节相同。
 	 */
 	public static final ModConfigSpec.DoubleValue ENTRIES_PER_TICK = BUILDER
@@ -113,9 +113,9 @@ public final class SequencedArmConfig {
 			"0.5 = one entry every 2 ticks; 2 = two entries per tick (default).",
 			"0.5 = 每 2 tick 一条；2 = 每 tick 两条（默认）。",
 			"Only control-ish entries are paced by this: filter / receive / call / exit / throw / signal send.",
-			"Entries that move the arm or wait (move / wait / wait-for-redstone / retry) are NOT sped up",
+			"Entries that move the arm or wait (move / wait / retry) are NOT sped up",
 			"by this setting: they still take real ticks, exactly like the old behaviour.",
-			"只对控制类条目生效；有动作的条目（移动 / 等待 / 等待红石 / 重试）不受它影响，仍然按真实 tick 走。")
+			"只对控制类条目生效；有动作的条目（移动 / 等待 / 重试）不受它影响，仍然按真实 tick 走。")
 		.defineInRange("entriesPerTick", DEFAULT_ENTRIES_PER_TICK, MIN_ENTRIES_PER_TICK, MAX_ENTRIES_PER_TICK);
 
 	/**

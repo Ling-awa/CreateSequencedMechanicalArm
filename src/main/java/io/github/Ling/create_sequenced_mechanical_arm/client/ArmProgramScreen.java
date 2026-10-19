@@ -18,8 +18,6 @@ import org.jetbrains.annotations.Nullable;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.simibubi.create.AllKeys;
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 import com.simibubi.create.foundation.gui.AllGuiTextures;
 import com.simibubi.create.foundation.gui.AllIcons;
@@ -55,7 +53,6 @@ import net.createmod.catnip.animation.LerpedFloat;
 import net.createmod.catnip.animation.LerpedFloat.Chaser;
 import net.createmod.catnip.data.Couple;
 import net.createmod.catnip.gui.element.GuiGameElement;
-import net.createmod.catnip.gui.widget.AbstractSimiWidget;
 import net.createmod.catnip.platform.CatnipServices;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
@@ -2074,14 +2071,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return entry.hasHardFailureExit();
 	}
 
-	/** 需要"交互面"的操作（左键/右键语义）；与 {@code ArmEntryText.needsFace} / 反编译器同一判据。 */
-	private static boolean needsFace(OperationType op) {
-		// ★ 「过滤」**不在**这里（用户第四十三轮）：容器模式只读内容，读哪个面都一样 ⇒ 只要坐标。
-		//   模型里的 face 保持默认 UP（臂解析交互点时用得到），但界面上不再给玩家这个框。
-		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK;
-	}
-
 	/**
 	 * "成功后" —— 胶囊是<b>一整句话</b>：{@code 成功继续} / {@code 成功跳转 3}（用户定的写法）。
 	 *
@@ -2231,11 +2220,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					});
 			}
 		};
-	}
-
-	/** 单位的短后缀：t / s / m（唯一实现在 {@link ArmEntryText#unitSuffix}）。 */
-	private static String unitSuffix(WaitUnit unit) {
-		return ArmEntryText.unitSuffix(unit);
 	}
 
 	/**
@@ -2396,35 +2380,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					.ordinal(), i -> {
 					pushUndo();
 					set.accept(values[i]);
-					rebuildPending = true;
-				});
-			}
-		};
-	}
-
-	private Prop boolProp(Component name, Component hint, Component chip, boolean def, Supplier<Boolean> get,
-		Consumer<Boolean> set) {
-		return new Prop(name, hint, chip, true) {
-			@Override
-			boolean isSet() {
-				return get.get() != def;
-			}
-
-			@Override
-			void reset() {
-				set.accept(def);
-			}
-
-			@Override
-			void reveal() {
-				set.accept(!def);
-			}
-
-			@Override
-			void buildEditor() {
-				inlinePicker(FIELD_X, FIELD_W, name, hint, List.of(tr("on"), tr("off")), get.get() ? 0 : 1, i -> {
-					pushUndo();
-					set.accept(i == 0);
 					rebuildPending = true;
 				});
 			}
@@ -3209,7 +3164,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					BlockPos world = origin.offset(entry.offset);
 					textField(FIELD_X_FILTER + FILTER_SRC_W + 2, ROW2_Y, FILTER_COORD_W, tr("entry.coords"),
 						tr("hint.entry_filter_coords"), world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
-							BlockPos parsed = parseCoords(v);
+							// 坐标解析**只有一处**（parseTriple：逗号/空格都吃、且守住 ±COORD_LIMIT）。
+							// 曾有一份只按逗号切、没有上限校验的副本走这条路 —— 超限坐标会被吞进模型，
+							// 直到落盘才以"保存失败"的形式爆出来（用户看到的是莫名其妙保存不了）。
+							BlockPos parsed = parseTriple(v);
 							if (parsed != null) {
 								pushUndo();
 								entry.offset = parsed.subtract(origin);
@@ -3227,7 +3185,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				if (!entry.needsTarget())
 					return;
 
-				boolean face = needsFace(entry.op);
+				// 「哪些操作有交互面」判据只在 ArmEntryText 一处（卡片显示 / 反编译 / 这里同一个）
+				boolean face = ArmEntryText.needsFace(entry.op);
 				// ★ 坐标框 + 朝向框**一起把第二行铺到右沿 197**（与第一行那个选择框对齐）。
 				//   用户第四十二轮附了张"潜行使用"的截图："因为现在不用选择相对/绝对了，所以可以把输入框的
 				//   长度调整得更长，让整体上下两行对齐" —— 原来坐标框只有 32 宽、朝向框 32 宽，到 145 就断了，
@@ -3245,7 +3204,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				BlockPos world = origin.offset(entry.offset);
 				textField(FIELD_X, ROW2_Y, coordW, tr("entry.coords"), tr("hint.entry_coords"),
 					world.getX() + "," + world.getY() + "," + world.getZ(), 24, v -> {
-						BlockPos parsed = parseCoords(v);
+						// 与上面过滤坐标同一个解析器（唯一实现）：逗号/空格都吃，且守住 ±COORD_LIMIT。
+						BlockPos parsed = parseTriple(v);
 						if (parsed != null) {
 							pushUndo();
 							entry.offset = parsed.subtract(origin);
@@ -3259,20 +3219,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 							rebuildPending = true;
 						});
 			}
-		}
-	}
-
-	/** {@code "1,-2,3"} → BlockPos；半截输入（空段/非数字）返回 null，保持原值。 */
-	@Nullable
-	private static BlockPos parseCoords(String text) {
-		String[] parts = text.split(",");
-		if (parts.length != 3)
-			return null;
-		try {
-			return new BlockPos(Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()),
-				Integer.parseInt(parts[2].trim()));
-		} catch (NumberFormatException e) {
-			return null;
 		}
 	}
 
@@ -3745,12 +3691,6 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	private static Component tr(String key, Object... args) {
 		return Component.translatable("create_sequenced_mechanical_arm.gui.editor." + key, args);
-	}
-
-	/** 操作的中文名（DEPLOY=组装：Create 的 deploying 官方译名"使用"给了 USE）。 */
-	private static Component opName(OperationType op) {
-		return tr("opt." + op.name()
-			.toLowerCase());
 	}
 
 	// ————————————————————————— 自绘控件 —————————————————————————
@@ -4753,7 +4693,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				return entry.op + " 既不会无限等也没有硬失败，不该有「失败后」";
 			if (entry.op == OperationType.WAIT)
 				sawWait = true;
-			if (needsFace(entry.op))
+			if (ArmEntryText.needsFace(entry.op))
 				sawFace = true;
 			// 第二行的 DATA_AREA 盒子数（§19 坐标统一之后："坐标空间"选择框已删，坐标只剩一个框）：
 			// 位置类 = 坐标 = 1；需要朝向的再多一个朝向 = 2；等待 = 时长 + 单位 = 2；
@@ -4775,7 +4715,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// 过滤：手持 = **只有**"过滤位置"= 1；容器 = 位置 + 坐标 = 2
 				//（用户第四十三轮：容器模式**不要朝向** —— 读容器与方位无关）。
 				case FILTER -> entry.needsTarget() ? 2 : 1;
-				default -> needsFace(entry.op) ? 2 : 1;
+				default -> ArmEntryText.needsFace(entry.op) ? 2 : 1;
 			};
 			if (boxes != expected)
 				return entry.op + " 的基础内容应当是 " + expected + " 个控件，实际 " + boxes;
@@ -4804,7 +4744,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		// ★ 「过滤」的**容器模式**要真建一次（上面的循环用烟雾数据，它那条过滤是默认的**手持**模式）：
 		//   容器模式会多出坐标框与朝向框，而这两样正好长在幽灵槽右边那 101px 里 ——
 		//   宽度算错在游戏里只表现为"文字/输入糊出框"，只有把控件真建出来量一次才看得见。
-		//   反证：把 FILTER 的 expected 改回 `needsFace(...) ? 2 : 1`（或把 FIELD_X_FILTER 改回 77）
+		//   反证：把 FILTER 的 expected 改回 `ArmEntryText.needsFace(...) ? 2 : 1`（或把 FIELD_X_FILTER 改回 77）
 		//   ⇒ 这条立刻红（盒子数不对 / 控件压在幽灵槽 1 上）。
 		String filterRow = filterContainerRowProblem();
 		if (filterRow != null)
@@ -5355,7 +5295,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final String LANG_DIR = "lang/";
 	/**
 	 * 本轮「收发信号」用到的**全部**键（枚举名由 {@code opt.<小写>} 派生，与
-	 * {@link ArmEntryText#opName} / {@code CardEditPacket} 同一惯例 —— 枚举一改名这些键就查不到）。
+	 * {@link ArmEntryText#opName} 同一惯例 —— 枚举一改名这些键就查不到；{@code CardEditPacket}
+	 * 在录制 / 撤销的提示里**直接调**那个方法，不再自己拼一遍小写名）。
 	 *
 	 * <p>用户反馈第二轮：模式短名（{@code opt.signal_*}）、标题短语（{@code chip.signal_*}）、
 	 * 尾巴（{@code entry.signal_wait_off}）。已经不用的 {@code chip.signal_hold/pulse} 与
@@ -5467,12 +5408,17 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			//   ② 任务级循环删除（主任务恒为无限循环）⇒ task.loop / task.loop_count / hint.task_loop /
 			//      hint.task_loop_count / chip.loop / chip.loop_count / opt.none / opt.count / opt.forever /
 			//      opt.until_fail / gui.arm.loop 全部作废。
+			//   ③ 本片清掉的三组**遗留文案**（对应功能已经不存在了，代码里一处都不再查它们）：
+			//      chip.face / chip.count（胶囊早就改成"朝向北"与"最多 N 个 / 等于 N 个"两种写法）、
+			//      add_prop.title（"添加属性"那张独立界面合并进编辑器之后只剩悬停提示 tip.add_prop）、
+			//      opt.blocking / opt.idle（旧操作枚举里的两项，现在的操作里没有它们）。
 			//   反证：把任意一个键加回**任意一份**语言文件（两边都加也一样）⇒ 这条立刻报红。
 			String[] dead = {
 				"opt.wait_redstone", "entry.wait_power", "hint.entry_wait_power",
 				"task.loop", "task.loop_count", "hint.task_loop", "hint.task_loop_count",
 				"chip.loop", "chip.loop_count",
-				"opt.none", "opt.count", "opt.forever", "opt.until_fail"
+				"opt.none", "opt.count", "opt.forever", "opt.until_fail",
+				"chip.face", "chip.count", "add_prop.title", "opt.blocking", "opt.idle"
 			};
 			List<String> resurrected = new ArrayList<>();
 			for (String key : dead) {

@@ -1,6 +1,7 @@
 package io.github.Ling.create_sequenced_mechanical_arm.program;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -37,6 +38,14 @@ public final class ClipboardChecklist {
 	/** 清单最多画几行（用户要求：超出窗口跟着"当前"那条走，不整页铺满屏幕）。 */
 	public static final int MAX_ROWS = 8;
 
+	/**
+	 * 连续空白（空格 / 制表符 / 全角空格）—— <b>预编译一次</b>，见 {@link #normalize} 的说明。
+	 *
+	 * <p>不写成 {@code replaceAll("[ \t\u3000]+", " ")} 是因为那个重载**每次调用都现编译一遍**同一个正则；
+	 * 而 {@link #normalize} 在 {@code consumed} 的双层循环里被调用几百次（一条程序几百条 × 清单十几行）。
+	 */
+	private static final Pattern SPACES = Pattern.compile("[ \t\u3000]+");
+
 	/** 一行在清单里的状态。 */
 	public enum State {
 		/** 已经录进程序了（备注对上了）。 */
@@ -53,15 +62,18 @@ public final class ClipboardChecklist {
 	 * <p>为什么要碰换行：备注里的换行有两种来源 —— 剪贴板条目自带的**真换行**，
 	 * 以及编辑器里被写成两个字面字符（方案 B）再还原回来的换行。两者其实是同一段文本，
 	 * 不折叠就等于"同一行文字，在两种存法下匹配不上"。
+	 *
+	 * <p>⚠️ 连续空白那条走的是**预编译**的 {@link #SPACES}：它每次比较都要跑（一条程序几百条 × 清单十几行），
+	 * 而 {@code String.replaceAll} 每次调用都会现编译一遍同一个正则 —— 那是纯浪费。
 	 */
 	public static String normalize(String text) {
 		if (text == null)
 			return "";
-		return text.replace("\r\n", "\n")
+		return SPACES.matcher(text.replace("\r\n", "\n")
 			.replace('\r', '\n')
 			.replace("\n", "\\n")
-			.strip()
-			.replaceAll("[ \t\u3000]+", " ");
+			.strip())
+			.replaceAll(" ");
 	}
 
 	/** 两条文本是不是"同一行"（见 {@link #normalize}）。 */

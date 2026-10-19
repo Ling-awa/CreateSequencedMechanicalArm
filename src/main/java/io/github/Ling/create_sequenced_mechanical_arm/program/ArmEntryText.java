@@ -3,12 +3,10 @@ package io.github.Ling.create_sequenced_mechanical_arm.program;
 import java.util.ArrayList;
 import java.util.List;
 
-import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.SkipAction;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadAmount;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
-import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -52,7 +50,8 @@ public final class ArmEntryText {
 	/**
 	 * 护目镜专用：与 {@link #base} 相同，但把「等待信号」的频率物品名也写进去。
 	 *
-	 * <p>卡片上频率是**两个图标**（{@code ArmIcons.secondIconFor}），文字里再写一遍既冗余又把芯片撑宽；
+	 * <p>卡片上频率是**两个图标**（两枚物品槽，见 {@code ArmProgramScreen.renderSignalChip}），
+	 * 文字里再写一遍既冗余又把芯片撑宽；
 	 * 而工具提示没有图标位，只能写名字。这就是两者唯一的差别 —— 所以是同一个方法加一个开关，
 	 * 而不是各写一份（各写一份就会像以前那样两边说法不一致）。
 	 */

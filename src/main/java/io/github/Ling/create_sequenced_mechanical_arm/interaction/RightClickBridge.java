@@ -95,10 +95,6 @@ public class RightClickBridge {
 		return lastFailure;
 	}
 
-	public void clearFailure() {
-		lastFailure = null;
-	}
-
 	// ————————————————————————— 左键：攻击 / 挖掘（v27 拆成两条） —————————————————————————
 
 	/**

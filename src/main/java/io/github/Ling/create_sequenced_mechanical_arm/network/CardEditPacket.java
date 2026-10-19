@@ -4,6 +4,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.item.CardProgramStorage;
 import io.github.Ling.create_sequenced_mechanical_arm.item.ClipboardPlan;
 import io.github.Ling.create_sequenced_mechanical_arm.item.OperationTableItem;
 import io.github.Ling.create_sequenced_mechanical_arm.menu.ArmProgramMenu;
+import io.github.Ling.create_sequenced_mechanical_arm.program.ArmEntryText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
@@ -180,10 +181,10 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 		ClipboardPlan.syncTicks(player, program);
 		player.inventoryMenu.broadcastChanges();
 		// 提示文本：本地化操作名 + 世界坐标 + "第几条 / 哪个任务"（序号与卡片上的序号一致）
-		feedback(player, "card.recorded", ChatFormatting.GREEN,
-			Component.translatable("create_sequenced_mechanical_arm.gui.editor.opt." + packet.op()
-				.name()
-				.toLowerCase()),
+		// ⚠️ 操作名走 {@code ArmEntryText.opName}（**唯一**那处 `opt.<小写名>` 的拼法，带 Locale.ROOT）：
+		//   这里原来自己拼了一遍 `op.name().toLowerCase()` —— 默认 locale 是土耳其语时 `WAIT → waıt`，
+		//   键就命不中、界面上显示原始 key。
+		feedback(player, "card.recorded", ChatFormatting.GREEN, ArmEntryText.opName(packet.op()),
 			world.toShortString(),
 			task.entries.size(), index + 1, task.name);
 	}
@@ -226,9 +227,7 @@ public record CardEditPacket(Action action, BlockPos pos, Direction face, Operat
 			// 撤销一条 ⇒ 清单上那一行的勾要还回去（用户选的方案 A：勾由项目管）
 			ClipboardPlan.syncTicks(player, program);
 			player.inventoryMenu.broadcastChanges();
-			feedback(player, "card.removed", ChatFormatting.YELLOW,
-				Component.translatable("create_sequenced_mechanical_arm.gui.editor.opt." + entry.op.name()
-					.toLowerCase()),
+			feedback(player, "card.removed", ChatFormatting.YELLOW, ArmEntryText.opName(entry.op),
 				index + 1, task.name, i + 1);
 			return;
 		}

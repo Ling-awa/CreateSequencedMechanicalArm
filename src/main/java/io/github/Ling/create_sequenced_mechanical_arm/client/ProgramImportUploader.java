@@ -41,8 +41,9 @@ import net.neoforged.neoforge.network.PacketDistributor;
  *   <li>两片之间 {@link ProgramImportTableBlockEntity#CHUNK_INTERVAL_TICKS} tick
  *       （= 上游 {@code ClientSchematicLoader.PACKET_DELAY = 10}）；</li>
  *   <li>总量上限 {@code ProgramText.MAX_BYTES}（60 KiB）⇒ 最多
- *       {@link ProgramImportTableBlockEntity#MAX_CHUNKS} 片 ≈ {@link ProgramImportTableBlockEntity#UPLOAD_TICKS}
- *       tick ≈ 4 秒。</li>
+ *       {@link ProgramImportTableBlockEntity#MAX_CHUNKS} 片（60 KiB ÷ 8 KiB = 8 片），
+ *       每片隔 {@link ProgramImportTableBlockEntity#CHUNK_INTERVAL_TICKS} tick（10）——
+ *       两数相乘 = <b>80 tick ≈ 4 秒</b>（这就是"≈4 秒"的全部算法，没有别的常数）。</li>
  * </ul>
  *
  * <h2>什么时候自己收工</h2>
@@ -102,10 +103,6 @@ public final class ProgramImportUploader {
 	}
 
 	private ProgramImportUploader() {
-	}
-
-	public static boolean isUploading() {
-		return active != null;
 	}
 
 	/**

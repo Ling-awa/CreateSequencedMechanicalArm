@@ -820,6 +820,12 @@ public class ArmProgramEntry {
 				.append(signalMode)
 				.append(" ticks=")
 				.append(signalTicks())
+				// 频率那一对物品名：语义上与 {@code ArmEntryText.frequencyText}（卡片 / 护目镜的
+				// "铁锭 + 红石" 那句）**同源** —— 都是"把频率的两个物品名拼起来"。但**没有并成一处**：
+				// ① 那个方法是 private（只服务卡片的文字排版），这里在 program 包里够不着；
+				// ② 这一行是**调试 / 护目镜的一行摘要**，写法刻意更紧凑：分隔符是不带空格的 {@code +}，
+				//    而且**空槽也照写**（"未设置+红石"比省略一个更好排查，卡片上那一侧才需要省掉 Air）。
+				// 所以两者是"同一件事的两种排版"，不是重复实现；要合并得先把"谁的口径"定下来。
 				.append(" freq=")
 				.append(frequency == null ? "未设置"
 					: frequency.getFirst()

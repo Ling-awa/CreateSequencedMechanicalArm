@@ -63,16 +63,6 @@ public class ProgramImportTableMenu extends MenuBase<ProgramImportTableBlockEnti
 		return OperationTableItem.isTable(stack) && !CardProgramStorage.hasProgram(stack);
 	}
 
-	/**
-	 * 上游同款：输入有东西 + 输出空格。
-	 *
-	 * <p>界面用它只是"按钮亮不亮"的参考 —— **真正的裁决在服务端**（{@code startUpload}）。
-	 * 客户端不拿它拦请求：拦下来的话玩家点了没反应、也不知道为什么（回执比灰按钮有用）。
-	 */
-	public boolean canWrite() {
-		return inputSlot.hasItem() && !outputSlot.hasItem();
-	}
-
 	@Override
 	public ItemStack quickMoveStack(Player playerIn, int index) {
 		Slot clickedSlot = getSlot(index);

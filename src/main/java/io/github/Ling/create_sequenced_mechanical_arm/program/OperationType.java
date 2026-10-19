@@ -155,21 +155,13 @@ public enum OperationType {
 		return this == TAKE || this == DEPOSIT || this == UNLOAD || this == DEPLOY;
 	}
 
-	/**
-	 * 控制类操作：**不做动作** —— 只改程序的走向或做一次纯判断
-	 * （调用 / 退出 / 抛错 / 收发信号 / 过滤）。
-	 *
-	 * <p>★ 「过滤」在这一族（用户口径："过滤是控制类操作，它不是交互"）：臂不移动、不对世界做任何动作
-	 * （只**读**一格），因此它和等待类一样**没有"伸过去"那一段** ——
-	 * 运行时那条判据在 {@code ArmProgramEntry.movesArm()}。
-	 */
-	public boolean isControl() {
-		return this == CALL || this == BREAK || this == THROW || this == SIGNAL || this == FILTER;
-	}
-
 	// ⚠️ 「有没有重试窗口 / 有没有失败出口」**不再按类型判**：同一条 SIGNAL，收有、发没有。
 	// 类型级谓词已搬到 ArmProgramEntry.hasRetryWindow() / hasFailureExit() / hasHardFailureExit()
 	//（§7.16b 一.2：判据必须只有一处 —— 写在两处就会不一致）。
+	//
+	// ⚠️ 同理，「控制类操作」那个类型级谓词（CALL / BREAK / THROW / SIGNAL / FILTER）**已删**：
+	// 运行时真正要问的是"臂要不要伸过去"（{@code ArmProgramEntry.movesArm()} = {@code requiresTarget()}），
+	// 而"不移动"还有 WAIT 这类非控制类的成员 —— 一个枚举在这里再列一遍只会与那个判据分叉。
 
 	/**
 	 * 等待类操作：原地耗时间，**不碰目标**。

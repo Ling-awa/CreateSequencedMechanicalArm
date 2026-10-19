@@ -66,8 +66,9 @@ import org.slf4j.Logger;
  *
  * <h2>界面仍然不做裁决</h2>
  * 能不能导（输入槽是不是空白表、输出槽空不空、总量超不超、编译过不过、乱序超量超时）全部由服务端判
- * （{@code ProgramImportTableBlockEntity.startUpload / acceptChunk}）。所以确认键**不**按
- * {@code menu.canWrite()} 变灰：灰按钮说不出理由，而回执说得出（"请先在输入槽放一张空白操作表"）。
+ * （{@code ProgramImportTableBlockEntity.startUpload / acceptChunk}）。所以确认键**不**按"输入有没有东西 +
+ * 输出空不空"变灰：灰按钮说不出理由，而回执说得出（"请先在输入槽放一张空白操作表"）——
+ * 菜单里原来那份"输入有东西 + 输出空格"的便捷判定**没有任何调用方**，已随本轮清理删除。
  * 界面自己只拦两类**本机**错误（否则会白发一个包）：列表为空、以及"这个文件读不出来 / 是空的 / 太大"
  * （{@link ProgramImportFiles#read}）。
  *

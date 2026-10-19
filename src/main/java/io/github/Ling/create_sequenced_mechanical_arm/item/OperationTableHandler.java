@@ -351,7 +351,9 @@ public class OperationTableHandler {
 		// —— 使用键 ——
 		// ① 副手拿着**写了字的剪贴板** = 按序号写入备注（用户第三轮要求）。这条优先于"潜行右键切模式"：
 		//    那是玩家明确要做的数据操作；剪贴板空着就照旧切模式，免得把切模式堵死。
-		List<String> notes = clipboardNotes(player);
+		//    行从 {@code ClipboardPlan.lines} 读：**服务端也要读同一份行**（录一条时自动把下一行写成备注，
+		//    见 §5.5），两边各写一份迟早会读得不一样。
+		List<String> notes = ClipboardPlan.lines(player.getOffhandItem());
 		if (sneak && !notes.isEmpty()) {
 			event.setCanceled(true);
 			PacketDistributor.sendToServer(new CardNotesPacket(notes));
@@ -417,17 +419,6 @@ public class OperationTableHandler {
 		// 记的是**世界坐标**（客户端只报位置与面，服务端按**卡上**那个原点换算成偏移，§19.7）；
 		// 运行时的世界目标是"臂位置 + 偏移" —— **卡上的原点不参与**，插卡也不再做任何平移。
 		PacketDistributor.sendToServer(new CardEditPacket(CardEditPacket.Action.ADD_ENTRY, pos, face, currentOp()));
-	}
-
-	/**
-	 * 副手剪贴板上的文本行（用户第三轮要求："在剪贴板上写下若干行的文本，放在副手，
-	 * 主手持有操作卡潜行右键会自动按序号添加对应行的备注"）。
-	 *
-	 * <p>实现搬去了 {@link ClipboardPlan#lines} —— <b>服务端也要读同一份行</b>
-	 * （录一条时自动把下一行写成备注，见 §5.5），两边各写一份迟早会读得不一样。
-	 */
-	private static List<String> clipboardNotes(LocalPlayer player) {
-		return ClipboardPlan.lines(player.getOffhandItem());
 	}
 
 	@SubscribeEvent

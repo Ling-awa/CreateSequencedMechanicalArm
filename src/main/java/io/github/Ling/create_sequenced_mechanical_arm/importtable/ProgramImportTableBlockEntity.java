@@ -124,14 +124,6 @@ public class ProgramImportTableBlockEntity extends SmartBlockEntity implements M
 	 */
 	public static final int UPLOAD_TIMEOUT_TICKS = 6 * CHUNK_INTERVAL_TICKS;
 
-	/**
-	 * 一次完整上传最多占多少 tick：{@code MAX_CHUNKS × CHUNK_INTERVAL_TICKS = 80 tick = 4 秒}。
-	 *
-	 * <p>只是**给别人看的推算值**（界面文案、注释、文档都念它），代码里不拿它做判定 ——
-	 * 判定按"收满 / 超时"两件事，不按总时长（慢客户端的第 8 片不该被自己的总时长掐掉）。
-	 */
-	public static final int UPLOAD_TICKS = MAX_CHUNKS * CHUNK_INTERVAL_TICKS;
-
 	/** 输入槽（空白操作表）与输出槽（导入结果）的下标 —— 菜单里的槽位顺序必须与它一致。 */
 	public static final int SLOT_INPUT = 0;
 	public static final int SLOT_OUTPUT = 1;

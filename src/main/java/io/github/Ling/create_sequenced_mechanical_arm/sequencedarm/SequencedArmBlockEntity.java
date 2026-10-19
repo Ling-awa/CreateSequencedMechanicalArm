@@ -22,7 +22,6 @@ import com.simibubi.create.content.equipment.clipboard.ClipboardEntry;
 import com.simibubi.create.content.equipment.clipboard.ClipboardOverrides.ClipboardType;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.kinetics.belt.BeltBlockEntity;
-import com.simibubi.create.content.kinetics.belt.behaviour.TransportedItemStackHandlerBehaviour;
 import com.simibubi.create.content.kinetics.belt.transport.BeltInventory;
 import com.simibubi.create.content.kinetics.belt.transport.TransportedItemStack;
 import com.simibubi.create.content.kinetics.deployer.DeployerFakePlayer;
@@ -59,8 +58,6 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.sounds.SoundEvents;
-import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -1763,11 +1760,6 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	/** 还在表里的频率条数（**不管电平**）—— 自检用它断言"配置上限"与"只断指定那一路"。 */
 	public int heldSignalCount() {
 		return heldSignals == null ? 0 : heldSignals.size();
-	}
-
-	/** 这条臂现在保持的所有频率（只读快照；自检用）。 */
-	public List<Couple<Frequency>> heldSignalFrequencies() {
-		return heldSignals == null ? List.of() : List.copyOf(heldSignals.keySet());
 	}
 
 	/** 最近一次「发」因为表满被拒的信号条数（{@code 0} = 没发生）；护目镜与自检都读它。 */

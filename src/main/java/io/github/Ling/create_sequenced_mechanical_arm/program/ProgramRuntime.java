@@ -1,7 +1,6 @@
 package io.github.Ling.create_sequenced_mechanical_arm.program;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -349,18 +348,9 @@ public class ProgramRuntime {
 		return arm.tickArmLink();
 	}
 
-	/** 调用深度（0 = 正在跑主任务）。护目镜用它显示面包屑。 */
-	public int callDepth() {
-		return callStack.size();
-	}
-
 	@Nullable
 	public String getError() {
 		return error;
-	}
-
-	public int getErrorEntryIndex() {
-		return errorEntryIndex;
 	}
 
 	@Nullable
@@ -402,7 +392,9 @@ public class ProgramRuntime {
 		return switch (entry.op) {
 			case WAIT -> " 开始等待 " + entry.waitTicks() + "t";
 			case SIGNAL -> entry.isSignalReceive() ? " 开始等信号" : " 发信号";
-			default -> entry.op.isWait() ? " 开始等待" : " 开始执行";
+			// 「等待类」只有 WAIT 与 SIGNAL 两种，上面两个 case 已经把它们吃掉了 ⇒ 走到这里的
+			// 一定不是等待类，直说"开始执行"即可（原来那个 `entry.op.isWait() ? …` 是恒真的三元）。
+			default -> " 开始执行";
 		};
 	}
 
@@ -455,10 +447,15 @@ public class ProgramRuntime {
 		// 2 条/tick = 每 tick 四步（= 一 tick 两条）。
 		// 只在**真的跑到这里**时累积 —— 上面那些早退（停机 / 锁定 / 无转速 / 空程序）都不攒预算，
 		// 否则"暂停几小时后恢复"会一次性吐出几千条。
+		// ★ 本 tick 的**步数硬上限只算一次**：它读的是配置项（{@code SequencedArmConfig.entriesPerTick()}，
+		//   ModConfigSpec 取值），而下面循环里**每走一步**都要拿它比一次。同一 tick 内这个值不可能变
+		//   （单线程；配置只在加载/重载时改），所以提前算一次与"每步现算"结果完全一致，只是省掉每步一次配置读取。
+		//   ⚠️ 必须放在上面那些早退**之后**：那几条路径本来就不读配置、也不记预算账。
+		final int stepCap = maxStepsPerTick();
 		rateBudget += effectiveRate() * STEPS_PER_ENTRY;
 		// 单 tick 额度封顶：预算**每走一步就扣一步**（见循环里那句 `rateBudget -= 1.0`），余量正常永远
 		// < 1 步、这道封顶用不上 —— 留着是防"将来某条路径忘了扣"时它悄悄攒成一大笔（那正是本值修掉的旧 bug）。
-		rateBudget = Math.min(rateBudget, maxStepsPerTick());
+		rateBudget = Math.min(rateBudget, stepCap);
 		tickBudgetUsed = 0;
 
 		// §7.6 v4：没有调度器了 —— 谁在跑就是谁。任务数变了（卡被编辑过）就回到主任务。
@@ -514,7 +511,7 @@ public class ProgramRuntime {
 		while (true) {
 			if (idleCooldown > 0 || isHalted())
 				break; // 上一步可能刚把它设上（前置检查失败 / 停机）
-			if (tickBudgetUsed >= maxStepsPerTick())
+			if (tickBudgetUsed >= stepCap)
 				break; // 硬上限：本 tick 走够步数了，剩下的留给下一 tick
 			if (rateBudget < 1.0 - BUDGET_EPSILON)
 				break; // 本 tick 拿到的预算用完了（0.5 条/tick 时就是"攒够一步才动一下"）
@@ -560,8 +557,9 @@ public class ProgramRuntime {
 				}
 				case WAITING -> tickWait(arm, task, entry);
 				case EXECUTING -> execute(arm, task, entry);
-				case HALTED -> {
-				}
+				// ⚠️ 原来这里还有一个 `case HALTED -> { }`：它**不可达**（`tick` 在入口与循环开头
+				//   都拿 `isHalted()` 早退/break，而 HALTED 只由 `halt()` 设置），而且真走到了它也只是
+				//   "什么都不做"—— 与"没有这个 case"逐字节相同。所以删掉，不留一条假装在兜底的空分支。
 			}
 
 			// ★ 每一步都花掉一步的预算（否则"一条自跳转脚本"能在同一 tick 里无限转下去）。
@@ -918,9 +916,13 @@ public class ProgramRuntime {
 		// 注意它比 IK 的两节臂总长（29/16 ≈ 1.81 格）大：范围内的远处目标仍会让手臂拉直，
 		// 那是固有限制、不在这里拦（见 PLAN §7.9）。
 		int range = ArmBlockEntity.getRange();
-		if (!withinArmRange(arm.getBlockPos(), target))
-			return String.format("目标超出臂的范围（%.1f 格 > %d 格）",
-				Math.sqrt(target.distSqr(arm.getBlockPos())), range);
+		if (!withinArmRange(arm.getBlockPos(), target)) {
+			// ★ 这段每 tick 都会走一遍（前置检查失败是**每 tick 重试**的）⇒ 不为此付 `String.format` +
+			//   `Math.sqrt` 的钱：纯字符串拼接就够了，而"差多远"用**平方**距离同样回答得了
+			//   （26 > 25 就是"差一点点"），还省掉一次开方。
+			long distSqr = (long) target.distSqr(arm.getBlockPos());
+			return "目标超出臂的范围（距离平方 " + distSqr + " > " + (long) range * range + "，上限 " + range + " 格）";
+		}
 
 		BlockState state = level.getBlockState(target);
 		if (entry.op.needsInteractionPoint()) {
@@ -931,9 +933,12 @@ public class ProgramRuntime {
 		// "和原本的机械手一模一样 —— 不检测能不能挖动，不检测有没有实体或者方块"。
 		// 于是这两条的"有没有东西"完全交给动作本身：挖到空气 = 什么都不发生，格里没实体 = 挥空，都算完成；
 		// 挖不动（进度恒 0）才由动作返回硬失败并带上原因（那不是动身前的检测，是挥完之后的事实）。
-		IItemHandler handler = arm.peekHandler(offset);
+		// ★ 目标那一格的**物品能力句柄按需取**（只有「取出」与「组装」真的用它）：`peekHandler` 是纯只读解析
+		//   （不改变任何状态），所以挪进这两支是安全的；好处是「放入 / 卸货 / 攻击 / 挖掘 / 使用」不再为
+		//   一次 `getCapability` 付钱 —— 而这段判定是**每 tick** 重跑的。
 		switch (entry.op) {
 			case TAKE -> {
+				IItemHandler handler = arm.peekHandler(offset);
 				if (TargetInteraction.isDepositOnly(level, target))
 					// 判定方式与原版一致（`AllArmInteractionPointTypes.DepositOnlyArmInteractionPoint`：
 					// 漏斗 / 烈焰人 / 营火 / 重生锚 / 粉碎轮），所以这里**不能**再写"（漏斗类）"
@@ -997,6 +1002,7 @@ public class ProgramRuntime {
 					return probe.blockedReason();
 			}
 			case DEPLOY -> {
+				IItemHandler handler = arm.peekHandler(offset);
 				if (handler == null)
 					return "目标没有物品能力";
 				ItemStack applicator = arm.getHeldItem();
@@ -1862,8 +1868,9 @@ public class ProgramRuntime {
 	 *
 	 * <p>过滤容器模式在这里照旧返回它读的那一格（{@code needsTarget()} 为真）：这条问的是
 	 * "这条条目指着哪一格"，**不是**"臂要不要伸过去"（后者见 {@code ArmProgramEntry.movesArm()}）。
-	 * 它现在其实用不到（过滤不动身 ⇒ 不走前置检查、也不认领），留着是为了让"有坐标就有这一格"
-	 * 这件事只有一处答案 —— 换成类型判据会在下次有人让控制类也关心格子时静默指错位置。
+	 * 它现在**确实有消费方**：{@code SequencedArmBlockEntity.workOffset()} 用它算"本 tick 关心的那一格"
+	 * （认领要把物品按在哪、带速宽限期按哪条带子算）—— 那里问的正是"条目指着哪一格"，
+	 * 所以不能换成类型判据（换成 {@code movesArm()} 的话，控制类条目会指向上一条的位置）。
 	 */
 	@Nullable
 	public BlockPos entryOffset(SequencedArmBlockEntity arm) {

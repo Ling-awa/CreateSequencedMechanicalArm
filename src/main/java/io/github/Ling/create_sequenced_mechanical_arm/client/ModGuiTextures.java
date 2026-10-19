@@ -36,7 +36,7 @@ import net.minecraft.resources.ResourceLocation;
  *
  * <h2>为什么不用 {@code UIRenderHelper.drawStretched}</h2>
  * 它要求 {@code TextureSheetSegment}，而它内部把 uv 也写死成 {@code 图集 = 256}
- * （{@code :342-347}：{@code getStartX() / 256f}）—— 对小图集是错的。所以拉伸收进本枚举
+ * （上游 {@code :342-347} 拿 sprite 的 uv 起点除以 256）—— 对小图集是错的。所以拉伸收进本枚举
  * （{@link #renderStretched}），z 用 {@code pose().translate(0,0,z)} 表达，
  * 与上游"把 z 加在顶点上"等价（本文件 {@code ArmProgramScreen} 里滚条早就在用同一种写法）。
  *
@@ -184,18 +184,6 @@ public enum ModGuiTextures {
 		this.startY = startY;
 		this.sheetWidth = sheetWidth;
 		this.sheetHeight = sheetHeight;
-	}
-
-	public ResourceLocation getLocation() {
-		return location;
-	}
-
-	public int getStartX() {
-		return startX;
-	}
-
-	public int getStartY() {
-		return startY;
 	}
 
 	public int getWidth() {

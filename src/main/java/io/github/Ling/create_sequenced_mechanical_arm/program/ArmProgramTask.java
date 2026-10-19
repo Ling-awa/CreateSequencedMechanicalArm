@@ -4,8 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.IntFunction;
 
-import org.jetbrains.annotations.Nullable;
-
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 
 import net.createmod.catnip.data.Couple;
@@ -74,7 +72,9 @@ public class ArmProgramTask {
 		// ——— v3 → v4：任务的频率门控搬成任务开头的「收发信号（收）」条目 ———
 		// 老卡片的意思是"这个任务要通电（或断电）才跑"，直接丢掉会让它从"门控"变成"常驻"，
 		// 静默改变行为；写成第一条「收发信号（收）」就完全等价（signalMode 缺省 = RECEIVE，行为不变）。
-		Couple<Frequency> legacy = readLegacyFrequency(tag, registries);
+		// 读法与条目自己的 freq 键**同一份实现**（{@code ArmProgramEntry.readFrequency}）：
+		// 老任务频率门控与条目频率是同一个 NBT 形状，抄一份到这里只会两边慢慢长歪。
+		Couple<Frequency> legacy = ArmProgramEntry.readFrequency(tag, registries);
 		if (legacy != null) {
 			ArmProgramEntry gate = new ArmProgramEntry();
 			gate.op = OperationType.SIGNAL;
@@ -112,22 +112,6 @@ public class ArmProgramTask {
 		} catch (NumberFormatException tooBig) {
 			return target; // 位数多到 int 装不下：本来就只会被判"序号超范围"，原样留着更好排查
 		}
-	}
-
-	/** 老结构里的 {@code freq}（v3 的任务频率门控），只用于迁移。 */
-	@Nullable
-	private static Couple<Frequency> readLegacyFrequency(CompoundTag tag, HolderLookup.Provider registries) {
-		if (!tag.contains("freq"))
-			return null;
-		ListTag freqTag = tag.getList("freq", Tag.TAG_COMPOUND);
-		if (freqTag.size() != 2)
-			return null;
-		Couple<Frequency> parsed =
-			Couple.deserializeEach(freqTag, c -> Frequency.of(ItemStack.parseOptional(registries, c)));
-		// 两个物品都为空的频率没有意义（等价于"没有发射器"），按常驻处理更不容易困惑
-		if (parsed.getFirst() == Frequency.EMPTY && parsed.getSecond() == Frequency.EMPTY)
-			return null;
-		return parsed;
 	}
 
 	/** 护目镜 / 调试用的一行描述。 */

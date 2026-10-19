@@ -101,21 +101,6 @@ public final class ScriptParser {
 	/** delay 的上限。运行时它是"前摇 tick 数"，一天（72000t）已经远超任何合理用法。 */
 	public static final int DELAY_MAX = 72_000;
 
-	/** 备注的来源：块注释 / {@code note="…"} 保底形式 / 都没有。 */
-	private enum NoteSource {
-		NONE("", false),
-		BLOCK("/*", true),
-		QUOTED("note=\"", true);
-
-		final String display;
-		final boolean quoted;
-
-		NoteSource(String display, boolean quoted) {
-			this.display = display;
-			this.quoted = quoted;
-		}
-	}
-
 	private final HolderLookup.Provider registries;
 	private final List<ScriptError> errors = new ArrayList<>();
 	private final List<String> warnings = new ArrayList<>();
@@ -593,7 +578,7 @@ public final class ScriptParser {
 	 * 判据写两份必然漂移（决策 68/85）。
 	 */
 	private void attachComment(Ctx ctx, CommentBlock block) {
-		registerNote(ctx, block.body(), block.line(), NoteSource.BLOCK);
+		registerNote(ctx, block.body(), block.line());
 	}
 
 	/**
@@ -607,7 +592,7 @@ public final class ScriptParser {
 	 * 玩家想"再补一句注释"是很自然的事。三块才报错（再多就不是"补一句"，而是把两个东西写混了）。
 	 * 合并口径只有这一处：{@code note="…"} 保底写法与块注释走同一条路径。
 	 */
-	private void registerNote(Ctx ctx, String note, int line, NoteSource source) {
+	private void registerNote(Ctx ctx, String note, int line) {
 		if (note.length() > ArmProgramEntry.NOTE_MAX) {
 			error(line, "备注 " + note.length() + " 字，超过上限 " + ArmProgramEntry.NOTE_MAX + " 字（不截断）");
 			return;
@@ -837,7 +822,7 @@ public final class ScriptParser {
 			// 静默让后写的覆盖先写的就是"哪一份是真的"这种最难的 bug。
 			ctx.entry = entry;
 			ctx.owner = Ctx.Owner.ENTRY;
-			registerNote(ctx, parsed.quotedNote, parsed.line, NoteSource.QUOTED);
+			registerNote(ctx, parsed.quotedNote, parsed.line);
 		}
 
 		ctx.task.entries.add(entry);

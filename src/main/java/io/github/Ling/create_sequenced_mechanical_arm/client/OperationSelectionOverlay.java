@@ -77,10 +77,6 @@ public class OperationSelectionOverlay implements LayeredDraw.Layer {
 		return ops.get(selection);
 	}
 
-	public boolean isFocused() {
-		return focused;
-	}
-
 	/** 每客户端 tick 调一次（由 {@code OperationTableHandler} 驱动，省得每帧去读卡）。 */
 	public void tick(boolean visible) {
 		this.visible = visible;

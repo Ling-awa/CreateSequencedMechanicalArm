@@ -2,6 +2,7 @@ package io.github.Ling.create_sequenced_mechanical_arm.program.script;
 
 import java.util.Locale;
 
+import io.github.Ling.create_sequenced_mechanical_arm.program.ArmEntryText;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgram;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.SignalMode;
@@ -183,7 +184,11 @@ public final class ScriptDecompiler {
 		if (entry.delay != 0)
 			out.append(" delay=")
 				.append(entry.delay);
-		if (needsFace(entry.op) || entry.face != Direction.UP)
+		// 「哪些操作有交互面」的判据**只有一处**（{@code ArmEntryText.needsFace}，卡片显示也用它）。
+		// ⚠️ 「过滤」不在其中（用户第四十三轮）：容器模式只读内容 ⇒ 只要坐标，不再让玩家填朝向。
+		//   但**写不写** face 仍由"模型里 face 是不是默认值"决定（下面那个 `|| entry.face != UP`）——
+		//   手写的 `face=north` 因此在往返里不会丢，只是界面不再提供它。
+		if (ArmEntryText.needsFace(entry.op) || entry.face != Direction.UP)
 			out.append(" face=")
 				.append(entry.face.getName()
 					.toLowerCase(Locale.ROOT));
@@ -269,15 +274,6 @@ public final class ScriptDecompiler {
 		if (!entry.icon.isEmpty())
 			out.append(" icon=")
 				.append(item(entry.icon));
-	}
-
-	/** 哪些操作有"交互面"——与 {@code ArmEntryText.needsFace} 同一判据（那里是显示，这里是写文件）。 */
-	private static boolean needsFace(OperationType op) {
-		// ★ 「过滤」不在（用户第四十三轮）：容器模式只读内容 ⇒ 只要坐标，不再让玩家填朝向。
-		//   但**写不写**这条仍由"模型里 face 是不是默认值"决定（见 writeSuffixes）——
-		//   手写的 `face=north` 因此在往返里不会丢，只是界面不再提供它。
-		return op == OperationType.MINE || op == OperationType.ATTACK || op == OperationType.USE
-			|| op == OperationType.USE_SNEAK;
 	}
 
 	/** 过滤位置的规范写法（{@code HELD → held}、{@code CONTAINER → container}）。 */
