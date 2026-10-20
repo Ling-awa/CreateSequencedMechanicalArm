@@ -14,19 +14,23 @@ import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 /**
- * 编辑器"看到哪"的 C2S 意图包（PLAN.md §18）：页面 + 操作页指针 + 两个列表的滚动。
+ * 编辑器"看到哪"的 C2S 意图包（PLAN.md §18）：页面 + 操作页指针 + 两个列表的滚动 +「自动更正序号」开关。
  *
  * <p>用户要求：<i>"可以让操作页的指针位置和滚动位置也保留下来，这样方便玩家连续编辑测试。"</i>
  * 关掉界面去世界里试一下、再打开接着改，界面得回到你离开时那一行。
  *
  * <p><b>为什么不挂在 {@code ArmProgramEditPacket}（全量保存）上</b>：那条路要过规模上限与体积校验，
  * 而"滚动到第 15 行"根本不是数据改动 —— 玩家只是挪了挪视线，没有任何理由为此冒"整份程序被拒"的风险
- * （与 {@link CardUiPacket} 的分工理由相同，见它的注释）。所以它走自己这条轻量通道，只写四个键。
+ * （与 {@link CardUiPacket} 的分工理由相同，见它的注释）。所以它走自己这条轻量通道，只写这几个键。
+ *
+ * <p>★ 用户 2026-10-20 加的「自动更正序号」开关也走这里：它同样是"这张卡怎么被编辑"的偏好、
+ * 同样不是数据改动 —— 多开一个包只为了一个布尔值不值当，而这条通道本来就"只写无关程序的键"。
  *
  * <p>服务端**不信任**包里的数：页名只认两个取值、滚动压进合法区间、指针非负（{@link CardProgramStorage#writeView}）。
  * 越界的指针不会在这里夹到"列表长度"——那是界面的事（只有它知道列表现在多长），它恢复时会自己夹。
  */
-public record CardViewPacket(int entry, String page, float scroll, float taskScroll) implements CustomPacketPayload {
+public record CardViewPacket(int entry, String page, float scroll, float taskScroll,
+	boolean autoFixJumps) implements CustomPacketPayload {
 
 	public static final CustomPacketPayload.Type<CardViewPacket> TYPE =
 		new CustomPacketPayload.Type<>(
@@ -38,8 +42,10 @@ public record CardViewPacket(int entry, String page, float scroll, float taskScr
 			buf.writeUtf(packet.page());
 			buf.writeFloat(packet.scroll());
 			buf.writeFloat(packet.taskScroll());
+			buf.writeBoolean(packet.autoFixJumps());
 		},
-		buf -> new CardViewPacket(buf.readVarInt(), buf.readUtf(), buf.readFloat(), buf.readFloat()));
+		buf -> new CardViewPacket(buf.readVarInt(), buf.readUtf(), buf.readFloat(), buf.readFloat(),
+			buf.readBoolean()));
 
 	@Override
 	public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
@@ -53,9 +59,10 @@ public record CardViewPacket(int entry, String page, float scroll, float taskScr
 			ItemStack card = player.getMainHandItem();
 			if (!OperationTableItem.isTable(card))
 				return;
-			// 只动那四个键：程序文本、模式、任务下标都不碰（包里的数由 writeView 过滤）
+			// 只动这几个键：程序文本、模式、任务下标都不碰（包里的数由 writeView 过滤）
 			CardProgramStorage.writeView(card,
 				new View(packet.entry(), packet.page(), packet.scroll(), packet.taskScroll()));
+			CardProgramStorage.writeAutoFixJumps(card, packet.autoFixJumps());
 			// 与其它卡包同一条约定：写完把权威副本广播回客户端（本地那份因此与服务端一致）
 			player.inventoryMenu.broadcastChanges();
 		});

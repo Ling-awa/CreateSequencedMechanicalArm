@@ -43,6 +43,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
+import io.github.Ling.create_sequenced_mechanical_arm.program.JumpTargets;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramRuntime;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ProgramText;
@@ -409,6 +410,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int BOTTOM_BTN_SIZE = 18;
 
 	/**
+	 * 「自动更正序号」那颗开关的位置（用户 2026-10-20：「在底部右侧添加一个新的按钮」）。
+	 *
+	 * <p>为什么是 123：底栏那一行现在是 21 / 45 / 63（页面、撤销、＋）与 87 / 105（原点、偏移），
+	 * 间距 18 的一串；它接在偏移右边、仍然贴着（123 + 18 = 141），离右下角那颗「保存并关闭」
+	 * （{@link #CONFIRM_BTN_X} = 214）还有 73px 余量 —— 自检 {@code checkBottomButtons} 会钉住这一点。
+	 */
+	private static final int BOTTOM_BTN_AUTOFIX_X = 123;
+
+	/**
 	 * 编辑子面板打开时，那两颗卡级按钮的位置（背包右侧那条空白：214..256）。
 	 *
 	 * <p>见 {@link #buildCardButtons} 的说明：编辑时底下画的是玩家背包（38..214），
@@ -434,6 +444,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private boolean dirty;
 	private boolean rebuildPending;
 	private String status = "";
+
+	/**
+	 * 「自动更正序号」开关（用户 2026-10-20）：开着时，插入 / 删除 / 移动 / 复制条目都会把**数字落点**
+	 * 跟着改写，让"跳到第 N 条"仍然落在同一条操作上（逻辑在 {@link JumpTargets}）。
+	 *
+	 * <p>状态住在卡上（{@code CardProgramStorage.KEY_AUTOFIX}），只在构造时读一次（见构造函数里的说明）。
+	 */
+	private boolean autoFixJumps;
 
 	private Page page = Page.ENTRIES;
 	/** 操作页当前编辑哪个任务。 */
@@ -568,6 +586,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		this.menu = menu;
 		program = CardProgramStorage.read(menu.getCard(), registries());
 		view = CardProgramStorage.readView(menu.getCard());
+		// 「自动更正序号」开关也住在卡上（用户 2026-10-20）。**只在构造时读一次**：
+		// init() 会因为各种重建反复跑，而玩家刚按下的那个开关在服务端回包之前卡上还是旧值 ——
+		// 每帧/每次重建都从卡上读，会出现"按下去又自己弹回来"（与 mode 的 pushPending 同一个坑）。
+		autoFixJumps = CardProgramStorage.readAutoFixJumps(menu.getCard());
 		// 打开时直接落到"正在编辑的那个任务"上：玩家在界外用 Ctrl+滚轮选了任务 3，
 		// 界面就得开在任务 3 —— 否则那两个入口各说各话（§5.1 v5）。
 		if (program.tasks.isEmpty()) {
@@ -659,7 +681,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		if (now.equals(view))
 			return;
 		view = now;
-		PacketDistributor.sendToServer(new CardViewPacket(now.entry(), now.page(), now.scroll(), now.taskScroll()));
+		PacketDistributor.sendToServer(
+			new CardViewPacket(now.entry(), now.page(), now.scroll(), now.taskScroll(), autoFixJumps));
 	}
 
 	/**
@@ -761,6 +784,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		//   偏移 = 平移（{@code I_TOOL_MOVE_XZ}，Create 蓝图工具那套的"沿 XZ 搬"）—— 都不新画贴图。
 		buildCardButtons(BOTTOM_BTN_SET_ORIGIN_X, BOTTOM_BTN_SHIFT_X, 196);
 
+		// ★ 「自动更正序号」开关（用户 2026-10-20）：底栏右侧那颗方形按钮。
+		//   贴图照 Create 时刻表里"是否循环"那颗（{@code ScheduleScreen:134-145}）：同一个 {@code I_*} 图标，
+		//   靠 {@code IconButton.green} 在 {@code AllGuiTextures.BUTTON} 与 {@code BUTTON_GREEN} 之间切换
+		//   （{@code IconButton:35} 那行三元表达式就是用户说的"开启时绿色按钮贴图"）。
+		IconButton autoFix = new IconButton(leftPos + BOTTOM_BTN_AUTOFIX_X, topPos + 196, AllIcons.I_SEQ_REPEAT);
+		autoFix.withCallback(() -> toggleAutoFixJumps(autoFix));
+		autoFix.green = autoFixJumps;
+		// `setToolTip` 只吃单个组件；两行提示走控件自带的那张表（与原点/偏移两颗同一手法）
+		autoFix.setToolTip(tr("btn.auto_fix_jumps"));
+		autoFix.getToolTip()
+			.addAll(autoFixTipTail(autoFixJumps));
+		addRenderableWidget(autoFix);
+
 		IconButton confirm = new IconButton(leftPos + CONFIRM_BTN_X, topPos + bg.getHeight() - 30,
 			AllIcons.I_CONFIRM);
 		confirm.withCallback(() -> minecraft.player.closeContainer());
@@ -791,9 +827,45 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		IconButton shift = new IconButton(leftPos + x2, topPos + y, AllIcons.I_TOOL_MOVE_XZ);
 		shift.withCallback(() -> openDialog(Dialog.OFFSET));
 		shift.setToolTip(tr("btn.shift_coords"));
+		// 提示里带上**作用域**（用户 2026-10-20：任务页 = 整张卡，操作页 = 只有当前任务）——
+		// 同一颗按钮在两页上做的事不一样，不说清楚就只能靠玩家自己发现。
 		shift.getToolTip()
-			.add(tr("tip.shift_coords"));
+			.add(tr("tip.shift_coords", shiftScopeName()));
 		addRenderableWidget(shift);
+	}
+
+	/** 「坐标偏移」此刻的作用域名（{@code scope.all_tasks} / {@code scope.this_task}），给三处文案共用。 */
+	private Component shiftScopeName() {
+		return tr(shiftScopeTask() == null ? "scope.all_tasks" : "scope.this_task");
+	}
+
+	/**
+	 * 切换「自动更正序号」：改本地状态 + 立刻写回卡（走 {@code CardViewPacket}，与浏览位置同一条轻量通道）。
+	 *
+	 * <p>为什么不走全量保存：这只是一个编辑偏好，和"滚动到第几行"同级 —— 没有理由让它参与
+	 * 「整份程序要么全部接受、要么全部拒绝」。按钮自己的贴图/提示当场跟着换（不等服务端回包，
+	 * 手感和 Create 时刻表那颗循环键一致）；卡上的权威副本由服务端回包刷新。
+	 */
+	private void toggleAutoFixJumps(IconButton button) {
+		autoFixJumps = !autoFixJumps;
+		button.green = autoFixJumps;
+		button.getToolTip().clear();
+		button.getToolTip().add(tr("btn.auto_fix_jumps"));
+		button.getToolTip().addAll(autoFixTipTail(autoFixJumps));
+		status = tr("status.auto_fix", tr(autoFixJumps ? "opt.enabled" : "opt.disabled").getString()).getString();
+		CardProgramStorage.View now = currentView();
+		PacketDistributor.sendToServer(
+			new CardViewPacket(now.entry(), now.page(), now.scroll(), now.taskScroll(), autoFixJumps));
+	}
+
+	/**
+	 * 那颗开关悬停提示的**第二行**（已启用 / 未启用），带色 —— 与 Create 时刻表里的循环键同一个做法
+	 * （{@code ScheduleScreen:121-143}：名字一行、状态一行，启用时深绿、停用时红色）。
+	 */
+	private List<Component> autoFixTipTail(boolean on) {
+		return List.of(tr(on ? "opt.enabled" : "opt.disabled")
+			.copy()
+			.withStyle(on ? ChatFormatting.DARK_GREEN : ChatFormatting.RED));
 	}
 
 	@Override
@@ -3045,7 +3117,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 		IconButton confirmBtn = new IconButton(leftPos + 56 + 168, topPos + 65 + 22, AllIcons.I_CONFIRM);
 		confirmBtn.withCallback(this::confirmDialog);
-		confirmBtn.setToolTip(tr(editingDialog == Dialog.ORIGIN ? "btn.origin_confirm" : "btn.shift_confirm"));
+		confirmBtn.setToolTip(tr(editingDialog == Dialog.ORIGIN ? "btn.origin_confirm" : "btn.shift_confirm",
+			shiftScopeName()));
 		addEditorWidget(confirmBtn);
 
 		IconButton clearBtn = new IconButton(leftPos + 56 - 45, topPos + 65 + 22, AllIcons.I_TRASH);
@@ -3074,7 +3147,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		dialogField = null;
 		textField(DIALOG_FIELD_X, ROW2_Y, DIALOG_FIELD_W,
 			tr(editingDialog == Dialog.ORIGIN ? "entry.origin_coords" : "entry.shift_coords"),
-			tr(editingDialog == Dialog.ORIGIN ? "hint.entry_origin_coords" : "hint.entry_shift_coords"), initial, 32,
+			editingDialog == Dialog.ORIGIN ? tr("hint.entry_origin_coords")
+				: tr("hint.entry_shift_coords", shiftScopeName()),
+			initial, 32,
 			v -> { /* 只负责收字：解析与报错都在「确认」那一下做（边打字边报错会一路飘红） */ });
 		for (GuiEventListener listener : editorWidgets)
 			if (listener instanceof EditBox box && dialogField == null)
@@ -3158,10 +3233,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 「坐标偏移」：把卡上**所有任务里所有有目标条目**的 offset 一起搬 {@code (dx,dy,dz)}。
+	 * 「坐标偏移」：把**当前范围**里所有有目标条目的 offset 一起搬 {@code (dx,dy,dz)}。
 	 *
-	 * <p>真正的平移在模型里（{@link ArmProgram#shiftAllOffsets}，理由见那段注释）；这里只做四件事：
-	 * 解析文本 → 压一次撤销 → 调它 → 走编辑器既有的落盘路径写回卡。
+	 * <p>★ 范围随页面走（用户 2026-10-20）：<b>任务页 = 整张卡</b>（所有任务）、
+	 * <b>操作页 = 只有当前任务</b>。"我在改哪一层，就搬哪一层"—— 在操作页里挪坐标的多半是
+	 * 只想把这一串操作整体挪一下，顺手把别的任务也搬走反而要再搬回来。
+	 *
+	 * <p>真正的平移在模型里（{@link ArmProgram#shiftAllOffsets} / {@link ArmProgram#shiftTaskOffsets}，
+	 * 理由见那段注释）；这里只做四件事：解析文本 → 压一次撤销 → 调它 → 走编辑器既有的落盘路径写回卡。
 	 *
 	 * <p><b>一次点击 = 一步撤销</b>：{@code pushUndo()} 只在"真的会改"时压一次，
 	 * 于是 Ctrl+Z 一下把整套偏移退回去，而不是退 N 次（N = 被改的条目数）。
@@ -3193,7 +3272,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return;
 		}
 		pushUndo(); // ★ 一次点击 = 一步撤销（整套平移只记一步，不是每条一步）
-		int changed = program.shiftAllOffsets(delta.getX(), delta.getY(), delta.getZ());
+		int changed = shiftScopeTask() == null
+			? program.shiftAllOffsets(delta.getX(), delta.getY(), delta.getZ())
+			: program.shiftTaskOffsets(shiftScopeTask(), delta.getX(), delta.getY(), delta.getZ());
 		// 改完**立刻落盘**（用户要求"改完就能用，不需要玩家再点一次保存"）：
 		// 走编辑器既有那条路（整份程序 → 文本 → 卡），与关界面时的保存是同一个入口。
 		CardProgramStorage.StoreResult stored = CardProgramStorage.write(menu.getCard(), program, registries());
@@ -3231,13 +3312,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			editSnapshot = program.save(registries());
 	}
 
-	/** 卡上所有任务里"有目标"的条目数（{@link ArmProgram#shiftAllOffsets} 会改到的就是这些）。 */
+	/**
+	 * 「坐标偏移」的作用域：{@code null} = 整张卡（任务页），否则 = 只有这一个任务（操作页）。
+	 *
+	 * <p>用户 2026-10-20：<i>"在任务界面偏移会调整所有坐标，但是在操作界面偏移只会偏移这一个任务的
+	 * 所有操作的坐标"</i>。判据只看 {@link #page} —— 编辑子面板开在操作页上时，"这一层"仍然是当前任务。
+	 */
+	@Nullable
+	private ArmProgramTask shiftScopeTask() {
+		return page == Page.ENTRIES ? task(currentTask) : null;
+	}
+
+	/** 「坐标偏移」这次会改到几条（{@link #shiftScopeTask()} 范围内、且 {@code needsTarget()} 的条目数）。 */
 	private int targetCount() {
 		int count = 0;
+		ArmProgramTask scope = shiftScopeTask();
+		if (scope != null) {
+			for (ArmProgramEntry entry : scope.entries)
+				// ★ 与 shiftTaskOffsets / shiftAllOffsets **必须同一判据**（条目级 needsTarget()）：过滤的
+				//   容器模式也在平移范围内，这里少算一条就会出现"按钮说会改 0 条、实际改了一条"。
+				if (entry.needsTarget())
+					count++;
+			return count;
+		}
 		for (ArmProgramTask task : program.tasks)
 			for (ArmProgramEntry entry : task.entries)
-				// ★ 与 shiftAllOffsets **必须同一判据**（条目级 needsTarget()）：过滤的容器模式也在平移范围内，
-				//   这里少算一条就会出现"按钮说会改 0 条、实际改了一条"（或反过来白压一步撤销）。
 				if (entry.needsTarget())
 					count++;
 		return count;
@@ -3957,8 +4056,32 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		ArmProgramEntry created = ArmProgramEntry.fresh(OperationType.TAKE);
 		created.offset = newEntryOffset(CardProgramStorage.readOrigin(menu.getCard()), defaultNewEntryWorldPos());
 		task.entries.add(index, created);
+		// 自动更正序号（用户 2026-10-20）：插入点之后的数字落点整体 +1，原来"跳到 N"仍指向同一条
+		fixJumpsAfterInsert(task, index, 1);
 		pointerIndex = index;
 		openEditor(new Card(false, currentTask, index), null);
+	}
+
+	/**
+	 * 四处"位置会动"的改动统一从这里过一遍（用户 2026-10-20 的「自动更正序号」）：
+	 * 插入 / 复制 / 删除 / 上下移动。开关关着就什么都不做（{{@link JumpTargets} 是纯函数，代价可忽略）。
+	 *
+	 * <p>为什么放在这里而不是各调用点各写一句：漏掉任何一处，玩家就会遇到"某一种操作会让跳转错位"，
+	 * 而那种错位在界面上完全看不出来（数字还是那个数字，只是指向了别的操作）。
+	 */
+	private void fixJumpsAfterInsert(ArmProgramTask task, int at, int count) {
+		if (autoFixJumps)
+			JumpTargets.afterInsert(task, at, count);
+	}
+
+	private void fixJumpsAfterRemove(ArmProgramTask task, int at) {
+		if (autoFixJumps)
+			JumpTargets.afterRemove(task, at);
+	}
+
+	private void fixJumpsAfterMove(ArmProgramTask task, int from, int to) {
+		if (autoFixJumps)
+			JumpTargets.afterMove(task, from, to);
 	}
 
 	/**
@@ -4050,8 +4173,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			currentTask = Mth.clamp(currentTask, 0, Math.max(0, program.tasks.size() - 1));
 		} else {
 			ArmProgramTask task = task(card.taskIndex);
-			if (task != null && card.entryIndex >= 0 && card.entryIndex < task.entries.size())
+			if (task != null && card.entryIndex >= 0 && card.entryIndex < task.entries.size()) {
+				// 自动更正序号：**必须在删之前**改（映射规则是按"删除前"的序号定义的）
+				fixJumpsAfterRemove(task, card.entryIndex);
 				task.entries.remove(card.entryIndex);
+			}
 		}
 		pointerIndex = Mth.clamp(pointerIndex, 0, Math.max(0, layout().size() - 1));
 		rebuildPending = true;
@@ -4080,8 +4206,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				return;
 			pushUndo();
 			ArmProgramTask task = task(card.taskIndex);
-			if (task != null)
+			if (task != null) {
 				task.entries.add(card.entryIndex, ArmProgramEntry.load(source.save(registries()), registries()));
+				// 自动更正序号：复制出去的那条占住了 card.entryIndex，其后的落点整体 +1
+				fixJumpsAfterInsert(task, card.entryIndex, 1);
+			}
 			pointerIndex = card.entryIndex;
 		}
 		rebuildPending = true;
@@ -4103,6 +4232,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (target < 0 || target >= task.entries.size())
 				return;
 			task.entries.add(target, task.entries.remove(card.entryIndex));
+			// 自动更正序号：这一条换了位置，所有指向它的落点跟着换，夹在中间的那些各挪一格
+			fixJumpsAfterMove(task, card.entryIndex, target);
 			pointerIndex = target;
 		}
 		rebuildPending = true;
@@ -4404,6 +4535,208 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * 自检：「自动更正序号」的映射规则 + 「坐标偏移」的作用域（用户 2026-10-20 的两条新口径）。
+	 *
+	 * <p>为什么这两条要在这里测：它们都是**纯数据变换**，却决定了"跳转还指不指向原来那一条"和
+	 * "整体搬家会不会把另一个任务也带走"—— 错了在界面上完全看不出来（数字还是那个数字、坐标也变了），
+	 * 只有运行到那一条才露馅。
+	 *
+	 * <p>夹具：一个 4 条条目的任务，落点分别写成 1 / 3 / 5（= 条数+1，"本轮到此为止"），
+	 * 外加一个任务名和一个越界数字（这两种**不许被改**）。
+	 *
+	 * <p>反证：把 {@link JumpTargets#mapInsert} 的 {@code >= at} 改成 {@code > at} ⇒ ① 红；
+	 * 把 {@code mapRemove} 的 {@code target > at + 1} 那支删掉 ⇒ ② 红；
+	 * 把 {@link ArmProgram#shiftTaskOffsets} 换回 {@code shiftAllOffsets} ⇒ ③ 红。
+	 */
+	private static String autoFixAndShiftProblem() {
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "fix";
+		String[] targets = { "1", "3", "5", "搬一趟", "99" };
+		for (String target : targets) {
+			ArmProgramEntry entry = new ArmProgramEntry();
+			entry.op = OperationType.TAKE;
+			entry.onSuccess = SkipAction.SKIP_TO;
+			entry.successTarget = target;
+			// 失败后那一支也写上同一个数：两个字段都必须被改
+			entry.onTimeout = SkipAction.SKIP_TO;
+			entry.timeoutTarget = target;
+			task.entries.add(entry);
+		}
+		// ① 在第 2 条（0 基 at=1）处插入一条 ⇒ 原来的 3 / 5 变成 4 / 6（"5"=条数+1，"本轮到此为止"跟着走），
+		//    新插入那条没有落点（空串）、任务名与越界数字一律不动
+		ArmProgramTask inserted = copyForTest(task);
+		ArmProgramEntry blank = ArmProgramEntry.fresh(OperationType.TAKE);
+		blank.successTarget = "";
+		blank.timeoutTarget = "";
+		inserted.entries.add(1, blank);
+		JumpTargets.afterInsert(inserted, 1, 1);
+		String insertProblem = expectTargets(inserted, "1", "", "4", "6", "搬一趟", "99");
+		if (insertProblem != null)
+			return "插入后 " + insertProblem;
+		// ② 删掉第 2 条（0 基 at=1，它自己写着 3）⇒ 剩下的 1 / 5 变成 1 / 4
+		ArmProgramTask removed = copyForTest(task);
+		JumpTargets.afterRemove(removed, 1);
+		removed.entries.remove(1);
+		String removeProblem = expectTargets(removed, "1", "4", "搬一趟", "99");
+		if (removeProblem != null)
+			return "删除后 " + removeProblem;
+		// ③ 把第 1 条移到第 3 位（0 基 0 → 2）。落点是**位置**不是自引用，所以按"原来指的那一条现在在哪"算：
+		//    移动后顺序 = [B, C, A, D, E]；A 原来指自己(1) ⇒ 现在第 3；B 原来指 C(3) ⇒ C 现在第 2；
+		//    C 原来指 E(5) ⇒ E 没动（第 5）；名字与 99 不动。
+		ArmProgramTask moved = copyForTest(task);
+		moved.entries.add(2, moved.entries.remove(0));
+		JumpTargets.afterMove(moved, 0, 2);
+		String moveProblem = expectTargets(moved, "2", "5", "3", "搬一趟", "99");
+		if (moveProblem != null)
+			return "移动后 " + moveProblem;
+		// ④ 「坐标偏移」作用域：只搬一个任务时，别的任务的 offset 必须原样
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask a = new ArmProgramTask();
+		a.name = "a";
+		ArmProgramEntry aEntry = new ArmProgramEntry();
+		aEntry.op = OperationType.TAKE;
+		aEntry.offset = new BlockPos(1, 2, 3);
+		a.entries.add(aEntry);
+		ArmProgramTask b = new ArmProgramTask();
+		b.name = "b";
+		ArmProgramEntry bEntry = new ArmProgramEntry();
+		bEntry.op = OperationType.TAKE;
+		bEntry.offset = new BlockPos(10, 0, 0);
+		b.entries.add(bEntry);
+		program.tasks.add(a);
+		program.tasks.add(b);
+		program.shiftTaskOffsets(a, 5, 0, 0);
+		if (!aEntry.offset.equals(new BlockPos(6, 2, 3)) || !bEntry.offset.equals(new BlockPos(10, 0, 0)))
+			return "只搬一个任务时，" + (aEntry.offset.equals(new BlockPos(6, 2, 3)) ? "别的任务也被搬了" : "当前任务没搬对")
+				+ "（a=" + aEntry.offset.toShortString() + " b=" + bEntry.offset.toShortString() + "）";
+		program.shiftAllOffsets(0, 0, -4);
+		if (!bEntry.offset.equals(new BlockPos(10, 0, -4)))
+			return "整张卡平移没有搬到这个任务（b=" + bEntry.offset.toShortString() + "）";
+		return null;
+	}
+
+	/** 复制一份夹具（深拷贝走 NBT 往返，与真实路径同一条）。 */
+	private static ArmProgramTask copyForTest(ArmProgramTask task) {
+		HolderLookup.Provider registries = RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+		return ArmProgramTask.load(task.save(registries), registries);
+	}
+
+	/**
+	 * 自检：那四处改动**真的接上了** {@link JumpTargets}（单元映射对了不等于界面会调它）。
+	 *
+	 * <p>用户口径是"移动、删除、插入、撤回的时候自动更正序号"，所以这四条入口各走一遍真实方法：
+	 * {@link #insertEntryAt} / {@link #duplicate} / {@link #removeWithoutUndo} / {@link #move}。
+	 * 另外再走一次**开关关着**的删除，证明这确实是开关控制的（关着时数字一个都不许动）。
+	 *
+	 * <p>反证：把任意一处 {@code fixJumpsAfter*} 调用删掉 ⇒ 这条立刻红（对应那一项的数字没跟着走）。
+	 */
+	private static String autoFixWiringProblem(Inventory inventory, RegistryAccess registries) {
+		ArmProgramScreen screen = fixtureScreen(inventory, registries, wireFixture());
+		int savedTask = screen.currentTask;
+		ArmProgram savedProgram = screen.program;
+		EditTarget savedEditing = screen.editing;
+		Prop savedProp = screen.editingProp;
+		CardProgramStorage.View savedView = screen.view;
+		boolean savedAuto = screen.autoFixJumps;
+		try {
+			screen.page = Page.ENTRIES;
+			screen.currentTask = 0;
+			screen.autoFixJumps = true;
+			// ① 插入（＋ 按钮那条路）：插到第 2 条位置 ⇒ 后面的 3 / 5 变成 4 / 6
+			screen.program = wireFixture();
+			screen.insertEntryAt(1);
+			String insert = expectTargets(taskOf(screen), "1", "", "4", "6", "搬", "3");
+			if (insert != null)
+				return "插入没接上：" + insert;
+			// ② 复制（≡ 那条路）：复制第 2 条（自己写着 3）⇒ 副本与被复制的那条都变成 4
+			screen.program = wireFixture();
+			screen.duplicate(new Card(false, 0, 1));
+			String dup = expectTargets(taskOf(screen), "1", "4", "4", "6", "搬", "3");
+			if (dup != null)
+				return "复制没接上：" + dup;
+			// ③ 删除（× / 编辑器垃圾桶那条路）
+			screen.program = wireFixture();
+			screen.removeWithoutUndo(new Card(false, 0, 1));
+			String removed = expectTargets(taskOf(screen), "1", "4", "搬", "2");
+			if (removed != null)
+				return "删除没接上：" + removed;
+			// ④ 上移/下移
+			screen.program = wireFixture();
+			screen.move(new Card(false, 0, 0), 1);
+			String moved = expectTargets(taskOf(screen), "3", "2", "5", "搬", "1");
+			if (moved != null)
+				return "移动没接上：" + moved;
+			// ⑤ 开关关着：同样一次删除，数字一个都不许动
+			screen.program = wireFixture();
+			screen.autoFixJumps = false;
+			screen.removeWithoutUndo(new Card(false, 0, 1));
+			String off = expectTargets(taskOf(screen), "1", "5", "搬", "2");
+			if (off != null)
+				return "开关关着却改了序号：" + off;
+			return null;
+		} finally {
+			screen.program = savedProgram;
+			screen.currentTask = savedTask;
+			screen.editing = savedEditing;
+			screen.editingProp = savedProp;
+			screen.view = savedView;
+			screen.autoFixJumps = savedAuto;
+		}
+	}
+
+	/** 接线自检用的夹具：5 条落点各异的条目（1 / 3 / 5=末尾 / 任务名 / 2），外加一个被调任务。 */
+	private static ArmProgram wireFixture() {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "wire";
+		for (String target : new String[] { "1", "3", "5", "搬", "2" }) {
+			ArmProgramEntry entry = ArmProgramEntry.fresh(OperationType.TAKE);
+			entry.onSuccess = SkipAction.SKIP_TO;
+			entry.successTarget = target;
+			entry.onTimeout = SkipAction.SKIP_TO;
+			entry.timeoutTarget = target;
+			task.entries.add(entry);
+		}
+		program.tasks.add(task);
+		// 落点写成任务名时**必须真有这个任务**，否则整份文本编译不过（测试夹具没必要制造那种噪声）
+		ArmProgramTask other = new ArmProgramTask();
+		other.name = "搬";
+		other.entries.add(ArmProgramEntry.fresh(OperationType.TAKE));
+		program.tasks.add(other);
+		return program;
+	}
+
+	private static ArmProgramTask taskOf(ArmProgramScreen screen) {
+		return screen.program.tasks.isEmpty() ? null : screen.program.tasks.get(0);
+	}
+
+	/** 造一个挂着指定程序的界面（自检里那批检查的公共开头）。 */
+	private static ArmProgramScreen fixtureScreen(Inventory inventory, RegistryAccess registries,
+		ArmProgram program) {
+		ItemStack card = new ItemStack(SequencedArmRegistration.OPERATION_TABLE.get());
+		CardProgramStorage.write(card, program, registries);
+		RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+		ItemStack.STREAM_CODEC.encode(buffer, card);
+		ArmProgramScreen screen = new ArmProgramScreen(new ArmProgramMenu(0, inventory, buffer), inventory, tr("title"));
+		screen.program = program;
+		return screen;
+	}
+
+	/** 断言这一组条目的两个落点都等于期望值（两个字段一起查，漏改一个就红）。 */
+	private static String expectTargets(ArmProgramTask task, String... expected) {
+		if (task.entries.size() != expected.length)
+			return "条目数变了（" + task.entries.size() + " ≠ " + expected.length + "）";
+		for (int i = 0; i < expected.length; i++) {
+			ArmProgramEntry entry = task.entries.get(i);
+			if (!expected[i].equals(entry.successTarget))
+				return "第 " + (i + 1) + " 条的「成功后」落点应当是 " + expected[i] + "，实际 " + entry.successTarget;
+			if (!expected[i].equals(entry.timeoutTarget))
+				return "第 " + (i + 1) + " 条的「失败后」落点应当是 " + expected[i] + "，实际 " + entry.timeoutTarget;
+		}
+		return null;
+	}
+
+	/**
 	 * 自检：**恢复浏览位置时不许有动画**（用户 2026-10-19：「每次右键打开卡片看起来像是从顶部在很短时间内
 	 * 滑倒对应位置，而不是直接打开就是那个位置」）。
 	 *
@@ -4609,6 +4942,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String newEntryOffset = newEntryOffsetProblem();
 			if (newEntryOffset != null && problem == null)
 				problem = "新条目的默认偏移: " + newEntryOffset;
+			// ★ 「自动更正序号」的映射规则 + 「坐标偏移」的作用域（用户 2026-10-20）
+			String autoFixShift = autoFixAndShiftProblem();
+			if (autoFixShift != null && problem == null)
+				problem = "自动更正序号 / 平移作用域: " + autoFixShift;
+			// 映射规则对了还不够：四处入口要**真的接上**它（用户口径：移动/删除/插入/撤回都要更正）
+			String autoFixWiring = autoFixWiringProblem(inventory, registries);
+			if (autoFixWiring != null && problem == null)
+				problem = "自动更正序号接线: " + autoFixWiring;
 			// ★ 超出动力臂活动范围的坐标：坐标框要变红（原版聊天错误提示那种红），悬停再补一句
 			String coordsRange = screen.coordsRangeProblem(mc);
 			if (coordsRange != null && problem == null)
@@ -6738,16 +7079,22 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		if (BOTTOM_BTN_SHIFT_X != BOTTOM_BTN_SET_ORIGIN_X + BOTTOM_BTN_SIZE)
 			return "两颗按钮没有紧靠着（" + BOTTOM_BTN_SET_ORIGIN_X + " → " + BOTTOM_BTN_SHIFT_X + "，应当相距 "
 				+ BOTTOM_BTN_SIZE + "）";
+		// ②b 「自动更正序号」接在偏移右边、同样紧靠（用户 2026-10-20 新加的那颗）
+		if (BOTTOM_BTN_AUTOFIX_X != BOTTOM_BTN_SHIFT_X + BOTTOM_BTN_SIZE)
+			return "「自动更正序号」没有紧靠在「坐标偏移」右边（" + BOTTOM_BTN_SHIFT_X + " → " + BOTTOM_BTN_AUTOFIX_X
+				+ "，应当相距 " + BOTTOM_BTN_SIZE + "）";
 		// ③ 也不许压住右下角那颗「保存并关闭」（它在 leftPos + CONFIRM_BTN_X，与这一页无关但同一行）
-		int right = BOTTOM_BTN_SHIFT_X + BOTTOM_BTN_SIZE;
+		int right = BOTTOM_BTN_AUTOFIX_X + BOTTOM_BTN_SIZE;
 		if (right > CONFIRM_BTN_X - 4)
-			return "两颗按钮压住了「保存并关闭」（到 x=" + right + "，那颗从 " + CONFIRM_BTN_X + " 起）";
-		// ④ 两颗按钮的图标不能是同一个（那就分不出哪个是哪个了）
-		if (AllIcons.I_TARGET == AllIcons.I_TOOL_MOVE_XZ)
-			return "两颗按钮用了同一个图标";
-		// ⑤ 常量对了不等于**真摆出来了**：在任务页上按坐标把这两颗找一遍
+			return "底栏那几颗压住了「保存并关闭」（到 x=" + right + "，那颗从 " + CONFIRM_BTN_X + " 起）";
+		// ④ 四颗按钮的图标不能有重复（那就分不出哪个是哪个了）
+		if (AllIcons.I_TARGET == AllIcons.I_TOOL_MOVE_XZ || AllIcons.I_SEQ_REPEAT == AllIcons.I_REFRESH
+			|| AllIcons.I_SEQ_REPEAT == AllIcons.I_TOOL_MOVE_XZ || AllIcons.I_SEQ_REPEAT == AllIcons.I_TARGET)
+			return "底栏有按钮用了同一个图标";
+		// ⑤ 常量对了不等于**真摆出来了**：在任务页上按坐标把这三颗找一遍
 		boolean origin = false;
 		boolean shift = false;
+		boolean autoFix = false;
 		for (GuiEventListener widget : children()) {
 			if (!(widget instanceof IconButton button))
 				continue;
@@ -6757,9 +7104,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				origin = true;
 			if (x == BOTTOM_BTN_SHIFT_X && y == 196)
 				shift = true;
+			if (x == BOTTOM_BTN_AUTOFIX_X && y == 196) {
+				autoFix = true;
+				// ★ 绿色贴图跟着开关走（用户："开启的时候使用绿色按钮贴图，关闭的时候使用默认的按钮"）：
+				//   {@code IconButton.green} 就是 Create 时刻表那颗循环键用的同一套（{@code IconButton:35}）。
+				if (button.green != autoFixJumps)
+					return "「自动更正序号」的贴图状态与开关不一致（开关=" + autoFixJumps + " green=" + button.green + "）";
+			}
 		}
-		if (!origin || !shift)
-			return "任务页上没有摆出这两颗按钮（原点=" + origin + " 偏移=" + shift + "）";
+		if (!origin || !shift || !autoFix)
+			return "任务页上没有摆出这三颗按钮（原点=" + origin + " 偏移=" + shift + " 更正序号=" + autoFix + "）";
 		return null;
 	}
 

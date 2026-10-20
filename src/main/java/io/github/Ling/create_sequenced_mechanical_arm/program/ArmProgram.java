@@ -132,16 +132,30 @@ public class ArmProgram {
 		if (dx == 0 && dy == 0 && dz == 0)
 			return 0;
 		int changed = 0;
-		for (ArmProgramTask task : tasks) {
-			for (ArmProgramEntry entry : task.entries) {
-				// ★ 问**条目级**的 needsTarget()（用户"过滤位置"二选一）：过滤的容器模式有真坐标，
-				//   整套平移必须带上它 —— 漏了它就会出现"箱子搬了、过滤还在看旧址"。
-				//   手持过滤没有坐标、不在这里动（给它加一个数只会制造噪声）。
-				if (!entry.needsTarget())
-					continue;
-				entry.offset = shift(entry.offset, dx, dy, dz);
-				changed++;
-			}
+		for (ArmProgramTask task : tasks)
+			changed += shiftTaskOffsets(task, dx, dy, dz);
+		return changed;
+	}
+
+	/**
+	 * 只搬**一个任务**里所有有目标条目的坐标（用户 2026-10-20：「操作界面」上按偏移只动当前任务）。
+	 *
+	 * <p>与 {@link #shiftAllOffsets} 同一套判据（条目级 {@code needsTarget()}、long 相加再夹回、
+	 * 调用偏移不搬）—— 差别只有作用域。抽成这个入口而不是让界面自己遍历，理由同上面那条：
+	 * 判据要能被服务端自检直接调用。
+	 */
+	public int shiftTaskOffsets(ArmProgramTask task, int dx, int dy, int dz) {
+		if (task == null || (dx == 0 && dy == 0 && dz == 0))
+			return 0;
+		int changed = 0;
+		for (ArmProgramEntry entry : task.entries) {
+			// ★ 问**条目级**的 needsTarget()（用户"过滤位置"二选一）：过滤的容器模式有真坐标，
+			//   整套平移必须带上它 —— 漏了它就会出现"箱子搬了、过滤还在看旧址"。
+			//   手持过滤没有坐标、不在这里动（给它加一个数只会制造噪声）。
+			if (!entry.needsTarget())
+				continue;
+			entry.offset = shift(entry.offset, dx, dy, dz);
+			changed++;
 		}
 		return changed;
 	}

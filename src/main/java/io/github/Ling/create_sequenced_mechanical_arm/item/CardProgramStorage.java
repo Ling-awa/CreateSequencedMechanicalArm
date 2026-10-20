@@ -66,6 +66,13 @@ public final class CardProgramStorage {
 	private static final String KEY_TASK_SCROLL = "ArmProgramTaskScroll";
 
 	/**
+	 * 「自动更正序号」开关（用户 2026-10-20）。与上面四个同一类：描述"这张卡怎么被编辑"，不是程序数据。
+	 *
+	 * <p>缺键 = 关。键名刻意与 {@code ArmProgram*} 那批对齐（冲突排查时一眼能看出归属）。
+	 */
+	private static final String KEY_AUTOFIX = "ArmProgramAutoFixJumps";
+
+	/**
 	 * 卡上的<b>录制参考点</b>（用户第四十轮：原点从程序里搬出来，只作为"卡片上的参考值"存在）。
 	 *
 	 * <p><b>为什么它必须离开程序、住到卡上</b>：条目的 {@code offset} <b>永远相对"执行它的那条臂"</b>
@@ -217,6 +224,7 @@ public final class CardProgramStorage {
 		root.remove(KEY_SCROLL);
 		root.remove(KEY_TASK_SCROLL);
 		root.remove(KEY_ORIGIN);
+		root.remove(KEY_AUTOFIX);
 		if (root.isEmpty())
 			stack.remove(DataComponents.CUSTOM_DATA);
 		else
@@ -246,6 +254,27 @@ public final class CardProgramStorage {
 		root.putString(KEY_PAGE, pageOrDefault(view.page()));
 		root.putFloat(KEY_SCROLL, sane(view.scroll()));
 		root.putFloat(KEY_TASK_SCROLL, sane(view.taskScroll()));
+		stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
+	}
+
+	/**
+	 * 「自动更正序号」这个开关的状态（用户 2026-10-20："它会随卡片保存自己的开关状态"）。
+	 *
+	 * <p>为什么住在卡上、与浏览位置同一类：它描述的是"这张卡怎么被编辑"，不属于程序 ——
+	 * 写进 {@code .sma} 文本会让 {@code /sma code import} 一份别人的脚本顺手改掉你的编辑习惯。
+	 * 缺键 = 关（新卡默认关，不替玩家做决定）。
+	 */
+	public static boolean readAutoFixJumps(ItemStack stack) {
+		return rootTag(stack).getBoolean(KEY_AUTOFIX);
+	}
+
+	/**
+	 * 写这个开关（与 {@link #writeView} 同一个通道 {@code CardViewPacket}：它同样不是数据改动，
+	 * 不该为它冒"整份程序被拒"的风险）。
+	 */
+	public static void writeAutoFixJumps(ItemStack stack, boolean on) {
+		CompoundTag root = rootForWrite(stack);
+		root.putBoolean(KEY_AUTOFIX, on);
 		stack.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
 	}
 
