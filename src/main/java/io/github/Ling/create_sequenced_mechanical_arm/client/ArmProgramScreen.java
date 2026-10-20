@@ -7143,6 +7143,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final String[] JUMP_LANG_KEYS = {
 		"entry.jump_target", "hint.entry_jump_target",
 		"chip.on_success_jump", "chip.fail_jump", "chip.fail_jump_dead",
+		// 「失败后」那一组：时机由语言文件自己写（见 ArmEntryText.failureText 的说明）
+		"chip.fail_now", "chip.fail_in", "chip.fail_skip", "chip.fail_stop", "chip.fail_retry_forever",
 		"hint.dead_target",
 		"ref.incoming_entry", "ref.incoming_task", "ref.from_success", "ref.from_fail", "ref.with_task", "ref.more",
 		"tip.remove_entry", "tip.remove_task"
@@ -7239,13 +7241,17 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			//      chip.face / chip.count（胶囊早就改成"朝向北"与"最多 N 个 / 等于 N 个"两种写法）、
 			//      add_prop.title（"添加属性"那张独立界面合并进编辑器之后只剩悬停提示 tip.add_prop）、
 			//      opt.blocking / opt.idle（旧操作枚举里的两项，现在的操作里没有它们）。
+			//   ④ chip.fail（`%s%s`）：用户 2026-10-20 要求"失败后"内容必须能看出触发时机之后，
+			//      时机与去向由 chip.fail_now / chip.fail_in 各自成一整句（语序按语言摆），
+			//      那个硬拼的壳子没人查了 —— 而且它正是英文拼出 nowskip / after 1tskip 的原因。
 			//   反证：把任意一个键加回**任意一份**语言文件（两边都加也一样）⇒ 这条立刻报红。
 			String[] dead = {
 				"opt.wait_redstone", "entry.wait_power", "hint.entry_wait_power",
 				"task.loop", "task.loop_count", "hint.task_loop", "hint.task_loop_count",
 				"chip.loop", "chip.loop_count",
 				"opt.none", "opt.count", "opt.forever", "opt.until_fail",
-				"chip.face", "chip.count", "add_prop.title", "opt.blocking", "opt.idle"
+				"chip.face", "chip.count", "add_prop.title", "opt.blocking", "opt.idle",
+				"chip.fail"
 			};
 			List<String> resurrected = new ArrayList<>();
 			for (String key : dead) {

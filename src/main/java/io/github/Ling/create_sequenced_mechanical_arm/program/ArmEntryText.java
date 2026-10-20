@@ -338,7 +338,7 @@ public final class ArmEntryText {
 	}
 
 	/**
-	 * 失败后 = 「多久之后」+「做什么」合成一句（与卡片胶囊同一句）。
+	 * 失败后 = 「什么时机」+「做什么」合成一句（与卡片胶囊同一句）。
 	 *
 	 * <p>⚠️ **没设时限时不能写"立刻/停下"**（用户第二十二轮实测反馈："此处实际上不是'停下'，而是重试"）：
 	 * {@code failAmount < 0} 的语义是"一直重试"（{@code ProgramRuntime.handleFailure} 里
@@ -353,33 +353,58 @@ public final class ArmEntryText {
 	 * <p>★ 「过滤」走的是**上面那条**（它有重试窗口）：不匹配 / 没有物品可比就一直在窗口里判断，
 	 * {@code failAmount < 0} 时卡片上写「一直重试」是**对的** —— 那正是它的默认行为。
 	 * 这几句文案与编辑器那几个控件同源于 {@link ArmProgramEntry#hasRetryWindow()}，不要各写一份。
+	 *
+	 * <p>★ <b>触发时机必须写出来</b>（用户 2026-10-20）：<i>"语言里面的失败后相关内容加上「失败」更好，
+	 * 直接看出来触发时机，直接写个「立刻」、「1t后」感觉不妥当吧"</i> —— 原来这两句只报时间
+	 * （中文"1t 后"、英文"after 1t"），离开上下文根本看不出是"失败之后"；硬失败那一类更糟，
+	 * 整句只有「跳过」两个字。现在<b>时机由语言文件自己写</b>（{@code chip.fail_now} / {@code chip.fail_in}
+	 * 各带一个去向的槽），于是两种语言可以各自把语序摆顺：
+	 * <pre>
+	 * 中文：失败后跳过 / 失败 1t 后跳过 / 失败后一直重试 / 失败后跳转已失效（原第 5 条）
+	 * 英文：fail: skip / fail in 1t: skip / fail: retry forever / fail: jump lost (was entry 5)
+	 * </pre>
+	 * 英文用 {@code fail: } 这个短前缀（与「成功后」的 {@code ok: } 正好成对，见 {@code chip.on_success_*}），
+	 * 延迟那一支是 {@code fail in 1t: skip} —— 时间在冒号前，去向在冒号后，不需要位次参数
+	 * （{@code %1$s} 那种写法在语言文件里太容易写错，这里靠"参数顺序固定、语序各自摆"解决）。
+	 * <p>顺带修掉一个英文的老 bug：原来靠 {@code chip.fail} = {@code "%s%s"} 硬拼，
+	 * 英文会拼出 {@code nowskip} / {@code after 1tskip}（一个空格都没有）。
 	 */
 	public static Component failureText(ArmProgramEntry entry) {
 		// 按**条目**判（不是按类型）：同一条 SIGNAL，收有失败出口、发没有（§7.16b 一.7）
 		if (!entry.hasRetryWindow())
-			return switch (entry.onTimeout) {
-				case CONTINUE -> tr("chip.fail_skip");
-				case SKIP_TO -> jumpText(entry.timeoutTarget);
-				case NONE -> tr("chip.fail_stop");
-			};
+			return immediateFailure(entry);
 		if (entry.failAmount < 0)
 			return tr("chip.fail_retry_forever");
-		String limitText = entry.failAmount <= 0 ? tr("chip.fail_now").getString()
-			: tr("chip.fail_in", entry.failAmount + unitSuffix(entry.failUnit))
-				.getString();
-		return tr("chip.fail", limitText, switch (entry.onTimeout) {
-			case CONTINUE -> tr("chip.fail_skip").getString();
-			case SKIP_TO -> jumpText(entry.timeoutTarget).getString();
-			case NONE -> tr("chip.fail_stop").getString();
-		});
+		if (entry.failAmount <= 0)
+			return immediateFailure(entry);
+		return tr("chip.fail_in", entry.failAmount + unitSuffix(entry.failUnit), destText(entry));
 	}
 
 	/**
-	 * 「失败后 跳转 X」那一句；落点失效（目标那条被删掉了）时整句换成「跳转已失效（原第 5 条）」。
+	 * 「失败后 …」—— 立刻执行去向的那两种（硬失败 / 重试窗口为 0）。
 	 *
-	 * <p>⚠️ 这一支必须**写成整句话**而不是只给一个带删除线的 {@code n5}：这句会被 {@code chip.fail}
-	 * （"{@code %s 后 %s}"）用 {@code getString()} 拼进另一个句子，拆出来的 {@code n5} 单独出现在
-	 * "5 秒后 跳转 n5"里没人看得懂。「成功后」那一支不拼句子，所以那边直接画删除线
+	 * <p>两者的<b>行为完全一样</b>（失败就转向向，没有任何等待窗口），所以共用一句话；
+	 * 区别只在"编辑器给不给时限控件"，那是编辑期的事，卡片上不必分。
+	 */
+	private static Component immediateFailure(ArmProgramEntry entry) {
+		return tr("chip.fail_now", destText(entry));
+	}
+
+	/** 去向那一句（「成功后」与「失败后」两条路共用同一个措辞来源，别各写一份）。 */
+	private static Component destText(ArmProgramEntry entry) {
+		return switch (entry.onTimeout) {
+			case CONTINUE -> tr("chip.fail_skip");
+			case SKIP_TO -> jumpText(entry.timeoutTarget);
+			case NONE -> tr("chip.fail_stop");
+		};
+	}
+
+	/**
+	 * 「失败后 跳转 X」那个去向；落点失效（目标那条被删掉了）时整句换成「跳转已失效（原第 5 条）」。
+	 *
+	 * <p>⚠️ 这一支必须**写成完整的一句**而不是只给一个带删除线的 {@code n5}：这句会被
+	 * {@code chip.fail_now} / {@code chip.fail_in} 拼进另一个句子，拆出来的 {@code n5} 单独出现在
+	 * "失败 5 秒后 跳转 n5"里没人看得懂。「成功后」那一支不拼句子，所以那边直接画删除线
 	 * （见 {@link #jumpTargetLabel}）。
 	 */
 	private static Component jumpText(String target) {
@@ -722,6 +747,43 @@ public final class ArmEntryText {
 		if (normalHead.equals(sneakHead))
 			return "「右键」与「潜行右键」在语言文件里是同一个词（" + normalHead + "）—— 卡片分不出潜行与否";
 
+		// ★ 用户 2026-10-20：「失败后」的文案必须**看得出触发时机**（不能只写"立刻"/"1t 后"，
+		//   更不能只写"跳过"）。判据全部与语言无关：
+		//   ① 立刻走的那两种（重试窗口 0 / 硬失败）都不能只等于去向那两个字；
+		//   ② 延迟那一种必须同时含"多久"与去向，且**不等于**两者直接拼接（拼接就是没写时机）；
+		//   ③ 一直重试那一句自己成句（含时机），与"停下"不同。
+		//   反证：把 failureText 里那两个分支改回 `tr("chip.fail_skip")` 直接返回 ⇒ ① 红；
+		//   把 chip.fail_in 改回 `"%s 后%s"` 这种没有"失败"的写法 ⇒ ② 红。
+		String skipWord = tr("chip.fail_skip").getString();
+		String stopWord = tr("chip.fail_stop").getString();
+		ArmProgramEntry zeroWindow = ArmProgramEntry.fresh(OperationType.TAKE);
+		zeroWindow.onTimeout = SkipAction.CONTINUE;
+		zeroWindow.failAmount = 0; // 有重试窗口，但长度为 0 ⇒ 失败就转向向
+		String zeroText = failureText(zeroWindow).getString();
+		if (zeroText.equals(skipWord) || !zeroText.contains(skipWord))
+			return "重试窗口为 0 的「失败后」看不出触发时机（实际「" + zeroText + "」，去向「" + skipWord + "」）";
+		ArmProgramEntry hardContinue = ArmProgramEntry.fresh(OperationType.MINE);
+		hardContinue.onTimeout = SkipAction.CONTINUE;
+		hardContinue.failAmount = -1; // 硬失败：没有重试窗口
+		String hardContinueText = failureText(hardContinue).getString();
+		if (hardContinueText.equals(skipWord))
+			return "硬失败的「失败后 跳过」只写了去向，看不出是失败才跳：" + hardContinueText;
+		ArmProgramEntry delayed = ArmProgramEntry.fresh(OperationType.TAKE);
+		delayed.onTimeout = SkipAction.SKIP_TO;
+		delayed.failAmount = 5;
+		delayed.failUnit = WaitUnit.SECOND;
+		delayed.timeoutTarget = "2";
+		String delayedText = failureText(delayed).getString();
+		String fiveSeconds = "5s";
+		String jumpWord = tr("chip.fail_jump", "2").getString();
+		if (!delayedText.contains(fiveSeconds) || !delayedText.contains(jumpWord))
+			return "延迟那一句没有同时写出「多久」和「去向」：" + delayedText;
+		if (delayedText.equals(fiveSeconds + jumpWord))
+			return "延迟那一句只是把时间和去向拼在一起，看不出这是「失败后」才发生：" + delayedText;
+		String foreverText = tr("chip.fail_retry_forever").getString();
+		if (foreverText.equals("") || foreverText.equals(stopWord))
+			return "「一直重试」这一句是空的或与「停下」同字：" + foreverText;
+
 		// ★ 用户 2026-10-20：**失效落点**（{@code n5} = 目标那条已经被删掉）在卡片上要画成删除线，
 		//   而「失败后」那一支（会拼进"5 秒后 …"里）要写成整句话。
 		//   反证：把 {@link #jumpTargetLabel} 的 STRIKETHROUGH 去掉 ⇒ ① 红；
@@ -754,7 +816,7 @@ public final class ArmEntryText {
 		if (deadFailText.contains("n11"))
 			return "「失败后」拼句子里露出了裸的 n11（玩家看不懂）：" + deadFailText;
 
-		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开 / 失效落点=删除线+nN)";
+		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开 / 失败后写得出发时机 / 失效落点=删除线+nN)";
 	}
 
 }
