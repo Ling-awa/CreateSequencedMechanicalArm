@@ -2816,7 +2816,7 @@ public class SequencedArmSelfTest {
 					: clipboard.get(DataComponents.CUSTOM_NAME)
 						.getString());
 			// ② 那一节要写出"导出那一刻按着哪几路"：发一路（电平 15、保持）后，行里得有
-			//    两个频率物品名 + 电平 + 保持，并且**带图标**（材料清单同款画法 —— 用户问的就是"能不能用物品贴图"）。
+			//    两个频率物品名 + 电平 + 保持。**只写文字**（用户第八十九轮末："你还是不在里面加图标了吧"）。
 			Couple<Frequency> sigFreq = testFrequency(Items.IRON_INGOT, Items.COPPER_INGOT);
 			arm.emitSignal(sigFreq, 15, 0);
 			// ⚠️ 物品名按**服务端解析出来的文本**比（专用服务器只有 en_us：这里是 "Iron Ingot"）。
@@ -2825,34 +2825,22 @@ public class SequencedArmSelfTest {
 				.getString();
 			String copperName = new ItemStack(Items.COPPER_INGOT).getHoverName()
 				.getString();
-			List<SequencedArmBlockEntity.LogLine> state = arm.signalStateLines();
-			String joined = state.stream()
-				.map(SequencedArmBlockEntity.LogLine::text)
-				.reduce("", (a, b) -> a + " ｜ " + b);
+			List<String> state = arm.signalStateLines();
+			String joined = String.join(" ｜ ", state);
 			boolean stateHasHeader = state.size() >= 3 && state.get(0)
-				.text()
 				.contains("信号发送状态");
 			boolean stateHasSignal = state.stream()
-				.anyMatch(line -> line.text()
-					.contains(ironName)
-					&& line.text()
-						.contains(copperName)
-					&& line.text()
-						.contains("电平 15")
-					&& line.text()
-						.contains("保持")
-					&& !line.icon()
-						.isEmpty()
-					&& line.icon()
-						.getItem() == Items.IRON_INGOT);
+				.anyMatch(line -> line.contains(ironName)
+					&& line.contains(copperName)
+					&& line.contains("电平 15")
+					&& line.contains("保持"));
 			// ③ 真的走一遍"正文 + 这一节"的导出（{@code exportLogToClipboard} 用的就是这个组合）：
-			//    最后一屏的最后一个条目必须是那一节里的一条（信号节在**最后**，用户口径）。
-			List<SequencedArmBlockEntity.LogLine> withState = new ArrayList<>();
-			for (String line : buffered)
-				withState.add(SequencedArmBlockEntity.LogLine.of(line));
+			//    最后一屏的最后一个条目必须是那一节里的一条（信号节在**最后**，用户口径），
+			//    而且条目的 icon 必须为空（用户明确不要物品贴图 —— 这条防止哪天又被加回来）。
+			List<String> withState = new ArrayList<>(buffered);
 			withState.addAll(state);
 			ItemStack full = new ItemStack(clipboardItem);
-			SequencedArmBlockEntity.LogExport fullExport = SequencedArmBlockEntity.exportLogLines(full, arm.getBlockPos(),
+			SequencedArmBlockEntity.LogExport fullExport = SequencedArmBlockEntity.exportLog(full, arm.getBlockPos(),
 				withState);
 			List<ClipboardEntry> fullFlat = flatClipboardEntries(full);
 			boolean stateAtEnd = fullExport.ok() && !fullFlat.isEmpty()
@@ -2860,7 +2848,7 @@ public class SequencedArmSelfTest {
 					.text.getString()
 					.contains(ironName)
 				&& fullFlat.stream()
-					.anyMatch(e -> !e.icon.isEmpty());
+					.noneMatch(e -> !e.icon.isEmpty());
 			arm.clearTransmissions(); // 别把这一路信号留给后面的夹具
 			signalSection = stateHasHeader && stateHasSignal && stateAtEnd;
 			detail += " ⑥节=[" + joined + "]";
@@ -2905,7 +2893,7 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 只读剪贴板被改写了 —— 1.20 老存档迁移过来的那种剪贴板必须一个字都不动", detail);
 		if (!renamed)
 			LOGGER.error("[selftest] 导出后剪贴板没有改名成「运行日志」（CUSTOM_NAME 不是那个翻译键）—— "
-				+ "用户要的是「导出完一眼认出哪块是日志」：检查 exportLogLines 里 set(CUSTOM_NAME, ...) 那一段", detail);
+				+ "用户要的是「导出完一眼认出哪块是日志」：检查 exportLog 里 set(CUSTOM_NAME, ...) 那一段", detail);
 		if (!signalSection)
 			LOGGER.error("[selftest] 日志尾部没有「信号发送状态」那一节，或者它没排在最后 / 没带物品图标（{}）—— "
 				+ "检查 SequencedArmBlockEntity.signalStateLines 与 exportLogToClipboard 里的拼接顺序", detail);
