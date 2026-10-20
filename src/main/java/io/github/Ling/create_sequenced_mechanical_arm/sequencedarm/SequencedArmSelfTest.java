@@ -2698,6 +2698,8 @@ public class SequencedArmSelfTest {
 		boolean fitsCapacity = false;
 		boolean trimmedKeepsNewest = false;
 		boolean readOnlyRefused = false;
+		boolean renamed = false;
+		boolean signalSection = false;
 		String detail = "没跑起来";
 		try {
 			BlockState depotState = stateOf("create:depot");
@@ -2806,6 +2808,63 @@ public class SequencedArmSelfTest {
 			readOnlyRefused = !refused.ok() && refused.problem() == SequencedArmBlockEntity.LogProblem.READ_ONLY
 				&& readOnly.get(AllDataComponents.CLIPBOARD_CONTENT) == roBefore;
 
+			// ——— ⑥ 改名 + 「信号发送状态」那一节（用户第八十九轮两条口径）———
+			// ① 导出后剪贴板的 CUSTOM_NAME 必须是「运行日志」那个翻译键；
+			renamed = Component.translatable("create_sequenced_mechanical_arm.log.clipboard_name")
+				.getString()
+				.equals(clipboard.get(DataComponents.CUSTOM_NAME) == null ? ""
+					: clipboard.get(DataComponents.CUSTOM_NAME)
+						.getString());
+			// ② 那一节要写出"导出那一刻按着哪几路"：发一路（电平 15、保持）后，行里得有
+			//    两个频率物品名 + 电平 + 保持，并且**带图标**（材料清单同款画法 —— 用户问的就是"能不能用物品贴图"）。
+			Couple<Frequency> sigFreq = testFrequency(Items.IRON_INGOT, Items.COPPER_INGOT);
+			arm.emitSignal(sigFreq, 15, 0);
+			// ⚠️ 物品名按**服务端解析出来的文本**比（专用服务器只有 en_us：这里是 "Iron Ingot"）。
+			//   拿中文「铁锭」去比，这条自检在英文服务端上必红 —— 与失败文案那条同一个坑。
+			String ironName = new ItemStack(Items.IRON_INGOT).getHoverName()
+				.getString();
+			String copperName = new ItemStack(Items.COPPER_INGOT).getHoverName()
+				.getString();
+			List<SequencedArmBlockEntity.LogLine> state = arm.signalStateLines();
+			String joined = state.stream()
+				.map(SequencedArmBlockEntity.LogLine::text)
+				.reduce("", (a, b) -> a + " ｜ " + b);
+			boolean stateHasHeader = state.size() >= 3 && state.get(0)
+				.text()
+				.contains("信号发送状态");
+			boolean stateHasSignal = state.stream()
+				.anyMatch(line -> line.text()
+					.contains(ironName)
+					&& line.text()
+						.contains(copperName)
+					&& line.text()
+						.contains("电平 15")
+					&& line.text()
+						.contains("保持")
+					&& !line.icon()
+						.isEmpty()
+					&& line.icon()
+						.getItem() == Items.IRON_INGOT);
+			// ③ 真的走一遍"正文 + 这一节"的导出（{@code exportLogToClipboard} 用的就是这个组合）：
+			//    最后一屏的最后一个条目必须是那一节里的一条（信号节在**最后**，用户口径）。
+			List<SequencedArmBlockEntity.LogLine> withState = new ArrayList<>();
+			for (String line : buffered)
+				withState.add(SequencedArmBlockEntity.LogLine.of(line));
+			withState.addAll(state);
+			ItemStack full = new ItemStack(clipboardItem);
+			SequencedArmBlockEntity.LogExport fullExport = SequencedArmBlockEntity.exportLogLines(full, arm.getBlockPos(),
+				withState);
+			List<ClipboardEntry> fullFlat = flatClipboardEntries(full);
+			boolean stateAtEnd = fullExport.ok() && !fullFlat.isEmpty()
+				&& fullFlat.get(fullFlat.size() - 1)
+					.text.getString()
+					.contains(ironName)
+				&& fullFlat.stream()
+					.anyMatch(e -> !e.icon.isEmpty());
+			arm.clearTransmissions(); // 别把这一路信号留给后面的夹具
+			signalSection = stateHasHeader && stateHasSignal && stateAtEnd;
+			detail += " ⑥节=[" + joined + "]";
+
 			// 交回"读配置"给后面的夹具
 			SequencedArmBlockEntity.pinLogLinesForTests(null);
 		} catch (Throwable t) {
@@ -2817,9 +2876,9 @@ public class SequencedArmSelfTest {
 		}
 
 		LOGGER.info("[selftest] 运行日志: 记录失败原因={} tick前缀={} 不刷屏={} 上限8行={} 丢最旧={} 关闭即静默={} ｜ "
-			+ "导出={} 有头部={} 行数≤容量={} 超量只带最新={} 只读拒写={} （{}）", failureLogged, tickPrefix, noSpam,
-			cappedAtEight, oldestDropped, disabledSilent, exported, headerPresent, fitsCapacity, trimmedKeepsNewest,
-			readOnlyRefused, detail);
+			+ "导出={} 有头部={} 行数≤容量={} 超量只带最新={} 只读拒写={} 改名运行日志={} 信号节={} （{}）", failureLogged,
+			tickPrefix, noSpam, cappedAtEight, oldestDropped, disabledSilent, exported, headerPresent, fitsCapacity,
+			trimmedKeepsNewest, readOnlyRefused, renamed, signalSection, detail);
 		if (!ran)
 			LOGGER.error("[selftest] 运行日志自检**没跑起来**（{}）—— 等于没测", detail);
 		if (!failureLogged)
@@ -2844,6 +2903,12 @@ public class SequencedArmSelfTest {
 			LOGGER.error("[selftest] 剪贴板装不下时没有「只带最新那些行」或丢的行数没报对", detail);
 		if (!readOnlyRefused)
 			LOGGER.error("[selftest] 只读剪贴板被改写了 —— 1.20 老存档迁移过来的那种剪贴板必须一个字都不动", detail);
+		if (!renamed)
+			LOGGER.error("[selftest] 导出后剪贴板没有改名成「运行日志」（CUSTOM_NAME 不是那个翻译键）—— "
+				+ "用户要的是「导出完一眼认出哪块是日志」：检查 exportLogLines 里 set(CUSTOM_NAME, ...) 那一段", detail);
+		if (!signalSection)
+			LOGGER.error("[selftest] 日志尾部没有「信号发送状态」那一节，或者它没排在最后 / 没带物品图标（{}）—— "
+				+ "检查 SequencedArmBlockEntity.signalStateLines 与 exportLogToClipboard 里的拼接顺序", detail);
 	}
 
 	/**

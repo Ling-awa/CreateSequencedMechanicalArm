@@ -160,7 +160,8 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	}
 
 	/**
-	 * 手持 Create 剪贴板 + **潜行** + 右键这块臂 = 把这条臂的运行日志（环形缓冲）写进那块剪贴板。
+	 * 手持 Create 剪贴板 + **潜行** + 右键这块臂 = 把这条臂的运行日志（环形缓冲 + 导出时的信号状态）
+	 * 写进那块剪贴板。
 	 *
 	 * <p><b>为什么挂在事件上、而不是上面的 {@link #useItemOn}</b>：原版对"潜行 + 手上有东西"直接
 	 * 跳过方块交互（`ServerPlayerGameMode` 里那个 flag，判据与 {@code RightClickBridge:301-303} 抄的同一行：
@@ -168,7 +169,15 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	 * 剪贴板没有 bypass ⇒ 潜行右键时 {@code useItemOn} **根本收不到**这一下。
 	 * 这与"空手潜行右键 = 取溢出"能用到 {@code useWithoutItem} 并不矛盾：那条路上手是空的。
 	 *
-	 * <p><b>为什么必须拦得这么窄</b>（只认：服务端 + 主手 + 潜行 + 剪贴板 + 指着**我们的**臂）：
+	 * <p><b>为什么客户端也要拦</b>（用户 2026-10-20 实测："会有一瞬间放置剪贴板，但最后没有放上去"）：
+	 * 方块交互被跳过之后，原版接着走物品那一条 —— {@code ClipboardBlockItem.useOn:41-43} 在潜行分支里是
+	 * {@code super.useOn(...)}，也就是**放下一个剪贴板方块**。客户端会先做**本地预测**：预测这一帧真把方块
+	 * 放进去了，服务端随后的取消又把它撤掉 ⇒ 玩家看到"放下去又没了"。客户端也吃掉这一下就没有预测了。
+	 * 取消不会让服务端收不到手势：{@code MultiPlayerGameMode.startPrediction:270-276} 无论
+	 * {@code action.predict(...)} 返回什么<b>都会</b>把 {@code ServerboundUseItemOnPacket} 发出去
+	 * （同一条依据见 {@code OperationTableHandler} 类注释里"为什么拦键位事件"那一段）。
+	 *
+	 * <p><b>为什么必须拦得这么窄</b>（只认：主手 + 潜行 + 剪贴板 + 指着**我们的**臂）：
 	 * 剪贴板自己的手势一个都不能碰坏 ——
 	 * <ul>
 	 *   <li>潜行右键**别的**方块 = 原地放下一个剪贴板方块（`ClipboardBlockItem.useOn:41-43` → `BlockItem.useOn`）；</li>
@@ -182,8 +191,6 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	@SubscribeEvent
 	public static void onClipboardLogExport(RightClickBlock event) {
 		Level level = event.getLevel();
-		if (level.isClientSide())
-			return; // 服务端裁决就够：客户端这一侧只负责把包发出去（见 OperationTableHandler 的类注释）
 		if (event.getHand() != InteractionHand.MAIN_HAND)
 			return;
 		Player player = event.getEntity();
@@ -198,6 +205,11 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 		if (!(level.getBlockState(pos)
 			.getBlock() instanceof SequencedArmBlock))
 			return;
+		// 客户端：只把这一下吞掉（**不预测放置剪贴板方块**），导出由服务端做
+		if (level.isClientSide()) {
+			event.setCanceled(true);
+			return;
+		}
 		if (!(level.getBlockEntity(pos) instanceof SequencedArmBlockEntity arm))
 			return;
 		// 吃掉这一下：不拦的话原版会顺着剪贴板的 `useOn` 去"放下一个剪贴板方块"（见方法头）。

@@ -3,6 +3,7 @@ package io.github.Ling.create_sequenced_mechanical_arm.sequencedarm;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
@@ -53,6 +54,7 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
@@ -402,6 +404,79 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 * @param lines 旧 → 新的日志行（{@link #logSnapshot()}）；**头部由本方法加**，调用方不用管
 	 */
 	public static LogExport exportLog(ItemStack clipboard, BlockPos armPos, List<String> lines) {
+		List<LogLine> wrapped = new ArrayList<>(lines == null ? 0 : lines.size());
+		if (lines != null)
+			for (String line : lines)
+				wrapped.add(LogLine.of(line));
+		return exportLogLines(clipboard, armPos, wrapped);
+	}
+
+	/**
+	 * 写进剪贴板的**一行**：文本 + 可选的物品图标。
+	 *
+	 * <p>为什么不是纯字符串：Create 的 {@code ClipboardEntry} 本身带 {@code icon} + {@code itemAmount}
+	 * （{@code ClipboardEntry:19-27 / displayItem:71-75}），蓝图炮的材料清单就是靠它在行首画物品贴图
+	 * （{@code ClipboardScreen:315-316} 画 icon、文字右移 16px）。用户第八十九轮："剪贴板应该可以使用物品贴图？
+	 * ……在导出蓝图炮材料清单的时候会出现" —— 能用，所以信号那一节把频率的那件物品画成图标。
+	 *
+	 * <p>日志正文仍然是纯文本（那是运行时拼好的句子，里面没有 ItemStack），所以那部分图标为空。
+	 */
+	public record LogLine(String text, ItemStack icon) {
+		public static LogLine of(String text) {
+			return new LogLine(text, ItemStack.EMPTY);
+		}
+	}
+
+	/**
+	 * 导出时**追加在最后**的那一节：这条臂现在按着哪几路信号（用户第八十九轮：
+	 * "日志导出功能最后再导出当时的信号发送状态"）。
+	 *
+	 * <p>为什么值得写进日志：信号是**持久变量**（§7.16e）——"发了没清"和"压根没发出去"在日志正文里看起来
+	 * 一模一样（正文只记动作），而"现在按着哪几路、电平多少、脉冲还剩多少 tick"只有导出这一刻才看得到。
+	 *
+	 * <p>图标 = 那对频率的第一个物品（材料清单同款画法）；文本里两个物品名都写全，
+	 * 因为图标位只有一个，而频率是**一对**物品。
+	 */
+	public List<LogLine> signalStateLines() {
+		List<LogLine> out = new ArrayList<>();
+		out.add(LogLine.of("— 信号发送状态（导出时）—"));
+		if (heldSignals == null || heldSignals.isEmpty()) {
+			out.add(LogLine.of("没有保持中的信号"));
+			return out;
+		}
+		out.add(LogLine.of("保持中 " + heldSignals.size() + " / " + maxHeldSignals() + " 路"
+			+ (armLinkRejectedLastTick > 0 ? "（上一次发送因表满被拒：" + armLinkRejectedLastTick + " 路）" : "")));
+		// 频率表是 HashMap：按第一个物品名排一下，同一份状态两次导出才是同一份文本
+		List<Map.Entry<Couple<Frequency>, ArmLink>> entries = new ArrayList<>(heldSignals.entrySet());
+		entries.sort(Comparator.comparing(e -> e.getKey()
+			.getFirst()
+			.getStack()
+			.getHoverName()
+			.getString()));
+		for (Map.Entry<Couple<Frequency>, ArmLink> e : entries) {
+			ItemStack first = e.getKey()
+				.getFirst()
+				.getStack();
+			ItemStack second = e.getKey()
+				.getSecond()
+				.getStack();
+			ArmLink link = e.getValue();
+			String level = link.signalLevel <= 0 ? "断电" : "电平 " + link.signalLevel;
+			String tail = link.pulse < 0 ? "保持" : "脉冲余 " + link.pulse + "t";
+			out.add(new LogLine(first.getHoverName()
+				.getString() + " + " + second.getHoverName()
+					.getString() + " → " + level + " · " + tail, first.copy()));
+		}
+		return out;
+	}
+
+	/**
+	 * {@link #exportLog} 的富文本版本：每一行可以带**物品图标**（信号那一节用它画频率物品）。
+	 *
+	 * <p>导出成功后把这块剪贴板**改名叫「运行日志」**（用户第八十九轮："导出后的剪贴板重命名为『运行日志』"）——
+	 * 名字是翻译键组件，客户端按玩家语言渲染。
+	 */
+	public static LogExport exportLogLines(ItemStack clipboard, BlockPos armPos, List<LogLine> lines) {
 		if (!ClipboardPlan.isClipboard(clipboard))
 			return new LogExport(false, 0, 0, LogProblem.NOT_CLIPBOARD);
 		ClipboardContent old = clipboard.get(AllDataComponents.CLIPBOARD_CONTENT);
@@ -414,22 +489,30 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		// "刚才到底发生了什么"，最旧的行被挤掉比整份写不进去有用。
 		int room = LOG_LINES_PER_PAGE * LOG_MAX_PAGES - 1;
 		int dropped = Math.max(0, lines.size() - room);
-		List<String> kept = dropped == 0 ? lines : lines.subList(dropped, lines.size());
+		List<LogLine> kept = dropped == 0 ? lines : lines.subList(dropped, lines.size());
 
-		List<String> all = new ArrayList<>(kept.size() + 1);
-		all.add(logHeader(armPos, lines.size(), dropped));
+		List<LogLine> all = new ArrayList<>(kept.size() + 1);
+		all.add(LogLine.of(logHeader(armPos, lines.size(), dropped)));
 		all.addAll(kept);
 
 		List<List<ClipboardEntry>> pages = new ArrayList<>();
 		for (int i = 0; i < all.size(); i += LOG_LINES_PER_PAGE) {
-			List<String> chunk = all.subList(i, Math.min(i + LOG_LINES_PER_PAGE, all.size()));
+			List<LogLine> chunk = all.subList(i, Math.min(i + LOG_LINES_PER_PAGE, all.size()));
 			List<ClipboardEntry> page = new ArrayList<>(chunk.size());
-			for (String line : chunk)
-				page.add(new ClipboardEntry(false, Component.literal(line)));
+			for (LogLine line : chunk) {
+				ClipboardEntry entry = new ClipboardEntry(false, Component.literal(line.text()));
+				if (!line.icon()
+					.isEmpty())
+					entry.displayItem(line.icon(), 0); // 0 = 不显示数量（材料清单那种用法才带数量）
+				page.add(entry);
+			}
 			pages.add(page);
 		}
 		clipboard.set(AllDataComponents.CLIPBOARD_CONTENT,
 			new ClipboardContent(ClipboardType.WRITTEN, pages, false, 0, Optional.empty()));
+		// 「运行日志」这个名字钉在**同一处**：改名与写内容必须一起发生（只写内容不改名，玩家分不出哪块是日志）。
+		clipboard.set(DataComponents.CUSTOM_NAME,
+			Component.translatable("create_sequenced_mechanical_arm.log.clipboard_name"));
 		return new LogExport(true, kept.size(), dropped, LogProblem.NONE);
 	}
 
@@ -443,12 +526,18 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	/**
 	 * 玩家手势的落地：把这条臂的日志写进他手上那块剪贴板，并给一条 actionbar 反馈。
 	 *
-	 * <p>手势本身（手持剪贴板 + 潜行右键这块臂）在 {@link SequencedArmBlock} 的事件钩子里 ——
-	 * 那里必须用事件是因为"潜行 + 手上有东西"会跳过方块交互，写在这里只是为了让"写剪贴板 + 报结果"
-	 * 与缓冲挨在一起。
+	 * <p>手势本身（手持剪贴板 + **右键**这块臂）在 {@link SequencedArmBlock} 的事件钩子里
+	 * （用户第八十九轮：原来是"潜行右键"，改成直接右键）。
+	 *
+	 * <p>写进剪贴板的内容 = 环形缓冲的正文 **+ 最后一节「信号发送状态」**（导出那一刻按着哪几路信号），
+	 * 并把剪贴板改名叫「运行日志」——两件事在 {@link #exportLogLines} 里一起做。
 	 */
 	public void exportLogToClipboard(Player player, ItemStack clipboard) {
-		LogExport result = exportLog(clipboard, worldPosition, logSnapshot());
+		List<LogLine> lines = new ArrayList<>();
+		for (String line : logSnapshot())
+			lines.add(LogLine.of(line));
+		lines.addAll(signalStateLines());
+		LogExport result = exportLogLines(clipboard, worldPosition, lines);
 		Object[] args;
 		String key;
 		ChatFormatting color;
