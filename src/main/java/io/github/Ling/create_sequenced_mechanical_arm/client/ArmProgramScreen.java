@@ -791,10 +791,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		IconButton autoFix = new IconButton(leftPos + BOTTOM_BTN_AUTOFIX_X, topPos + 196, AllIcons.I_SEQ_REPEAT);
 		autoFix.withCallback(() -> toggleAutoFixJumps(autoFix));
 		autoFix.green = autoFixJumps;
-		// `setToolTip` 只吃单个组件；两行提示走控件自带的那张表（与原点/偏移两颗同一手法）
-		autoFix.setToolTip(tr("btn.auto_fix_jumps"));
-		autoFix.getToolTip()
-			.addAll(autoFixTipTail(autoFixJumps));
+		refreshAutoFixTip(autoFix); // 三行：名字 / 已启用·未启用 / 一句说明（`setToolTip` 只吃单个组件，走控件自带那张表）
 		addRenderableWidget(autoFix);
 
 		IconButton confirm = new IconButton(leftPos + CONFIRM_BTN_X, topPos + bg.getHeight() - 30,
@@ -849,23 +846,31 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private void toggleAutoFixJumps(IconButton button) {
 		autoFixJumps = !autoFixJumps;
 		button.green = autoFixJumps;
-		button.getToolTip().clear();
-		button.getToolTip().add(tr("btn.auto_fix_jumps"));
-		button.getToolTip().addAll(autoFixTipTail(autoFixJumps));
-		status = tr("status.auto_fix", tr(autoFixJumps ? "opt.enabled" : "opt.disabled").getString()).getString();
+		refreshAutoFixTip(button);
+		// ⚠️ **不写 status 那一行**（用户 2026-10-20："我们不再使用这两个地方的提示，它们不方便看"）：
+		//   开关状态在按钮贴图（绿/灰）与悬停提示里已经写清楚了，面板底部那行橙字又远又容易被忽略。
 		CardProgramStorage.View now = currentView();
 		PacketDistributor.sendToServer(
 			new CardViewPacket(now.entry(), now.page(), now.scroll(), now.taskScroll(), autoFixJumps));
 	}
 
 	/**
-	 * 那颗开关悬停提示的**第二行**（已启用 / 未启用），带色 —— 与 Create 时刻表里的循环键同一个做法
-	 * （{@code ScheduleScreen:121-143}：名字一行、状态一行，启用时深绿、停用时红色）。
+	 * 那颗开关的悬停提示：三行 —— 名字 / 已启用（深绿）或未启用（红）/ 一句灰字说明。
+	 *
+	 * <p>第三行是用户 2026-10-20 点名要补的："缺乏描述，『插入、移动、删除、撤销时跳转序号跟随目标移动』"。
+	 * 前两行的做法照抄 Create 时刻表那颗循环键（{@code ScheduleScreen:121-143}）。
 	 */
-	private List<Component> autoFixTipTail(boolean on) {
-		return List.of(tr(on ? "opt.enabled" : "opt.disabled")
-			.copy()
-			.withStyle(on ? ChatFormatting.DARK_GREEN : ChatFormatting.RED));
+	private void refreshAutoFixTip(IconButton button) {
+		button.getToolTip().clear();
+		button.getToolTip().add(tr("btn.auto_fix_jumps"));
+		button.getToolTip()
+			.add(tr(autoFixJumps ? "opt.enabled" : "opt.disabled")
+				.copy()
+				.withStyle(autoFixJumps ? ChatFormatting.DARK_GREEN : ChatFormatting.RED));
+		button.getToolTip()
+			.add(tr("tip.auto_fix_jumps")
+				.copy()
+				.withStyle(ChatFormatting.GRAY));
 	}
 
 	@Override
@@ -3957,10 +3962,41 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 
 	// ————————————————————————— 数据操作 —————————————————————————
 
+	/**
+	 * 卡上一条任务都没有时**自动建一个默认任务**（用户 2026-10-20："没任务的卡尝试进入任务时会创建默认的任务，
+	 * 就像录入的时候会自动创建一个主任务一样"）。
+	 *
+	 * <p>为什么不再弹一句「还没有任务」：那句话既不是"发生了什么"、也不是"该怎么办"，而且它走的是面板底部
+	 * 那行橙字（用户："我们不再使用这两个地方的提示，它们不方便看"）。空卡唯一的合理下一步就是建一个任务，
+	 * 所以这里直接把任务建出来 —— 玩家紧接着就能看到一张任务卡 + 拖指针/加条目。
+	 *
+	 * <p>名字取本地化的「主任务」（{@code gui.editor.task.main}），与录入时服务端自动建的那个同一个称呼。
+	 * 任务**恒为无限循环**（模型语义），不需要任何循环字段。返回当前任务（建完就是这一个）。
+	 */
+	private ArmProgramTask ensureTask() {
+		ArmProgramTask existing = task(currentTask);
+		if (existing != null)
+			return existing;
+		ArmProgramTask created = new ArmProgramTask();
+		created.name = tr("task.main").getString();
+		program.tasks.add(created);
+		currentTask = 0;
+		pointerIndex = 0;
+		dirty = true;
+		program.editorTask = 0;
+		return created;
+	}
+
 	/** 底部第一个按钮：任务页 ↔ 操作页。 */
 	private void togglePage() {
-		if (!switchPage(page == Page.ENTRIES ? Page.TASKS : Page.ENTRIES)) {
-			status = tr("status.no_task").getString();
+		Page target = page == Page.ENTRIES ? Page.TASKS : Page.ENTRIES;
+		// ★ 要进操作页而卡上一条任务都没有 ⇒ 先建一个默认任务（用户 2026-10-20），并记一步撤销
+		if (target == Page.ENTRIES && program.tasks.isEmpty()) {
+			pushUndo();
+			ensureTask();
+		}
+		if (!switchPage(target)) {
+			// 理论上到不了这里（唯一的失败条件已被上面的兜底消掉）—— 留着只为不让状态机静默半途而废
 			rebuildPending = true;
 			return;
 		}
@@ -4035,18 +4071,18 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	private void insertEntryAt(int at) {
-		ArmProgramTask task = task(currentTask);
-		if (task == null) {
-			status = tr("status.no_task").getString();
-			rebuildPending = true;
-			return;
-		}
-		if (totalEntries() >= ArmProgram.maxEntriesTotal()) {
+		ArmProgramTask existing = task(currentTask);
+		// ★ 空卡（一条任务都没有）：**先建一个默认任务**再插（用户 2026-10-20："没任务的卡尝试进入任务时
+		//   会创建默认的任务，就像录入的时候会自动创建一个主任务一样"）。以前这里只弹一句「还没有任务」——
+		//   那句话说了等于没说，玩家还得自己回任务页点 ＋。
+		boolean creatingTask = existing == null;
+		if (!creatingTask && totalEntries() >= ArmProgram.maxEntriesTotal()) {
 			status = tr("status.over_limit", ArmProgram.maxEntriesTotal()).getString();
 			rebuildPending = true;
 			return;
 		}
 		pushUndo();
+		ArmProgramTask task = creatingTask ? ensureTask() : existing;
 		int index = Mth.clamp(at, 0, task.entries.size());
 		// ★ 新条目的默认偏移由 {@link #newEntryOffset} 一处决定（见那里的说明）：
 		//   **没设原点 ⇒ 0,0,0**；设了原点 ⇒ "看向的方块 − 原点"（用户喜欢的那个自动填入）。
@@ -4684,6 +4720,54 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 	}
 
+	/**
+	 * 自检：**空卡进任务时自动建一个默认任务**（用户 2026-10-20）。
+	 *
+	 * <p>以前这里只弹一句「还没有任务」，玩家还得自己回任务页点 ＋；现在与"录入时自动建主任务"同一个兜底：
+	 * 建一个本地化名字的「主任务」，然后照常进操作页 / 插条目。
+	 *
+	 * <p>反证：把 {@link #ensureTask} 里那句 {@code program.tasks.add(created)} 删掉 ⇒ ① 红；
+	 * 把 {@link #insertEntryAt} 的 {@code creatingTask ? ensureTask() : existing} 换回 {@code existing}
+	 * ⇒ ② 红（空卡点 ＋ 什么都不发生）。
+	 */
+	private static String ensureTaskProblem(Inventory inventory, RegistryAccess registries) {
+		ArmProgramScreen screen = fixtureScreen(inventory, registries, new ArmProgram());
+		int savedTask = screen.currentTask;
+		ArmProgram savedProgram = screen.program;
+		EditTarget savedEditing = screen.editing;
+		Prop savedProp = screen.editingProp;
+		int savedPointer = screen.pointerIndex;
+		try {
+			if (!screen.program.tasks.isEmpty())
+				return "自检前提不成立：夹具卡上已经有任务";
+			// ① 直接建：一个、名字是本地化的「主任务」、再调一次不会又建一个
+			ArmProgramTask created = screen.ensureTask();
+			if (created == null || screen.program.tasks.size() != 1)
+				return "空卡没有建出默认任务（现在 " + screen.program.tasks.size() + " 个）";
+			String expectName = tr("task.main").getString();
+			if (!expectName.equals(created.name))
+				return "默认任务名不是「" + expectName + "」（是 " + created.name + "）";
+			if (screen.ensureTask() != created || screen.program.tasks.size() != 1)
+				return "ensureTask 调了两次就建出第二个任务（" + screen.program.tasks.size() + " 个）";
+			// ② 真实入口：空卡上按 ＋（insertEntryAt）要先建任务再插条目
+			screen.program = new ArmProgram();
+			screen.currentTask = 0;
+			screen.pointerIndex = 0;
+			screen.insertEntryAt(0);
+			int tasks = screen.program.tasks.size();
+			int entries = tasks == 0 ? 0 : screen.program.tasks.get(0).entries.size();
+			if (tasks != 1 || entries != 1)
+				return "空卡上按 ＋ 没有「先建任务再插条目」（任务=" + tasks + " 条目=" + entries + "）";
+			return null;
+		} finally {
+			screen.program = savedProgram;
+			screen.currentTask = savedTask;
+			screen.editing = savedEditing;
+			screen.editingProp = savedProp;
+			screen.pointerIndex = savedPointer;
+		}
+	}
+
 	/** 接线自检用的夹具：5 条落点各异的条目（1 / 3 / 5=末尾 / 任务名 / 2），外加一个被调任务。 */
 	private static ArmProgram wireFixture() {
 		ArmProgram program = new ArmProgram();
@@ -4950,6 +5034,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String autoFixWiring = autoFixWiringProblem(inventory, registries);
 			if (autoFixWiring != null && problem == null)
 				problem = "自动更正序号接线: " + autoFixWiring;
+			// ★ 空卡进任务 / 按 ＋ 都要先自动建一个默认任务（不再弹「还没有任务」）
+			String ensureTask = ensureTaskProblem(inventory, registries);
+			if (ensureTask != null && problem == null)
+				problem = "默认任务: " + ensureTask;
 			// ★ 超出动力臂活动范围的坐标：坐标框要变红（原版聊天错误提示那种红），悬停再补一句
 			String coordsRange = screen.coordsRangeProblem(mc);
 			if (coordsRange != null && problem == null)
