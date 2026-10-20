@@ -1669,8 +1669,91 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		} else if (index == 0 && program != null && !program.note.isBlank()) {
 			lines.addAll(noteBlock("entry.program_note", program.note));
 		}
+		// 按住 Shift 悬停 = 追加"谁跳到我这里"（用户 2026-10-20；不按 Shift 时提示内容与以前一个字不差）
+		if (hasShiftDown())
+			lines.addAll(incomingRefSection(card, index));
 		return lines;
 	}
+
+	/**
+	 * 「谁会跳到我这里」——<b>反向引用</b>（用户 2026-10-20：<i>"在鼠标悬停在一个卡片上时，按住 shift，
+	 * 显示它被哪些行的操作作为跳转目标了"</i>）。
+	 *
+	 * <p>为什么需要它：落点写的是**序号**，而序号会随插入/删除/移动变化；玩家想删掉第 5 条时，
+	 * 光看卡片根本不知道有谁在往这里跳 —— 删完才发现别处的跳转被标成了失效落点（{@code n5}）。
+	 * 有了这一张"谁指着我"的清单，删之前就能看见代价。
+	 *
+	 * <p>为什么是反向扫而非给每个条目存一份引用表：条目总数上限很小（{@link ArmProgram#maxEntriesTotal()}），
+	 * 一次全扫是几十次字符串比较，而存表要为插入/删除/移动/复制/撤回各维护一次 —— 那是必然会歪的第二份真相。
+	 *
+	 * @return 追加到提示里的若干行（**一行一个 Component**，理由见 {@link #noteBlock}）；
+	 *         没有引用时返回空列表（提示里就不会多出一段空标题）
+	 */
+	private List<Component> incomingRefSection(Card card, int index) {
+		List<Component> refs = incomingRefLines(card, index);
+		if (refs.isEmpty())
+			return List.of();
+		List<Component> lines = new ArrayList<>();
+		lines.add(CommonComponents.EMPTY);
+		lines.add(tr(card.task ? "ref.incoming_task" : "ref.incoming_entry").copy()
+			.withStyle(ChatFormatting.GOLD));
+		lines.addAll(refs);
+		return lines;
+	}
+
+	/** 引用清单本身（不带标题）。超过 {@link #REF_MAX_LINES} 条时只报前几条 + "还有 N 条"。 */
+	private List<Component> incomingRefLines(Card card, int index) {
+		List<Component> all = new ArrayList<>();
+		if (program == null)
+			return all;
+		if (card.task) {
+			// 任务卡：按**任务名**跳过来的那些条目（数字落点只在同一个任务里有意义，跨任务一律写任务名）
+			ArmProgramTask target = task(card.taskIndex);
+			if (target == null || target.name.isBlank())
+				return all;
+			String name = target.name.trim();
+			for (ArmProgramTask from : program.tasks) {
+				for (int i = 0; i < from.entries.size(); i++) {
+					ArmProgramEntry entry = from.entries.get(i);
+					if (entry.onSuccess == SkipAction.SKIP_TO && name.equals(trim(entry.successTarget)))
+						all.add(tr("ref.with_task", from.name, tr("ref.from_success", i + 1)));
+					if (entry.onTimeout == SkipAction.SKIP_TO && name.equals(trim(entry.timeoutTarget)))
+						all.add(tr("ref.with_task", from.name, tr("ref.from_fail", i + 1)));
+				}
+			}
+		} else {
+			ArmProgramTask owner = task(card.taskIndex);
+			if (owner == null || index < 0 || index >= owner.entries.size())
+				return all;
+			int position = index + 1;
+			for (int i = 0; i < owner.entries.size(); i++) {
+				ArmProgramEntry entry = owner.entries.get(i);
+				if (entry.onSuccess == SkipAction.SKIP_TO && numericTarget(entry.successTarget) == position)
+					all.add(tr("ref.from_success", i + 1));
+				if (entry.onTimeout == SkipAction.SKIP_TO && numericTarget(entry.timeoutTarget) == position)
+					all.add(tr("ref.from_fail", i + 1));
+			}
+		}
+		if (all.size() <= REF_MAX_LINES)
+			return all;
+		List<Component> capped = new ArrayList<>(all.subList(0, REF_MAX_LINES));
+		capped.add(tr("ref.more", all.size() - REF_MAX_LINES).copy()
+			.withStyle(ChatFormatting.DARK_GRAY));
+		return capped;
+	}
+
+	/** 数字落点 ⇒ 那个序号；任务名 / 空 / 失效落点（{@code n5}）⇒ -1（它们不构成"指向第几条"）。 */
+	private static int numericTarget(String raw) {
+		Integer parsed = JumpTargets.parseIntOrNull(raw);
+		return parsed == null ? -1 : parsed;
+	}
+
+	private static String trim(@Nullable String text) {
+		return text == null ? "" : text.trim();
+	}
+
+	/** 反向引用最多列几行（再多就"还有 N 条"）：提示框不该比屏幕还高。 */
+	private static final int REF_MAX_LINES = 6;
 
 	/**
 	 * 一段备注的悬停提示：「标题（灰）」+ **逐行原文**。
@@ -1938,7 +2021,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (x > 180 && x <= 192) {
 				if (localY > 0 && localY <= 14) {
 					lastHit = "remove";
-					tooltip(graphics, mx, my, tr(card.task ? "tip.remove_task" : "tip.remove_entry"));
+					// 悬停 × 时**顺带报"谁会跳到这里"**（用户 2026-10-20：<i>"当鼠标悬停在删除卡片的位置时，
+					// 同样以提示框显示哪些行的操作以它为目标"</i>）—— 删之前就看得到代价，不用按 Shift。
+					List<Component> removeTip = new ArrayList<>();
+					removeTip.add(tr(card.task ? "tip.remove_task" : "tip.remove_entry"));
+					removeTip.addAll(incomingRefSection(card, i));
+					tooltip(graphics, mx, my, removeTip);
 					if (click == 0)
 						remove(card);
 					return true;
@@ -2055,6 +2143,18 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			}
 
 			// 卡片背景 → 指针移过来（用户要求：点胶囊背景让指针跳过去）
+			// ★ Shift 悬停（用户 2026-10-20）：光问"谁跳到我这里"。
+			//   为什么要在背景上也接一次：整张卡都是可悬停的，玩家不会特意去瞄标题芯片那块小地方；
+			//   只在这一支上接不影响任何点击（下面那支仍要 click == 0），也不与 Shift+滚轮冲突
+			//   （那个在 mouseScrolled 里，判的是滚动而非悬停）。
+			if (click < 0 && hasShiftDown()) {
+				List<Component> refs = incomingRefSection(card, i);
+				if (!refs.isEmpty()) {
+					lastHit = "refs";
+					tooltip(graphics, mx, my, refs);
+					return true;
+				}
+			}
 			if (click == 0) {
 				lastHit = "background";
 				pointerIndex = i;
@@ -2495,11 +2595,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				if (entry.onSuccess != SkipAction.SKIP_TO)
 					return;
 				int x2 = FIELD_X + w1 + 2;
-				textField(x2, ROW2_Y, FIELD_W - w1 - 2, tr("entry.jump_target"),
-					tr("hint.entry_jump_target"), entry.successTarget, 32, v -> {
-						entry.successTarget = v;
-						dirty = true;
-					});
+				jumpTargetField(x2, ROW2_Y, FIELD_W - w1 - 2, entry, true);
 			}
 		};
 	}
@@ -2572,11 +2668,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				// 落点框的宽度：会重试 = 38（给后面的时限/单位让位）；硬失败 = 一路铺到右沿（它后面没有控件）
 				final int jumpW = retryWindow ? 38 : FIELD_W - w1 - 2;
 				if (jumps)
-					textField(x2, ROW2_Y, jumpW, tr("entry.jump_target"),
-						tr("hint.entry_jump_target"), entry.timeoutTarget, 32, v -> {
-							entry.timeoutTarget = v;
-							dirty = true;
-						});
+					jumpTargetField(x2, ROW2_Y, jumpW, entry, false);
 				if (!retryWindow)
 					return;
 				// ③ 时限 0–120（含 120）+ ④ 单位 t/s/m —— **位置跟着 ② 走**：
@@ -3738,6 +3830,60 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * <b>跳转落点输入框</b>（「成功后」与「失败后」共用）—— 比普通文本框多两件事（用户 2026-10-20）。
+	 *
+	 * <p>落点指向的那一条被删掉之后，值会变成 {@code n5}（见 {@link JumpTargets} 的类注释）；
+	 * 这时 ① 框里的字**变红**（原版命令报错那个红，也与隔壁坐标框"超出臂范围"同一条规则）；
+	 * ② 悬停提示多一行，说明"这本来是第几条、那条已经删了"。
+	 *
+	 * <p>为什么两件事都要做：{@code n5} 是一个**格式完全合法**的值（存得下、读得回、还能再存盘），
+	 * 只有红字能让玩家注意到它；而"n5 是什么意思"光看红字猜不出来。
+	 */
+	private void jumpTargetField(int x, int y, int width, ArmProgramEntry entry, boolean success) {
+		addEditorBox(x, y, width);
+		EditBox box = new EditBox(font, leftPos + x + 5, topPos + y + 5, width - 10, 8, tr("entry.jump_target"));
+		box.setBordered(false);
+		box.setMaxLength(32);
+		box.setValue(success ? entry.successTarget : entry.timeoutTarget);
+		// ⚠️ 提示列表**会被原地修改**（打字时刷新），因为 TooltipArea 存的是引用（与 coordsField 同一条）
+		List<Component> tip = new ArrayList<>();
+		refreshDeadTargetWarning(box, tip, entry, success);
+		box.setResponder(v -> {
+			if (success)
+				entry.successTarget = v;
+			else
+				entry.timeoutTarget = v;
+			dirty = true;
+			refreshDeadTargetWarning(box, tip, entry, success);
+		});
+		addEditorWidget(box);
+		TooltipArea area = new TooltipArea(leftPos + x, topPos + y, width, 18);
+		area.withTooltip(tip);
+		// ⚠️ 只"画"不"收事件"（与 {@link #textField} 同一条理由：否则 EditBox 点不进焦点）。
+		editorWidgets.add(area);
+		addRenderableOnly(area);
+	}
+
+	/**
+	 * 落点框的红字 + 提示行（判据只有 {@link JumpTargets#isDead} 一处，随打字实时刷新）。
+	 *
+	 * <p>反证：把 {@code dead} 恒置 false ⇒ 自检 {@code deadTargetProblem()} 的"编辑器要标红"那一项红；
+	 * 把 {@link JumpTargets#deadPosition} 换成"解析失败就 0" ⇒ 提示里会变成"原本第 0 条"。
+	 */
+	private void refreshDeadTargetWarning(EditBox box, List<Component> tip, ArmProgramEntry entry, boolean success) {
+		String raw = success ? entry.successTarget : entry.timeoutTarget;
+		boolean dead = JumpTargets.isDead(raw);
+		box.setTextColor(dead ? ERROR_TEXT_COLOR : NORMAL_TEXT_COLOR);
+		tip.clear();
+		tip.add(tr("entry.jump_target").copy());
+		tip.add(tr("hint.entry_jump_target").copy()
+			.withStyle(ChatFormatting.DARK_GRAY));
+		if (dead)
+			tip.add(tr("hint.dead_target", JumpTargets.deadPosition(raw)).copy()
+				.withStyle(ChatFormatting.RED));
+	}
+
+	/**
 	 * <b>坐标输入框</b>（通用动作与「过滤 · 容器」共用这一处）：框里编辑的是**相对坐标**
 	 * （模型里的 {@code offset}），世界坐标只作为悬停提示的附加行。
 	 *
@@ -4110,9 +4256,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			JumpTargets.afterInsert(task, at, count);
 	}
 
+	/**
+	 * 删除：<b>两件事</b> ——「目标本身被删掉」的落点标成失效（{@code n5}，**与开关无关**），
+	 * 还活着的落点按开关决定挪不挪（用户 2026-10-20 的第二条口径）。
+	 *
+	 * <p>为什么"标失效"不受开关控制：开关管的是"帮我把还活着的落点跟着挪"，而"落点指着的那一条
+	 * 已经不存在了"是<b>事实</b>。开关关着时保持原数字，等于让那次跳转悄悄指向一条**没有被指定的**
+	 * 操作 —— 那正是用户要避免的"不小心的错误跳转"（原话见 {@link JumpTargets} 的类注释）。
+	 */
 	private void fixJumpsAfterRemove(ArmProgramTask task, int at) {
-		if (autoFixJumps)
-			JumpTargets.afterRemove(task, at);
+		JumpTargets.afterRemove(task, at, autoFixJumps);
 	}
 
 	private void fixJumpsAfterMove(ArmProgramTask task, int from, int to) {
@@ -4611,11 +4764,36 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return "插入后 " + insertProblem;
 		// ② 删掉第 2 条（0 基 at=1，它自己写着 3）⇒ 剩下的 1 / 5 变成 1 / 4
 		ArmProgramTask removed = copyForTest(task);
-		JumpTargets.afterRemove(removed, 1);
+		JumpTargets.afterRemove(removed, 1, true);
 		removed.entries.remove(1);
 		String removeProblem = expectTargets(removed, "1", "4", "搬一趟", "99");
 		if (removeProblem != null)
 			return "删除后 " + removeProblem;
+		// ②b **目标本身被删掉**的落点要标成失效（{@code n2} = 原本第 2 条）—— 用户 2026-10-20 的新口径，
+		//    **与开关无关**：下面 shiftFollowers=false 那一份也必须标上（否则关着开关删掉目标，
+		//    那次跳转就悄悄指到别人身上了，正是用户要避免的"不小心的错误跳转"）。
+		for (boolean shift : new boolean[] { true, false }) {
+			ArmProgramTask dead = copyForTest(task);
+			dead.entries.get(4).successTarget = "2"; // 第 5 条原本跳第 2 条 ⇒ 删掉第 2 条之后应当失效
+			dead.entries.get(4).timeoutTarget = "2";
+			JumpTargets.afterRemove(dead, 1, shift);
+			dead.entries.remove(1);
+			if (!"n2".equals(dead.entries.get(3).successTarget) || !"n2".equals(dead.entries.get(3).timeoutTarget))
+				return "删掉第 2 条之后，指着它的落点没有标成失效落点 n2（开关=" + shift + "，实际 "
+					+ dead.entries.get(3).successTarget + "）";
+			// 失效落点必须活着穿过存盘往返（它就是字段里的普通字符串，但这是"卡片重开还在"的唯一证据）
+			String roundTrip = copyForTest(dead).entries.get(3).successTarget;
+			if (!"n2".equals(roundTrip))
+				return "失效落点没能穿过存盘往返（回来变成 " + roundTrip + "）";
+			if (!JumpTargets.isDead("n2") || JumpTargets.isDead("north") || JumpTargets.isDead("2"))
+				return "失效落点的判据不对（north 是任务名、2 是序号，两者都不该算失效；n2 必须算）";
+			// 再删一次别的条目 ⇒ 失效落点**不跟着动**（它是历史，不是引用）
+			ArmProgramTask again = copyForTest(dead);
+			JumpTargets.afterRemove(again, 0, true);
+			again.entries.remove(0);
+			if (!"n2".equals(again.entries.get(2).successTarget))
+				return "失效落点跟着位置移动了（变成了 " + again.entries.get(2).successTarget + "）";
+		}
 		// ③ 把第 1 条移到第 3 位（0 基 0 → 2）。落点是**位置**不是自引用，所以按"原来指的那一条现在在哪"算：
 		//    移动后顺序 = [B, C, A, D, E]；A 原来指自己(1) ⇒ 现在第 3；B 原来指 C(3) ⇒ C 现在第 2；
 		//    C 原来指 E(5) ⇒ E 没动（第 5）；名字与 99 不动。
@@ -4690,10 +4868,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String dup = expectTargets(taskOf(screen), "1", "4", "4", "6", "搬", "3");
 			if (dup != null)
 				return "复制没接上：" + dup;
-			// ③ 删除（× / 编辑器垃圾桶那条路）
+			// ③ 删除（× / 编辑器垃圾桶那条路）：第 5 条原本跳"2"，而删掉的正是第 2 条
+			//    ⇒ 它的落点必须变成**失效落点 n2**（用户 2026-10-20），其余活着的落点照旧跟着挪
 			screen.program = wireFixture();
 			screen.removeWithoutUndo(new Card(false, 0, 1));
-			String removed = expectTargets(taskOf(screen), "1", "4", "搬", "2");
+			String removed = expectTargets(taskOf(screen), "1", "4", "搬", "n2");
 			if (removed != null)
 				return "删除没接上：" + removed;
 			// ④ 上移/下移
@@ -4702,11 +4881,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String moved = expectTargets(taskOf(screen), "3", "2", "5", "搬", "1");
 			if (moved != null)
 				return "移动没接上：" + moved;
-			// ⑤ 开关关着：同样一次删除，数字一个都不许动
+			// ⑤ 开关关着：同样一次删除 —— 活着的一律不动，但"目标被删掉"的那一条**照样标失效**
+			//    （见 fixJumpsAfterRemove 的说明：那是事实，不是"自动更正"）
 			screen.program = wireFixture();
 			screen.autoFixJumps = false;
 			screen.removeWithoutUndo(new Card(false, 0, 1));
-			String off = expectTargets(taskOf(screen), "1", "5", "搬", "2");
+			String off = expectTargets(taskOf(screen), "1", "5", "搬", "n2");
 			if (off != null)
 				return "开关关着却改了序号：" + off;
 			return null;
@@ -4768,8 +4948,101 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		}
 	}
 
-	/** 接线自检用的夹具：5 条落点各异的条目（1 / 3 / 5=末尾 / 任务名 / 2），外加一个被调任务。 */
-	private static ArmProgram wireFixture() {
+	/**
+	 * 自检：**反向引用**（"谁跳到我这里"）与**落点框的红字警示**（用户 2026-10-20）。
+	 *
+	 * <p>为什么这两条要自动验：它们都是"看得见才算数"的东西 —— 反向引用算错了，界面上只是少一行或多一行，
+	 * 没人会发现；落点框的红字与提示行更是纯视觉（{@code n5} 这个值本身完全合法，存得下也读得回）。
+	 *
+	 * <p>夹具（4 条）：第 1 条「成功后跳 3」、第 2 条「失败后跳 3」、第 3 条「成功后跳 1」、
+	 * 第 4 条「成功后跳 n2」（失效落点，指着第 2 条原本待的位置）。所以：
+	 * <ul>
+	 *   <li>看第 3 条 ⇒ 有 **2** 处引用（两种出口各一）；</li>
+	 *   <li>看第 2 条 ⇒ **0** 处（{@code n2} 是失效落点，它已经不指任何地方了）；</li>
+	 *   <li>任务卡「搬」⇒ 至少 1 处（{@code wireFixture} 里有一条按任务名跳过去）。</li>
+	 * </ul>
+	 *
+	 * <p>反证：把 {@link #numericTarget} 改成 {@code parseInt} 直接抛/给 0 ⇒ 第 2 条那一项红；
+	 * 把 {@link #incomingRefLines} 里失败那一支删掉 ⇒ 第 3 条少一处引用 ⇒ 红；
+	 * 把 {@link #refreshDeadTargetWarning} 的 {@code dead} 恒置 false ⇒ 红字那一项红。
+	 */
+	private static String deadTargetProblem(Inventory inventory, RegistryAccess registries) {
+		ArmProgram program = new ArmProgram();
+		ArmProgramTask task = new ArmProgramTask();
+		task.name = "refs";
+		ArmProgramEntry a = ArmProgramEntry.fresh(OperationType.TAKE);
+		a.onSuccess = SkipAction.SKIP_TO;
+		a.successTarget = "3";
+		ArmProgramEntry b = ArmProgramEntry.fresh(OperationType.TAKE);
+		b.onTimeout = SkipAction.SKIP_TO;
+		b.failAmount = 0;
+		b.timeoutTarget = "3";
+		ArmProgramEntry c = ArmProgramEntry.fresh(OperationType.TAKE);
+		c.onSuccess = SkipAction.SKIP_TO;
+		c.successTarget = "1";
+		ArmProgramEntry d = ArmProgramEntry.fresh(OperationType.TAKE);
+		d.onSuccess = SkipAction.SKIP_TO;
+		d.successTarget = "n2";
+		task.entries.add(a);
+		task.entries.add(b);
+		task.entries.add(c);
+		task.entries.add(d);
+		program.tasks.add(task);
+
+		ArmProgramScreen screen = fixtureScreen(inventory, registries, program);
+		screen.page = Page.ENTRIES;
+		screen.currentTask = 0;
+
+		List<Component> refs = screen.incomingRefLines(new Card(false, 0, 2), 2); // 第 3 条
+		if (refs.size() != 2)
+			return "指着第 3 条的引用应当是 2 处（成功后 + 失败后），实际 " + refs.size() + "：" + refs;
+		String successLine = tr("ref.from_success", 1).getString();
+		String failLine = tr("ref.from_fail", 2).getString();
+		if (!refs.get(0)
+			.getString()
+			.equals(successLine))
+			return "第一处引用应当是" + successLine + "，实际 " + refs.get(0)
+				.getString();
+		if (!refs.get(1)
+			.getString()
+			.equals(failLine))
+			return "第二处引用应当是" + failLine + "，实际 " + refs.get(1)
+				.getString();
+		// 失效落点不算引用：n2 已经不指任何地方了
+		if (!screen.incomingRefLines(new Card(false, 0, 1), 1)
+			.isEmpty())
+			return "失效落点 n2 被当成了「指向第 2 条」的引用";
+		// 没被引用的卡片：提示里不许冒出空标题
+		if (!screen.incomingRefSection(new Card(false, 0, 3), 3)
+			.isEmpty())
+			return "没人指着的卡片也追加了一段引用提示（会多出一个空标题）";
+
+		// 任务卡：按任务名跳过去的引用（用接线夹具，它里面真有一条「成功后跳 搬」）
+		ArmProgramScreen wired = fixtureScreen(inventory, registries, wireFixture());
+		boolean namedRef = wired.incomingRefLines(new Card(true, 1, 0), 0)
+			.stream()
+			.anyMatch(line -> line.getString()
+				.contains("wire"));
+		if (!namedRef)
+			return "任务卡上没有报出「按任务名跳过来」的引用（「搬」那个任务应当有 1 处）";
+
+		// 落点框：失效落点要多一行红字提示，活着的落点不许有（否则每次编辑都多一行废话）
+		EditBox box = new EditBox(screen.font, 0, 0, 40, 8, Component.empty());
+		List<Component> aliveTip = new ArrayList<>();
+		screen.refreshDeadTargetWarning(box, aliveTip, a, true);
+		if (aliveTip.size() != 2)
+			return "活着的落点不该有警示行（提示应当是 2 行，实际 " + aliveTip.size() + "）";
+		List<Component> deadTip = new ArrayList<>();
+		screen.refreshDeadTargetWarning(box, deadTip, d, true);
+		String deadLine = tr("hint.dead_target", 2).getString();
+		if (deadTip.size() != 3 || !deadTip.get(2)
+			.getString()
+			.equals(deadLine))
+			return "失效落点的提示里没有那一行红字（期望" + deadLine + "，实际 " + deadTip + "）";
+		return null;
+	}
+
+	/** 接线自检用的夹具：5 条落点各异的条目（1 / 3 / 5=末尾 / 任务名 / 2），外加一个被调任务。 */	private static ArmProgram wireFixture() {
 		ArmProgram program = new ArmProgram();
 		ArmProgramTask task = new ArmProgramTask();
 		task.name = "wire";
@@ -5038,6 +5311,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			String ensureTask = ensureTaskProblem(inventory, registries);
 			if (ensureTask != null && problem == null)
 				problem = "默认任务: " + ensureTask;
+			// ★ 失效落点（n5）与"谁跳到我这里"（用户 2026-10-20）
+			String deadTarget = deadTargetProblem(inventory, registries);
+			if (deadTarget != null && problem == null)
+				problem = "失效落点 / 反向引用: " + deadTarget;
 			// ★ 超出动力臂活动范围的坐标：坐标框要变红（原版聊天错误提示那种红），悬停再补一句
 			String coordsRange = screen.coordsRangeProblem(mc);
 			if (coordsRange != null && problem == null)
@@ -6858,6 +7135,20 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	};
 
 	/**
+	 * 「跳转落点」这一组键（用户 2026-10-20：失效落点 {@code n5} + "谁跳到我这里"）。
+	 *
+	 * <p>为什么它们也要进这张表：这一组全是 {@code tr("ref.…")} / {@code tr("chip.…")} 拼出来的
+	 * **字符串键**，编译器不查；少一个键，界面上就只显示一串裸 key（编译/运行/自检全都不报错）。
+	 */
+	private static final String[] JUMP_LANG_KEYS = {
+		"entry.jump_target", "hint.entry_jump_target",
+		"chip.on_success_jump", "chip.fail_jump", "chip.fail_jump_dead",
+		"hint.dead_target",
+		"ref.incoming_entry", "ref.incoming_task", "ref.from_success", "ref.from_fail", "ref.with_task", "ref.more",
+		"tip.remove_entry", "tip.remove_task"
+	};
+
+	/**
 	 * 自检 12：两个语言文件的**键集必须完全一致**，且本轮要用的键都得在（§7.16b 四 断言 12）。
 	 *
 	 * <p>为什么值得一条断言：`opt.<枚举小写>` 是**派生**出来的键，枚举一改名（`WAIT_SIGNAL → SIGNAL`）
@@ -6908,6 +7199,14 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			}
 			// 「使用」的潜行开关那一组（含卡片第一行那句「潜行右键」的 opt.use_sneak）
 			for (String key : USE_SNEAK_LANG_KEYS) {
+				String full = prefix + key;
+				if (!zh.containsKey(full))
+					missing.add("zh:" + key);
+				if (!en.containsKey(full))
+					missing.add("en:" + key);
+			}
+			// 「跳转落点」那一组（失效落点 n5 / 反向引用"谁跳到我这里"）
+			for (String key : JUMP_LANG_KEYS) {
 				String full = prefix + key;
 				if (!zh.containsKey(full))
 					missing.add("zh:" + key);

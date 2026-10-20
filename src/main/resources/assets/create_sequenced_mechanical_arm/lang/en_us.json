@@ -176,6 +176,7 @@
   "create_sequenced_mechanical_arm.gui.editor.chip.fail_retry_forever": "retry forever",
   "create_sequenced_mechanical_arm.gui.editor.chip.fail_skip": "skip",
   "create_sequenced_mechanical_arm.gui.editor.chip.fail_jump": "jump %s",
+  "create_sequenced_mechanical_arm.gui.editor.chip.fail_jump_dead": "jump lost (was entry %s)",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_fail_action": "After the window: stop / skip / jump",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_fail_unit": "t = ticks, s = seconds, m = minutes",
   "create_sequenced_mechanical_arm.gui.editor.edit.prop": "Property",
@@ -220,6 +221,13 @@
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_error_message": "Goes to the goggles and fails this task",
   "create_sequenced_mechanical_arm.gui.editor.call.none": "(no other task)",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_jump_target": "Task name, or an entry number (1-based)",
+  "create_sequenced_mechanical_arm.gui.editor.hint.dead_target": "this target was entry %s, which has been deleted - no jump happens here",
+  "create_sequenced_mechanical_arm.gui.editor.ref.incoming_entry": "jumps here",
+  "create_sequenced_mechanical_arm.gui.editor.ref.incoming_task": "jumps to this task",
+  "create_sequenced_mechanical_arm.gui.editor.ref.from_success": "entry %s - jump on success",
+  "create_sequenced_mechanical_arm.gui.editor.ref.from_fail": "entry %s - jump on failure",
+  "create_sequenced_mechanical_arm.gui.editor.ref.with_task": "%s - %s",
+  "create_sequenced_mechanical_arm.gui.editor.ref.more": "...and %s more",
   "create_sequenced_mechanical_arm.gui.editor.chip.task": "Task %s: %s",
   "create_sequenced_mechanical_arm.gui.editor.entry.program_note": "Program note",
   "create_sequenced_mechanical_arm.gui.editor.entry.task_note": "Task note",
@@ -354,5 +362,6 @@
   "create_sequenced_mechanical_arm.gui.fail.ok_jump": "ok -> jump %s",
   "create_sequenced_mechanical_arm.gui.fail.skipped": "%s (skipped)",
   "create_sequenced_mechanical_arm.gui.fail.retried": "%s (gave up after %s)",
-  "create_sequenced_mechanical_arm.gui.fail.jumped": "%s (jump %s)"
+  "create_sequenced_mechanical_arm.gui.fail.jumped": "%s (jump %s)",
+  "create_sequenced_mechanical_arm.gui.fail.jump_lost": "target is gone, going to the next entry"
 }

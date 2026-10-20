@@ -176,6 +176,7 @@
   "create_sequenced_mechanical_arm.gui.editor.chip.fail_retry_forever": "一直重试",
   "create_sequenced_mechanical_arm.gui.editor.chip.fail_skip": "跳过",
   "create_sequenced_mechanical_arm.gui.editor.chip.fail_jump": "跳转 %s",
+  "create_sequenced_mechanical_arm.gui.editor.chip.fail_jump_dead": "跳转已失效（原第 %s 条）",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_fail_action": "时限用完后：停下 / 跳过 / 跳转",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_fail_unit": "t = 刻、s = 秒、m = 分",
   "create_sequenced_mechanical_arm.gui.editor.edit.prop": "属性",
@@ -220,6 +221,13 @@
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_error_message": "写进护目镜，并把当前任务判为失败",
   "create_sequenced_mechanical_arm.gui.editor.call.none": "（没有别的任务）",
   "create_sequenced_mechanical_arm.gui.editor.hint.entry_jump_target": "任务名，或本任务的条目序号（1 起）",
+  "create_sequenced_mechanical_arm.gui.editor.hint.dead_target": "这个落点原来指向第 %s 条，那条已经被删掉了 —— 走到这里不会跳转",
+  "create_sequenced_mechanical_arm.gui.editor.ref.incoming_entry": "跳到这里的有",
+  "create_sequenced_mechanical_arm.gui.editor.ref.incoming_task": "跳到这个任务的有",
+  "create_sequenced_mechanical_arm.gui.editor.ref.from_success": "第 %s 条 · 成功后跳转",
+  "create_sequenced_mechanical_arm.gui.editor.ref.from_fail": "第 %s 条 · 失败后跳转",
+  "create_sequenced_mechanical_arm.gui.editor.ref.with_task": "「%s」%s",
+  "create_sequenced_mechanical_arm.gui.editor.ref.more": "…还有 %s 处",
   "create_sequenced_mechanical_arm.gui.editor.chip.task": "任务 %s：%s",
   "create_sequenced_mechanical_arm.gui.editor.entry.program_note": "程序备注",
   "create_sequenced_mechanical_arm.gui.editor.entry.task_note": "任务备注",
@@ -354,5 +362,6 @@
   "create_sequenced_mechanical_arm.gui.fail.ok_jump": "成功 → 跳转 %s",
   "create_sequenced_mechanical_arm.gui.fail.skipped": "%s（跳过）",
   "create_sequenced_mechanical_arm.gui.fail.retried": "%s（重试 %s 后放弃）",
-  "create_sequenced_mechanical_arm.gui.fail.jumped": "%s（跳转 %s）"
+  "create_sequenced_mechanical_arm.gui.fail.jumped": "%s（跳转 %s）",
+  "create_sequenced_mechanical_arm.gui.fail.jump_lost": "落点已失效，继续下一条"
 }

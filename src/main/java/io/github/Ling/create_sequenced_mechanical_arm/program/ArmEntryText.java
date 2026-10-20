@@ -8,6 +8,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 
@@ -312,8 +313,28 @@ public final class ArmEntryText {
 	// ————————————————————————— 各属性的一句话 —————————————————————————
 
 	public static Component successText(ArmProgramEntry entry) {
-		return entry.onSuccess == SkipAction.SKIP_TO ? tr("chip.on_success_jump", entry.successTarget)
-			: tr("chip.on_success_stay");
+		if (entry.onSuccess != SkipAction.SKIP_TO)
+			return tr("chip.on_success_stay");
+		return tr("chip.on_success_jump", jumpTargetLabel(entry.successTarget));
+	}
+
+	/**
+	 * 落点怎么显示：还活着就是原文；<b>目标已经被删掉</b>（{@code n5}）就画成带删除线的灰字。
+	 *
+	 * <p>用户 2026-10-20 的原话：<i>"把跳转的位置改为占位数字比如用 n+数字，在卡片上显示为 §n 的
+	 * 删除线效果，编辑的时候显示为 n+数字比如 n5、n11，并且不会直接触发跳转"</i> —— 卡片上用删除线
+	 * 表示"这处跳转已经废了"，而编辑器里照原样显示 {@code n5}（玩家能看出它原本指向第 5 条，改回一个
+	 * 有效落点即可，或者干脆把这条属性删掉）。
+	 *
+	 * <p>为什么用灰度 + 删除线而不是换成另一句话：卡片那一行是"成功后 跳转 n5"这样的固定句式，
+	 * 换成整句话会把胶囊撑得很宽（宽度是按字数算的，见 {@code ArmProgramScreen.chipWidth}）；
+	 * 删除线一眼就能看出"这个数字不作数了"，而"为什么"留给悬停提示与编辑框去说。
+	 */
+	public static Component jumpTargetLabel(String raw) {
+		if (!JumpTargets.isDead(raw))
+			return Component.literal(raw == null ? "" : raw);
+		return Component.literal(raw.trim())
+			.withStyle(ChatFormatting.STRIKETHROUGH, ChatFormatting.DARK_GRAY);
 	}
 
 	/**
@@ -338,7 +359,7 @@ public final class ArmEntryText {
 		if (!entry.hasRetryWindow())
 			return switch (entry.onTimeout) {
 				case CONTINUE -> tr("chip.fail_skip");
-				case SKIP_TO -> tr("chip.fail_jump", entry.timeoutTarget);
+				case SKIP_TO -> jumpText(entry.timeoutTarget);
 				case NONE -> tr("chip.fail_stop");
 			};
 		if (entry.failAmount < 0)
@@ -348,9 +369,23 @@ public final class ArmEntryText {
 				.getString();
 		return tr("chip.fail", limitText, switch (entry.onTimeout) {
 			case CONTINUE -> tr("chip.fail_skip").getString();
-			case SKIP_TO -> tr("chip.fail_jump", entry.timeoutTarget).getString();
+			case SKIP_TO -> jumpText(entry.timeoutTarget).getString();
 			case NONE -> tr("chip.fail_stop").getString();
 		});
+	}
+
+	/**
+	 * 「失败后 跳转 X」那一句；落点失效（目标那条被删掉了）时整句换成「跳转已失效（原第 5 条）」。
+	 *
+	 * <p>⚠️ 这一支必须**写成整句话**而不是只给一个带删除线的 {@code n5}：这句会被 {@code chip.fail}
+	 * （"{@code %s 后 %s}"）用 {@code getString()} 拼进另一个句子，拆出来的 {@code n5} 单独出现在
+	 * "5 秒后 跳转 n5"里没人看得懂。「成功后」那一支不拼句子，所以那边直接画删除线
+	 * （见 {@link #jumpTargetLabel}）。
+	 */
+	private static Component jumpText(String target) {
+		if (JumpTargets.isDead(target))
+			return tr("chip.fail_jump_dead", JumpTargets.deadPosition(target));
+		return tr("chip.fail_jump", jumpTargetLabel(target));
 	}
 
 	/**
@@ -687,7 +722,39 @@ public final class ArmEntryText {
 		if (normalHead.equals(sneakHead))
 			return "「右键」与「潜行右键」在语言文件里是同一个词（" + normalHead + "）—— 卡片分不出潜行与否";
 
-		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开)";
+		// ★ 用户 2026-10-20：**失效落点**（{@code n5} = 目标那条已经被删掉）在卡片上要画成删除线，
+		//   而「失败后」那一支（会拼进"5 秒后 …"里）要写成整句话。
+		//   反证：把 {@link #jumpTargetLabel} 的 STRIKETHROUGH 去掉 ⇒ ① 红；
+		//   把 {@link #jumpText} 的失效分支改回 {@code tr("chip.fail_jump", …)} ⇒ ② 红。
+		ArmProgramEntry deadOk = ArmProgramEntry.fresh(OperationType.TAKE);
+		deadOk.onSuccess = SkipAction.SKIP_TO;
+		deadOk.successTarget = "n5";
+		Component deadLabelComponent = jumpTargetLabel("n5");
+		if (!deadLabelComponent.getStyle()
+			.isStrikethrough() || !"n5".equals(deadLabelComponent.getString()))
+			return "失效落点（n5）在卡片上不是带删除线的 n5：" + deadLabelComponent.getString() + " / 删除线="
+				+ deadLabelComponent.getStyle()
+					.isStrikethrough();
+		if (jumpTargetLabel("5")
+			.getStyle()
+			.isStrikethrough())
+			return "还活着的落点（5）也被画了删除线";
+		if (!successText(deadOk).getString()
+			.contains("n5"))
+			return "「成功后」的失效落点没有显示 n5：" + successText(deadOk).getString();
+		ArmProgramEntry deadFail = ArmProgramEntry.fresh(OperationType.TAKE);
+		deadFail.onTimeout = SkipAction.SKIP_TO;
+		deadFail.failAmount = 5;
+		deadFail.failUnit = WaitUnit.SECOND;
+		deadFail.timeoutTarget = "n11";
+		String deadFailText = failureText(deadFail).getString();
+		String deadPhrase = tr("chip.fail_jump_dead", 11).getString();
+		if (!deadFailText.contains(deadPhrase))
+			return "「失败后」的失效落点没有写成整句话：" + deadFailText + "（期望含 " + deadPhrase + "）";
+		if (deadFailText.contains("n11"))
+			return "「失败后」拼句子里露出了裸的 n11（玩家看不懂）：" + deadFailText;
+
+		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开 / 失效落点=删除线+nN)";
 	}
 
 }

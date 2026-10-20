@@ -2031,18 +2031,39 @@ public class ProgramRuntime {
 	 */
 	private void applySuccessExit(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
 		if (entry.onSuccess == SkipAction.SKIP_TO && !entry.successTarget.isBlank()) {
-			lastFailure = FailText.of("ok_jump", entry.successTarget);
-			resetEntryCounters();
-			jumpTo(arm, entry.successTarget);
-			return;
+			// 落点已经**失效**（{@code n5} = 它原来指着的那一条被删掉了）：按"没有跳转"走，也就是
+			// 顺序下一条 —— 用户 2026-10-20 的口径："不会直接触发跳转……运行到这里的时候无法跳转"。
+			// ⚠️ 这里**不能**只是"不跳"就 return：{@code jumpTo} 才是推进游标的那个人，什么都不做地返回
+			// 会让同一条条目每 tick 重跑一次（死循环，且表面上"什么都没发生"）。
+			if (JumpTargets.isDead(entry.successTarget))
+				logDeadTarget(arm, task, entry, true, "");
+			else {
+				lastFailure = FailText.of("ok_jump", entry.successTarget);
+				resetEntryCounters();
+				jumpTo(arm, entry.successTarget);
+				return;
+			}
 		}
 
-		resetEntryCounters();
-		entryIndex++;
-		if (entryIndex >= task.entries.size())
-			finishTask(arm, task);
-		else
-			arm.markProgramDirty();
+		advanceAfterSkip(arm, task);
+	}
+
+	/**
+	 * 记一行"这个落点已经失效了"（{@code n5}）。
+	 *
+	 * <p>为什么值得单独记：跳转换成了"继续下一条"以后，日志里那一行是玩家唯一能看出"这里本该跳走"的地方
+	 * —— 没有它，程序的行为和"这一条压根没设跳转"完全一样（用户要的正是"知道这里原本跳转的位置"）。
+	 *
+	 * @param reasonSuffix 失败那一路要带上"为什么放弃"（成功那一路给空串）
+	 */
+	private void logDeadTarget(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry,
+		boolean success, String reasonSuffix) {
+		String target = success ? entry.successTarget : entry.timeoutTarget;
+		if (!arm.logEnabled())
+			return;
+		arm.logLine(logWhere(task, entry) + (success ? " 落点 " : " 放弃 → 落点 ") + target.trim() + " 已失效（原本第 "
+			+ JumpTargets.deadPosition(target) + " 条已被删除）→ 继续下一条"
+			+ (reasonSuffix.isEmpty() ? "" : "（" + reasonSuffix + "）"));
 	}
 
 	/**
@@ -2231,14 +2252,18 @@ public class ProgramRuntime {
 				if (arm.logEnabled())
 					arm.logLine(logWhere(task, entry) + " 放弃 → 继续下一条（" + reason.text()
 						.getString() + "）");
-				resetEntryCounters();
-				entryIndex++;
-				if (entryIndex >= task.entries.size())
-					finishTask(arm, task);
-				else
-					arm.markProgramDirty();
+				advanceAfterSkip(arm, task);
 			}
 			case SKIP_TO -> {
+				// 落点已经失效（目标那条被删掉了）：与"跳过这一条"同一条路 —— 用户 2026-10-20 的口径
+				// "运行到这里的时候无法跳转"（与 {@link #applySuccessExit} 里那一条是同一个判据）。
+				if (JumpTargets.isDead(entry.timeoutTarget)) {
+					lastFailure = FailText.of("jump_lost");
+					logDeadTarget(arm, task, entry, false, reason.text()
+						.getString());
+					advanceAfterSkip(arm, task);
+					return;
+				}
 				lastFailure = FailText.of("jumped", reason.text(), entry.timeoutTarget);
 				if (arm.logEnabled())
 					arm.logLine(logWhere(task, entry) + " 放弃 → 跳转 " + entry.timeoutTarget + "（" + reason.text()
@@ -2247,6 +2272,16 @@ public class ProgramRuntime {
 			}
 			case NONE -> halt(arm, reason); // 停机那行由 halt 自己记（含"停在哪一条"）
 		}
+	}
+
+	/** 超时后"继续下一条"（「跳过这条」与"落点失效"共用）：推进游标，越过末尾就算这一轮走完。 */
+	private void advanceAfterSkip(SequencedArmBlockEntity arm, ArmProgramTask task) {
+		resetEntryCounters();
+		entryIndex++;
+		if (entryIndex >= task.entries.size())
+			finishTask(arm, task);
+		else
+			arm.markProgramDirty();
 	}
 
 	/**
@@ -2259,6 +2294,12 @@ public class ProgramRuntime {
 	 * <p>额外允许 `N = 条目数 + 1`＝<b>跳到末尾（这一轮就到此为止）</b>：
 	 * 主任务里它等于"提前结束这一轮 ⇒ 回到第 1 条重来"（恒循环，见 {@link #finishTask}），
 	 * 子任务里它等于"提前返回调用方"。要**真的停下**只能用「退出」或「抛错」。
+	 *
+	 * <p>★ <b>失效落点（{@code n5}）不在这里处理</b>（用户 2026-10-20：它记着"原来指向第 5 条，那条被删掉了"，
+	 * "运行到这里的时候无法跳转"）：{@link #applySuccessExit} 与 {@link #applySkip} 会先拦下它并按
+	 * "继续下一条"处理 —— 而且**必须**在那里拦，因为"不跳"还得有人推进游标，否则同一条条目每 tick 重跑。
+	 * 这里**不做兜底**：万一将来多一个调用点忘了拦，它会掉进最后那句
+	 * {@code halt(jump_missing)}（响亮、一看就知道是"有人漏了"，而不是悄悄换个行为）。
 	 */
 	private void jumpTo(SequencedArmBlockEntity arm, String target) {
 		ArmProgram program = arm.getProgram();

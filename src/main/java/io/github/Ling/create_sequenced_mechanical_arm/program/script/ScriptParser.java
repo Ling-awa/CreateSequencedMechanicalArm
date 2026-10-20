@@ -19,6 +19,7 @@ import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.Un
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.UnloadRepeat;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramEntry.WaitUnit;
 import io.github.Ling.create_sequenced_mechanical_arm.program.ArmProgramTask;
+import io.github.Ling.create_sequenced_mechanical_arm.program.JumpTargets;
 import io.github.Ling.create_sequenced_mechanical_arm.program.OperationType;
 
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
@@ -1723,6 +1724,10 @@ public final class ScriptParser {
 
 	private void checkTarget(String target, boolean jumps, ArmProgramTask task, int line, List<String> known) {
 		if (!jumps || target.isEmpty())
+			return;
+		// 失效落点（{@code n5} = 目标那条已经被删掉，见 {@code JumpTargets}）不是错误，也不是任务名：
+		// 它是"这里本来有个跳转、目标后来被删了"的记号，原样放过（导出 → 导入要能无损往返）。
+		if (JumpTargets.isDead(target))
 			return;
 		if (target.chars()
 			.allMatch(Character::isDigit)) {

@@ -7216,6 +7216,7 @@ public class SequencedArmSelfTest {
 		boolean emptyCandidateRetries = false;
 		boolean routeSuccess = false;
 		boolean routeFailure = false;
+		boolean deadTargetSkips = false;
 		String detail;
 		try {
 			BlockState depotState = stateOf("create:depot");
@@ -7269,6 +7270,17 @@ public class SequencedArmSelfTest {
 			arm.setProgram(routeProgram(depotPos.subtract(armPos), retryWindow));
 			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT));
 			routeFailure = runRoute(arm) == 1; // 1 = 失败后跳到条目 2（那条抛错 ⇒ 停在下标 1）
+
+			// ⑪ **失效落点**（{@code n2} = 它原来指的那一条已经被删掉了）运行时"不跳转"：
+			//    用户 2026-10-20 的原话是"不会直接触发跳转……运行到这里的时候无法跳转"。
+			//    这条判据抓的是两个都会静默发生的错误：
+			//    ① 把 n2 当任务名找 ⇒ `halt(jump_missing)`：臂停了，但那是"落点写错"的报法，
+			//       而这里只是"目标被删了"，不该停产线；
+			//    ② "只是不跳"就 return ⇒ 游标不动 ⇒ 同一条条目每 tick 重跑，看着像在等、实际永远不停。
+			//    反证：把 applySkip 里那个 isDead 分支整段删掉 ⇒ 走 jumpTo ⇒ ① ⇒ 下面那条立刻红。
+			arm.setProgram(deadRouteProgram(depotPos.subtract(armPos), retryWindow));
+			arm.setHeldItem(new ItemStack(Items.GOLD_INGOT));
+			deadTargetSkips = runDeadRoute(arm) == 1;
 
 			// ⑨ 不匹配**不是立刻停机**，而是在窗口内重试（用户口径：失败默认 retry）。
 			//    上半：跑满窗口**之前**必须还在重试（没停机、游标还在条目 1、重试计时已经在走）；
@@ -7349,7 +7361,7 @@ public class SequencedArmSelfTest {
 			detail = "容器=[金锭,铁锭]→不符=" + bothMismatch + "（应为 true） 容器=[铁锭,金锭]→符合=" + firstMatch
 				+ "（应为 true） 摆进保险箱=" + goldFirst + "/" + ironSecond + " 容器模式没动过臂=" + containerNeverMoved
 				+ " 窗口内还在重试=" + retryStaysWaiting + " 窗口到了才走失败后=" + retryWindowExpires
-				+ " 无物品也是重试=" + emptyCandidateRetries;
+				+ " 无物品也是重试=" + emptyCandidateRetries + " 失效落点不跳转=" + deadTargetSkips;
 		} catch (Throwable t) {
 			detail = "异常 " + t;
 		} finally {
@@ -7361,11 +7373,11 @@ public class SequencedArmSelfTest {
 		LOGGER.info("[selftest] 过滤: 物品(铁符合={} 金不符={}) 列表标签(木板符合={}) 属性过滤(木板符合={} 铁不符={}) "
 			+ "包裹(同址={} 异址={}) 空过滤器匹配一切={}(空={}) 手持(符合={} 不符={} 空={}) "
 			+ "容器(符合={} 不符={} 空={}) 只看第一格={} 出口路由(成功={} 失败={}) "
-			+ "不移动臂={} 窗口内重试={} 窗口到了才走失败后={} 无物品也重试={} （{}）",
+			+ "不移动臂={} 窗口内重试={} 窗口到了才走失败后={} 无物品也重试={} 失效落点不跳转={} （{}）",
 			ironMatches, !goldMatches, plankMatches, plankByTag, !ironByTag, sameAddress, !otherAddress,
 			emptyMatchesEverything, emptyIsEmpty, heldMatch, heldMismatch, heldEmpty, containerMatch, containerMismatch,
 			containerEmpty, firstSlotOnly, routeSuccess, routeFailure, containerNeverMoved, retryStaysWaiting,
-			retryWindowExpires, emptyCandidateRetries, detail);
+			retryWindowExpires, emptyCandidateRetries, deadTargetSkips, detail);
 
 		if (!ironMatches || goldMatches || !plankMatches)
 			LOGGER.error("[selftest] 过滤①失败：列表过滤器没按物品比（铁符合={} 金不符={} 木板符合={}）—— "
@@ -7411,6 +7423,10 @@ public class SequencedArmSelfTest {
 		if (!emptyCandidateRetries)
 			LOGGER.error("[selftest] 过滤⑨b失败：候选没有物品时不是「重试」而是立刻走了失败出口"
 				+ "（用户口径：没有物品也是一种不满足，与不匹配同一条路）");
+		if (!deadTargetSkips)
+			LOGGER.error("[selftest] 过滤⑪失败：失效落点（n2 = 目标那条已被删掉）没有按「继续下一条」处理"
+				+ "（用户 2026-10-20：n+数字「不会直接触发跳转」）—— 三种可能：① 它被当成任务名 ⇒ halt(jump_missing)；"
+				+ "② 只是没跳、游标没推进 ⇒ 同一条每 tick 重跑；③ applySkip 的 isDead 分支没接上（{}）", detail);
 	}
 
 	/** 「过滤」条目的最小程序：主任务 = [过滤]，成功后不设（收工）——单独跑一条时"成功"= 条目走完。 */
@@ -7543,8 +7559,31 @@ public class SequencedArmSelfTest {
 		return -1;
 	}
 
-	/** 把目标容器清空（走方块自己的能力，不看内部字段）——自检要摆不同的第一格。 */
-	private static void clearContainer(ServerLevel level, BlockPos pos) {
+	/**
+	 * {@code routeProgram} 的"失效落点"版：结构与它完全相同，只把<b>失败后落点</b>写成 {@code n2}
+	 * —— 也就是"这里本来写着 2，但第 2 条后来被删掉了"的状态（见 {@code JumpTargets} 的类注释）。
+	 */
+	private static ArmProgram deadRouteProgram(BlockPos offset, int retryWindow) {
+		ArmProgram program = routeProgram(offset, retryWindow);
+		program.tasks.get(0).entries.get(0).timeoutTarget = "n2";
+		return program;
+	}
+
+	/**
+	 * 跑失效落点路由，返回：{@code 1} = 正确（跳过那条、继续下一条 ⇒ 停在第 2 条的「抛错」上）、
+	 * {@code -1} = 一直没停（游标没推进 ⇒ 同一条每 tick 重跑）、{@code -2} = 停了但报的是"落点写错"
+	 * （{@code jump_missing} ⇒ {@code n2} 被当成任务名了）。
+	 */
+	private static int runDeadRoute(SequencedArmBlockEntity arm) {
+		for (int i = 0; i < 120; i++) {
+			arm.runtime.tick(arm);
+			if (arm.runtime.isHalted())
+				return arm.runtime.entryIndex == 1 && !"jump_missing".equals(arm.runtime.getLastFailureKey()) ? 1 : -2;
+		}
+		return -1;
+	}
+
+	/** 把目标容器清空（走方块自己的能力，不看内部字段）——自检要摆不同的第一格。 */	private static void clearContainer(ServerLevel level, BlockPos pos) {
 		IItemHandler handler = level.getCapability(Capabilities.ItemHandler.BLOCK, pos, Direction.UP);
 		if (handler == null)
 			return;
