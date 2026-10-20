@@ -788,7 +788,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		//   贴图照 Create 时刻表里"是否循环"那颗（{@code ScheduleScreen:134-145}）：同一个 {@code I_*} 图标，
 		//   靠 {@code IconButton.green} 在 {@code AllGuiTextures.BUTTON} 与 {@code BUTTON_GREEN} 之间切换
 		//   （{@code IconButton:35} 那行三元表达式就是用户说的"开启时绿色按钮贴图"）。
-		IconButton autoFix = new IconButton(leftPos + BOTTOM_BTN_AUTOFIX_X, topPos + 196, AllIcons.I_SEQ_REPEAT);
+		IconButton autoFix = new IconButton(leftPos + BOTTOM_BTN_AUTOFIX_X, topPos + 196, AllIcons.I_FLIP);
 		autoFix.withCallback(() -> toggleAutoFixJumps(autoFix));
 		autoFix.green = autoFixJumps;
 		refreshAutoFixTip(autoFix); // 三行：名字 / 已启用·未启用 / 一句说明（`setToolTip` 只吃单个组件，走控件自带那张表）
@@ -7175,9 +7175,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		int right = BOTTOM_BTN_AUTOFIX_X + BOTTOM_BTN_SIZE;
 		if (right > CONFIRM_BTN_X - 4)
 			return "底栏那几颗压住了「保存并关闭」（到 x=" + right + "，那颗从 " + CONFIRM_BTN_X + " 起）";
-		// ④ 四颗按钮的图标不能有重复（那就分不出哪个是哪个了）
-		if (AllIcons.I_TARGET == AllIcons.I_TOOL_MOVE_XZ || AllIcons.I_SEQ_REPEAT == AllIcons.I_REFRESH
-			|| AllIcons.I_SEQ_REPEAT == AllIcons.I_TOOL_MOVE_XZ || AllIcons.I_SEQ_REPEAT == AllIcons.I_TARGET)
+		// ④ 四颗按钮的图标不能有重复（那就分不出哪个是哪个了）。
+		//    ★ 「自动更正序号」用的是 {@code I_FLIP}：用户 2026-10-20 在图标表里点名"第五排第九个的斜向双向箭头"
+		//    （{@code AllIcons} 按 {@code newRow()/next()} 排布，第 5 行第 9 个正是 {@code I_FLIP}）——
+		//    原来那颗 {@code I_SEQ_REPEAT} 是个灰圆箭头，夹在未激活按钮中间认不出来。
+		if (AllIcons.I_TARGET == AllIcons.I_TOOL_MOVE_XZ || AllIcons.I_FLIP == AllIcons.I_REFRESH
+			|| AllIcons.I_FLIP == AllIcons.I_TOOL_MOVE_XZ || AllIcons.I_FLIP == AllIcons.I_TARGET)
 			return "底栏有按钮用了同一个图标";
 		// ⑤ 常量对了不等于**真摆出来了**：在任务页上按坐标把这三颗找一遍
 		boolean origin = false;
