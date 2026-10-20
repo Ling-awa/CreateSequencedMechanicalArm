@@ -40,7 +40,7 @@
   "create_sequenced_mechanical_arm.gui.arm.error": "错误：%s",
   "create_sequenced_mechanical_arm.gui.arm.inventory": "手持：%s   溢出：%s/%s",
   "create_sequenced_mechanical_arm.gui.arm.redstone": "红石：%s   转速：%s",
-  "create_sequenced_mechanical_arm.gui.arm.signals": "保持中的信号：%s / %s",
+  "create_sequenced_mechanical_arm.gui.arm.signals": "按着的信号：%s / %s",
   "create_sequenced_mechanical_arm.gui.arm.signal_rejected": "信号被拒（上限 %s）",
   "create_sequenced_mechanical_arm.gui.editor.title": "操作表编辑器",
   "create_sequenced_mechanical_arm.gui.editor.title_tasks": "任务列表",

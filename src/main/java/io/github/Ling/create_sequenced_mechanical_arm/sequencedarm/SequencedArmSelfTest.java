@@ -2833,7 +2833,7 @@ public class SequencedArmSelfTest {
 				.anyMatch(line -> line.contains(ironName)
 					&& line.contains(copperName)
 					&& line.contains("电平 15")
-					&& line.contains("保持"));
+					&& line.contains("常亮"));
 			// ③ 真的走一遍"正文 + 这一节"的导出（{@code exportLogToClipboard} 用的就是这个组合）：
 			//    最后一屏的最后一个条目必须是那一节里的一条（信号节在**最后**，用户口径），
 			//    而且条目的 icon 必须为空（用户明确不要物品贴图 —— 这条防止哪天又被加回来）。
@@ -3399,9 +3399,15 @@ public class SequencedArmSelfTest {
 				arm.runtime.tick(arm);
 				arm.runtime.tick(arm);
 				boolean wentOff = !Create.REDSTONE_LINK_NETWORK_HANDLER.hasAnyLoadedPower(f1);
-				haltedTickPulse = duringPulse && wentOff && arm.runtime.isHalted();
+				// ★ 到点必须**连表一起清**（用户 2026-10-20 从导出日志里发现「断电 · 保持」的僵尸条目
+				//   白占 maxHeldSignals 名额）：脉冲到期 = 「中断」同一条路（电平 0 → 退网 → 删表）。
+				//   反证：把 tickArmLink 里那两行 `heldSignals.remove(...)` / `leaveNetwork` 删掉 ⇒ 这里立刻红。
+				boolean tableCleared = !arm.holdsSignal(f1) && arm.heldSignalCount() == 0;
+				haltedTickPulse = duringPulse && wentOff && tableCleared && arm.runtime.isHalted();
 				if (!haltedTickPulse)
-					LOGGER.error("[selftest] 停机态下脉冲没有靠 runtime.tick 走完 —— 计时器不在所有早退之前");
+					LOGGER.error("[selftest] 停机态下脉冲没有靠 runtime.tick 走完，或者到点之后那一格还留在表里"
+						+ "（断电={} 表里还有它={} 表内条数={}）—— 计时器不在所有早退之前，或到点没删表退网", wentOff,
+						arm.holdsSignal(f1), arm.heldSignalCount());
 				arm.clearTransmissions();
 			}
 

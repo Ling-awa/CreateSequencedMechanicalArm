@@ -40,7 +40,7 @@
   "create_sequenced_mechanical_arm.gui.arm.error": "Error: %s",
   "create_sequenced_mechanical_arm.gui.arm.inventory": "Held: %s   Overflow: %s/%s",
   "create_sequenced_mechanical_arm.gui.arm.redstone": "Redstone: %s   Speed: %s",
-  "create_sequenced_mechanical_arm.gui.arm.signals": "Signals held: %s / %s",
+  "create_sequenced_mechanical_arm.gui.arm.signals": "Signals on: %s / %s",
   "create_sequenced_mechanical_arm.gui.arm.signal_rejected": "Signal rejected (limit %s)",
   "create_sequenced_mechanical_arm.gui.editor.title": "Operation Table Editor",
   "create_sequenced_mechanical_arm.gui.editor.title_tasks": "Tasks",

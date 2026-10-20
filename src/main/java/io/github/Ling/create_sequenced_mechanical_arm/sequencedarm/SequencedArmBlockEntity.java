@@ -455,10 +455,10 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 		List<String> out = new ArrayList<>();
 		out.add("— 信号发送状态（导出时）—");
 		if (heldSignals == null || heldSignals.isEmpty()) {
-			out.add("没有保持中的信号");
+			out.add("没有按着的信号");
 			return out;
 		}
-		out.add("保持中 " + heldSignals.size() + " / " + maxHeldSignals() + " 路"
+		out.add("按着 " + heldSignals.size() + " / " + maxHeldSignals() + " 路"
 			+ (armLinkRejectedLastTick > 0 ? "（上一次发送因表满被拒：" + armLinkRejectedLastTick + " 路）" : ""));
 		// 频率表是 HashMap：按第一个物品名排一下，同一份状态两次导出才是同一份文本
 		List<Map.Entry<Couple<Frequency>, ArmLink>> entries = new ArrayList<>(heldSignals.entrySet());
@@ -475,11 +475,18 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 				.getSecond()
 				.getStack();
 			ArmLink link = e.getValue();
-			String level = link.signalLevel <= 0 ? "断电" : "电平 " + link.signalLevel;
-			String tail = link.pulse < 0 ? "保持" : "脉冲余 " + link.pulse + "t";
+			// ⚠️ 「保持」这个词**不能单独用**（用户 2026-10-20：看到「断电 · 保持」直接问"什么意思"）：
+			//   pulse == -1 说的是"**没有倒计时**"，跟通不通电无关。所以两种状态分开写：
+			//   通电 = 电平 N（常亮 / 脉冲余 Nt），没电 = 断电（还占着这一格）。
+			String state;
+			if (link.signalLevel <= 0) {
+				state = "断电" + (link.pulse > 0 ? "（脉冲余 " + link.pulse + "t）" : "（还占着这一格）");
+			} else {
+				state = "电平 " + link.signalLevel + (link.pulse < 0 ? "（常亮）" : "（脉冲余 " + link.pulse + "t）");
+			}
 			out.add(first.getHoverName()
 				.getString() + " + " + second.getHoverName()
-					.getString() + " → " + level + " · " + tail);
+					.getString() + " → " + state);
 		}
 		return out;
 	}
@@ -1769,24 +1776,30 @@ public class SequencedArmBlockEntity extends KineticBlockEntity implements Trans
 	 * 推进所有脉冲计时器（由 {@code ProgramRuntime.tick()} 在**任何早退之前**调用 —— 脉冲是臂的物理状态，
 	 * 程序停机 / 无转速 / 红石锁定时照样要收尾，§7.16e 施工要点 2）。
 	 *
-	 * <p>到点**只把电平归 0**，entry 留在表里（= 那个频率不再通电、也没有未到期的脉冲）。
-	 * 这与旧版"恢复成发脉冲之前的电平"不同：新设计里"保持"是常态，没有"发完脉冲要还原成什么"可言。
+	 * <p>到点 = <b>和「中断」同一条路</b>：电平归 0 → 退网 → **从表里删掉**。
+	 * 原来是"只归 0、entry 留在表里"，理由是"保持是常态、没有要还原的电平"——那句话只解释了
+	 * <b>归成几</b>，没解释<b>为什么要留着一条已经不发射的记录</b>。留着它的实际后果（用户 2026-10-20
+	 * 从导出日志里一眼看出）：{@code 19 / 64 路} 里有十几条是「断电 · 保持」的僵尸，
+	 * 它们白占 {@code maxHeldSignals} 的名额（真需要发的第 65 路会被拒），也让"臂现在按着哪几路"这件事读不出来。
+	 * 清零之后它和"从没发过"没有区别 ⇒ 就该和 {@code releaseSignal} 一样删表退网。
 	 *
-	 * @return 本轮是否至少有一路发生了"到点归 0"（给自检用）
+	 * @return 本轮是否至少有一路"到点归 0"（给自检用）
 	 */
 	public boolean tickArmLink() {
 		if (heldSignals == null || heldSignals.isEmpty())
 			return false;
 		boolean fired = false;
-		for (ArmLink link : heldSignals.values()) {
+		// 边遍历边删 ⇒ 先拷一份（map 只有几十项，代价可忽略）
+		for (ArmLink link : new ArrayList<>(heldSignals.values())) {
 			if (link.pulse < 0)
 				continue;
 			if (--link.pulse > 0)
 				continue;
+			// 到点：先把强度推成 0（此时它还在表里 / 网里），再退网，最后删表 —— 顺序与 releaseSignal 一致
 			link.pulse = -1;
 			link.signalLevel = 0;
-			if (level != null && !level.isClientSide)
-				Create.REDSTONE_LINK_NETWORK_HANDLER.updateNetworkOf(level, link);
+			heldSignals.remove(link.frequency);
+			link.leaveNetwork(false);
 			fired = true;
 		}
 		if (fired)
