@@ -169,10 +169,15 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 	 * 剪贴板没有 bypass ⇒ 潜行右键时 {@code useItemOn} **根本收不到**这一下。
 	 * 这与"空手潜行右键 = 取溢出"能用到 {@code useWithoutItem} 并不矛盾：那条路上手是空的。
 	 *
-	 * <p><b>为什么客户端也要拦</b>（用户 2026-10-20 实测："会有一瞬间放置剪贴板，但最后没有放上去"）：
+	 * <p><b>为什么客户端也要拦，而且必须拦成 FAIL</b>（用户 2026-10-20 实测："会有一瞬间放置剪贴板，
+	 * 但最后没有放上去"，紧接着又报"潜行右键臂会打开剪贴板、日志被覆盖"）：
 	 * 方块交互被跳过之后，原版接着走物品那一条 —— {@code ClipboardBlockItem.useOn:41-43} 在潜行分支里是
 	 * {@code super.useOn(...)}，也就是**放下一个剪贴板方块**。客户端会先做**本地预测**：预测这一帧真把方块
 	 * 放进去了，服务端随后的取消又把它撤掉 ⇒ 玩家看到"放下去又没了"。客户端也吃掉这一下就没有预测了。
+	 * 但只取消还不够：{@code Minecraft.startUseItem:1756-1778} 对**不消费**的结果（{@code getCancellationResult()}
+	 * 默认是 PASS）会继续走 {@code useItem(...)}，剪贴板的 {@code use()} 于是**弹开界面**，
+	 * 界面关掉时把打开那一刻的快照写回去，正好覆盖服务端刚写的日志。所以这里显式
+	 * {@code setCancellationResult(InteractionResult.FAIL)}（`startUseItem:1768` 直接 return）。
 	 * 取消不会让服务端收不到手势：{@code MultiPlayerGameMode.startPrediction:270-276} 无论
 	 * {@code action.predict(...)} 返回什么<b>都会</b>把 {@code ServerboundUseItemOnPacket} 发出去
 	 * （同一条依据见 {@code OperationTableHandler} 类注释里"为什么拦键位事件"那一段）。
@@ -205,9 +210,18 @@ public class SequencedArmBlock extends KineticBlock implements IBE<SequencedArmB
 		if (!(level.getBlockState(pos)
 			.getBlock() instanceof SequencedArmBlock))
 			return;
-		// 客户端：只把这一下吞掉（**不预测放置剪贴板方块**），导出由服务端做
+		// ★ 客户端：把这一下吞掉，而且要吞成 **FAIL**（不是默认的 PASS）。
+		//   只 `setCanceled(true)` 的话 {@code getCancellationResult()} 是 PASS，而
+		//   {@code Minecraft.startUseItem:1756-1778} 对"不消费"的结果会**继续往下走**
+		//   → {@code gameMode.useItem(...)} → 剪贴板的 {@code ClipboardBlockItem.use:64-77}
+		//   **弹开剪贴板界面**并把卡的内容类型改成 EDITING。界面里存着打开那一刻的快照，
+		//   关界面时写回去 ⇒ 把服务端刚写进去的日志覆盖成"打开时看到的空白"
+		//   （用户 2026-10-20 实测："导入失败" + 看到的是空白 —— 正是这条链）。
+		//   FAIL 在 `:1768` 处直接 return：既不预测放置方块（没有闪烁），也不会掉进 useItem。
+		//   取消不影响发包：{@code MultiPlayerGameMode.startPrediction:270-276} 无论如何都发。
 		if (level.isClientSide()) {
 			event.setCanceled(true);
+			event.setCancellationResult(InteractionResult.FAIL);
 			return;
 		}
 		if (!(level.getBlockEntity(pos) instanceof SequencedArmBlockEntity arm))
