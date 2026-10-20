@@ -315,26 +315,40 @@ public final class ArmEntryText {
 	public static Component successText(ArmProgramEntry entry) {
 		if (entry.onSuccess != SkipAction.SKIP_TO)
 			return tr("chip.on_success_stay");
-		return tr("chip.on_success_jump", jumpTargetLabel(entry.successTarget));
+		return tr("chip.on_success_jump", jumpPhrase(entry.successTarget));
 	}
 
 	/**
-	 * 落点怎么显示：还活着就是原文；<b>目标已经被删掉</b>（{@code n5}）就画成带删除线的灰字。
+	 * 卡片上「跳转 N」这一整段：落点还活着就是原文；<b>目标已经被删掉</b>（{@code n5}）就**整段划掉**，
+	 * 不加任何额外文字。
 	 *
-	 * <p>用户 2026-10-20 的原话：<i>"把跳转的位置改为占位数字比如用 n+数字，在卡片上显示为 §n 的
-	 * 删除线效果，编辑的时候显示为 n+数字比如 n5、n11，并且不会直接触发跳转"</i> —— 卡片上用删除线
-	 * 表示"这处跳转已经废了"，而编辑器里照原样显示 {@code n5}（玩家能看出它原本指向第 5 条，改回一个
-	 * 有效落点即可，或者干脆把这条属性删掉）。
+	 * <p>用户 2026-10-20 的最终口径：<i>"利用 §n 的删除线效果，并且不加额外文本，直接是『失败后 §n 跳转 3』
+	 * （游戏内看起来就是跳转 3 被横线划过去了）之类的"</i> —— 所以第一版写的那句
+	 * 「跳转已失效（原第 5 条）」**整句删掉**：胶囊里塞一句话既超出边框（用户截图里被截断成
+	 * 「失败后跳转已失效（原第 3」），也破坏了"一眼扫过去结构都一样"的读法。
 	 *
-	 * <p>为什么用灰度 + 删除线而不是换成另一句话：卡片那一行是"成功后 跳转 n5"这样的固定句式，
-	 * 换成整句话会把胶囊撑得很宽（宽度是按字数算的，见 {@code ArmProgramScreen.chipWidth}）；
-	 * 删除线一眼就能看出"这个数字不作数了"，而"为什么"留给悬停提示与编辑框去说。
+	 * <p>删除线是<b>整段</b>（含「跳转」两个字），不是只划数字：那次跳转整个都不作数了。
+	 *
+	 * <p>⚠️ 前提是绘制那一侧**别把 Component 拍平成 String**（原来 {@code renderChip} 就是
+	 * {@code .getString()}，样式全丢 —— 用户图一看到的正是"平平的 n3"）。
 	 */
-	public static Component jumpTargetLabel(String raw) {
-		if (!JumpTargets.isDead(raw))
-			return Component.literal(raw == null ? "" : raw);
-		return Component.literal(raw.trim())
-			.withStyle(ChatFormatting.STRIKETHROUGH, ChatFormatting.DARK_GRAY);
+	public static Component jumpPhrase(String target) {
+		Component phrase = tr("chip.jump_to", cardTargetText(target));
+		return JumpTargets.isDead(target) ? phrase.copy()
+			.withStyle(ChatFormatting.STRIKETHROUGH) : phrase;
+	}
+
+	/**
+	 * 卡片上显示落点**不带 {@code n} 前缀**：失效落点只写原本那个序号（{@code n5} ⇒ {@code 5}）。
+	 *
+	 * <p>为什么卡片上不显示 {@code n5}：用户要的就是"看起来和普通落点一样、只是被划掉了"；
+	 * {@code n5} 这个写法是**编辑期**的东西（编辑框里必须显示 n5，否则玩家不知道它原本指第几条、
+	 * 也没法照着改），见 {@code ArmProgramScreen.refreshDeadTargetWarning}。
+	 */
+	public static String cardTargetText(String target) {
+		if (!JumpTargets.isDead(target))
+			return target == null ? "" : target;
+		return Integer.toString(JumpTargets.deadPosition(target));
 	}
 
 	/**
@@ -400,21 +414,34 @@ public final class ArmEntryText {
 	}
 
 	/**
-	 * 「失败后 跳转 X」那个去向；落点失效（目标那条被删掉了）时整句换成「跳转已失效（原第 5 条）」。
-	 *
-	 * <p>⚠️ 这一支必须**写成完整的一句**而不是只给一个带删除线的 {@code n5}：这句会被
-	 * {@code chip.fail_now} / {@code chip.fail_in} 拼进另一个句子，拆出来的 {@code n5} 单独出现在
-	 * "失败 5 秒后 跳转 n5"里没人看得懂。「成功后」那一支不拼句子，所以那边直接画删除线
-	 * （见 {@link #jumpTargetLabel}）。
+	 * 「失败后」这一支的落点那一句（{@code 跳转 3}）—— 与「成功后」那一支**同一个来源**（{@link #jumpPhrase}），
+	 * 失效落点时整段带删除线、不加任何额外文字。
 	 */
 	private static Component jumpText(String target) {
-		if (JumpTargets.isDead(target))
-			return tr("chip.fail_jump_dead", JumpTargets.deadPosition(target));
-		return tr("chip.fail_jump", jumpTargetLabel(target));
+		return jumpPhrase(target);
 	}
 
 	/**
-	 * 「个数」的一句话 = <b>模式 + 数值</b>（用户本轮口径：小于等于写“最多 N”、等于写“等于 N”）。
+	 * 这个组件转成"真正要画出去的字符序列"之后，有没有**任何一个字符**带删除线。
+	 *
+	 * <p>为什么不满足于查 {@code component.getStyle().isStrikethrough()}：那只证明"最外层说要划"，
+	 * 而实际绘制读的是 {@code Language.getVisualOrder(...)} 里**每个字符各自的样式** ——
+	 * 中间的 {@code Component.translatable} 一旦把参数组件的样式吃掉，最外层照样是 true、
+	 * 画出来却没有线。这里直接问最终序列。
+	 */
+	private static boolean hasStrike(Component text) {
+		boolean[] struck = { false };
+		net.minecraft.locale.Language.getInstance()
+			.getVisualOrder(text)
+			.accept((index, style, codePoint) -> {
+				if (style.isStrikethrough())
+					struck[0] = true;
+				return true;
+			});
+		return struck[0];
+	}
+
+	/** 「个数」的一句话 = <b>模式 + 数值</b>（用户本轮口径：小于等于写“最多 N”、等于写“等于 N”）。
 	 *
 	 * <p>⚠️ 两个模式必须写成**两句不同的话**：它们的行为不同（一个“有多少动多少、不足不算失败”，
 	 * 一个“凑不出 N 个就走失败后”），共用一句“个数 N”会让玩家看不出这条到底会不会等。
@@ -775,7 +802,7 @@ public final class ArmEntryText {
 		delayed.timeoutTarget = "2";
 		String delayedText = failureText(delayed).getString();
 		String fiveSeconds = "5s";
-		String jumpWord = tr("chip.fail_jump", "2").getString();
+		String jumpWord = tr("chip.jump_to", "2").getString();
 		if (!delayedText.contains(fiveSeconds) || !delayedText.contains(jumpWord))
 			return "延迟那一句没有同时写出「多久」和「去向」：" + delayedText;
 		if (delayedText.equals(fiveSeconds + jumpWord))
@@ -784,39 +811,50 @@ public final class ArmEntryText {
 		if (foreverText.equals("") || foreverText.equals(stopWord))
 			return "「一直重试」这一句是空的或与「停下」同字：" + foreverText;
 
-		// ★ 用户 2026-10-20：**失效落点**（{@code n5} = 目标那条已经被删掉）在卡片上要画成删除线，
-		//   而「失败后」那一支（会拼进"5 秒后 …"里）要写成整句话。
-		//   反证：把 {@link #jumpTargetLabel} 的 STRIKETHROUGH 去掉 ⇒ ① 红；
-		//   把 {@link #jumpText} 的失效分支改回 {@code tr("chip.fail_jump", …)} ⇒ ② 红。
+		// ★ 用户 2026-10-20（第二版口径）：**失效落点**（{@code n5} = 目标那条已经被删掉）在卡片上
+		//   只是「跳转 5」**整段划掉** —— 不加额外文字、也不显示 {@code n} 前缀（那是编辑框里的写法）。
+		//   判据：① 段落带删除线且文本里是 5 而不是 n5；② 还活着的落点不许被划；
+		//   ③ 「成功后」「失败后」两条路都要这样（同一个 jumpPhrase 来源）。
+		//   反证：把 jumpPhrase 的 STRIKETHROUGH 去掉 ⇒ ① 红（而卡片上就只是一句普通的"跳转 5"）；
+		//   把 cardTargetText 改回直接返回 n5 ⇒ ① 的文本断言红。
 		ArmProgramEntry deadOk = ArmProgramEntry.fresh(OperationType.TAKE);
 		deadOk.onSuccess = SkipAction.SKIP_TO;
 		deadOk.successTarget = "n5";
-		Component deadLabelComponent = jumpTargetLabel("n5");
-		if (!deadLabelComponent.getStyle()
-			.isStrikethrough() || !"n5".equals(deadLabelComponent.getString()))
-			return "失效落点（n5）在卡片上不是带删除线的 n5：" + deadLabelComponent.getString() + " / 删除线="
-				+ deadLabelComponent.getStyle()
-					.isStrikethrough();
-		if (jumpTargetLabel("5")
+		Component deadPhrase = jumpPhrase("n5");
+		if (!deadPhrase.getStyle()
+			.isStrikethrough())
+			return "失效落点（n5）在卡片上没有删除线（绘制侧还会不会 getString 拍平，见 renderChip）";
+		if (!"5".equals(cardTargetText("n5")))
+			return "卡片上把 n5 原样写出来了（应当只写 5，n 前缀是编辑框里的写法）：" + cardTargetText("n5");
+		if (!successText(deadOk).getString()
+			.contains("5") || successText(deadOk).getString()
+				.contains("n5"))
+			return "「成功后」的失效落点写错了（应当是可读的跳转 5）：" + successText(deadOk).getString();
+		if (jumpPhrase("5")
 			.getStyle()
 			.isStrikethrough())
-			return "还活着的落点（5）也被画了删除线";
-		if (!successText(deadOk).getString()
-			.contains("n5"))
-			return "「成功后」的失效落点没有显示 n5：" + successText(deadOk).getString();
+			return "还活着的落点（5）也被划了删除线";
+		// 端到端：把整句转成**真正要画出去的字符序列**逐字看样式 —— 多套一层 translatable
+		// （chip.on_success_jump = "成功%s"）最容易在这里把样式吃掉，而 getString() 查不出来。
+		if (!hasStrike(successText(deadOk)))
+			return "「成功跳转」整句转成绘制序列后没有删除线（translatable 把参数组件的样式丢了）";
+		ArmProgramEntry aliveOk = ArmProgramEntry.fresh(OperationType.TAKE);
+		aliveOk.onSuccess = SkipAction.SKIP_TO;
+		aliveOk.successTarget = "5";
+		if (hasStrike(successText(aliveOk)))
+			return "还活着的落点，整句转成绘制序列后也带删除线：" + successText(aliveOk).getString();
 		ArmProgramEntry deadFail = ArmProgramEntry.fresh(OperationType.TAKE);
 		deadFail.onTimeout = SkipAction.SKIP_TO;
 		deadFail.failAmount = 5;
 		deadFail.failUnit = WaitUnit.SECOND;
 		deadFail.timeoutTarget = "n11";
 		String deadFailText = failureText(deadFail).getString();
-		String deadPhrase = tr("chip.fail_jump_dead", 11).getString();
-		if (!deadFailText.contains(deadPhrase))
-			return "「失败后」的失效落点没有写成整句话：" + deadFailText + "（期望含 " + deadPhrase + "）";
-		if (deadFailText.contains("n11"))
-			return "「失败后」拼句子里露出了裸的 n11（玩家看不懂）：" + deadFailText;
+		if (!deadFailText.contains(cardTargetText("n11")) || deadFailText.contains("n11"))
+			return "「失败后」的失效落点写错了（应当是 跳转 11，不带 n）：" + deadFailText;
+		if (deadFailText.contains("失效"))
+			return "「失败后」的失效落点又写了一句解释（用户要求不加额外文本）：" + deadFailText;
 
-		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开 / 失败后写得出发时机 / 失效落点=删除线+nN)";
+		return "OK(默认1行 / 设了3个属性=4行 / 右键与潜行右键分得开 / 失败后写得出发时机 / 失效落点=整段删除线)";
 	}
 
 }

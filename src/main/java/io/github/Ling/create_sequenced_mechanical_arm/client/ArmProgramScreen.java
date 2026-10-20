@@ -67,6 +67,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.locale.Language;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.chat.CommonComponents;
@@ -74,6 +75,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.contents.TranslatableContents;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
@@ -1464,9 +1466,17 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				.at(secondX + 1, 0)
 				.render(graphics);
 		}
-		if (text != null)
-			graphics.drawString(font, font.substrByWidth(text, 120)
-				.getString(), hasSecond ? 46 : hasItem ? 28 : 8, 4, 0xff_f2f2ee);
+		if (text != null) {
+			// ⚠️ 必须画**带样式的 FormattedCharSequence**，不能 `text.getString()` 拍平：
+			//   拍平会把所有样式（删除线 / 颜色）丢掉 —— 失效落点 {@code n5} 在卡片上看起来就是普通的
+			//   "跳转 5"，玩家完全看不出这处跳转已经废了（用户 2026-10-20 的图一报的就是这个）。
+			//   截断走 {@code font.substrByWidth}：它按 style 分段返回 FormattedText（见 StringSplitter.headByWidth
+			//   里那段 FormattedText.of(s, style)），样式在截断之后仍然保留 —— 再交给
+			//   {@code Language.getVisualOrder} 转成可绘制的序列（FormattedText 本身没有 getVisualOrderText）。
+			FormattedCharSequence visual = Language.getInstance()
+				.getVisualOrder(font.substrByWidth(text, 120));
+			graphics.drawString(font, visual, hasSecond ? 46 : hasItem ? 28 : 8, 4, 0xff_f2f2ee);
+		}
 		graphics.pose()
 			.popPose();
 	}
@@ -6943,11 +6953,15 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			return "发送信号的第一行里缺短语或时间（" + sendBase + " vs " + sendHead + " + " + tail + "）";
 		if (sendBase.contains(recvHead) || sendBase.contains(cutHead))
 			return "发送信号的第一行写成了别的模式（复制粘贴漏改）：" + sendBase;
-		for (String failKey : new String[] { "chip.fail_stop", "chip.fail_retry_forever", "chip.fail_jump" }) {
+		for (String failKey : new String[] { "chip.fail_stop", "chip.fail_retry_forever" }) {
 			String failWord = tr(failKey).getString();
 			if (sendBase.contains(failWord))
 				return "发信号的第一行里混进了失败文案（" + failKey + "）：" + sendBase;
 		}
+		// 去向那一句现在是与「成功后」共用的 {@code chip.jump_to}（{@code 跳转 %s}）
+		if (sendBase.contains(ArmEntryText.jumpPhrase("3")
+			.getString()))
+			return "发信号的第一行里混进了跳转文案：" + sendBase;
 
 		// ② 单位**真的换算**（用户反馈第二轮："不要再无视单位"）
 		send.waitAmount = 1;
@@ -7142,7 +7156,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 */
 	private static final String[] JUMP_LANG_KEYS = {
 		"entry.jump_target", "hint.entry_jump_target",
-		"chip.on_success_jump", "chip.fail_jump", "chip.fail_jump_dead",
+		"chip.on_success_jump", "chip.jump_to",
 		// 「失败后」那一组：时机由语言文件自己写（见 ArmEntryText.failureText 的说明）
 		"chip.fail_now", "chip.fail_in", "chip.fail_skip", "chip.fail_stop", "chip.fail_retry_forever",
 		"hint.dead_target",
@@ -7244,6 +7258,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			//   ④ chip.fail（`%s%s`）：用户 2026-10-20 要求"失败后"内容必须能看出触发时机之后，
 			//      时机与去向由 chip.fail_now / chip.fail_in 各自成一整句（语序按语言摆），
 			//      那个硬拼的壳子没人查了 —— 而且它正是英文拼出 nowskip / after 1tskip 的原因。
+			//   ⑤ chip.fail_jump / chip.fail_jump_dead：用户同日第二版口径 —— 失效落点在卡片上
+			//      **只是把「跳转 N」整段划掉**，不加解释文字；去向那一句改成与「成功后」共用的
+			//      chip.jump_to（否则两条路各有一份"跳转 %s"，改文案时必然只改一边）。
 			//   反证：把任意一个键加回**任意一份**语言文件（两边都加也一样）⇒ 这条立刻报红。
 			String[] dead = {
 				"opt.wait_redstone", "entry.wait_power", "hint.entry_wait_power",
@@ -7251,7 +7268,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				"chip.loop", "chip.loop_count",
 				"opt.none", "opt.count", "opt.forever", "opt.until_fail",
 				"chip.face", "chip.count", "add_prop.title", "opt.blocking", "opt.idle",
-				"chip.fail"
+				"chip.fail", "chip.fail_jump", "chip.fail_jump_dead"
 			};
 			List<String> resurrected = new ArrayList<>();
 			for (String key : dead) {
