@@ -177,29 +177,34 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 胶囊之间的小缝（时刻表列间距是 10；我们一行里用 4）。 */
 	private static final int CHIP_GAP = 4;
 	/**
-	 * 胶囊行的**右端**（卡片局部坐标）—— 用户 2026-10-22 画图里的<b>蓝线</b>：
-	 * 属性展示框真正的右端，也就是「复制」≡ 的左沿。
-	 *
-	 * <p>★ 它现在是**胶囊 / ＋ / 裁剪区 / 命中判定共用的唯一右界**。之前这里是三个各写一份的数：
-	 * 裁剪写死 204（局部 179）、{@link #CHIP_MAX} 又倒推出"＋ 最多到 179"、≡ 单独放在 181 ——
-	 * 于是 ＋ 的排版上限比展示框窄 2px，用户看到的就是"＋ 以黄线（179）为最右端"。
+	 * 行右界与「复制」≡ 之间**留出的空隙**（用户 2026-10-22：<i>"框的右端（蓝线）不应该贴着 ≡ 的左边，
+	 * 二者之间本来就有空隙"</i>）。≡ 从 {@link #DUPLICATE_X} 开始，行内容到这里为止。
 	 */
-	private static final int ROW_RIGHT = DUPLICATE_X;
+	private static final int ROW_GAP = 4;
+	/**
+	 * 胶囊行的**右端**（卡片局部坐标）—— 用户图里的<b>蓝线</b>：属性展示框真正的右端。
+	 *
+	 * <p>★ 胶囊和 ＋ 是同一行流水线里的项，右端只有一个：裁剪区、宽度上限、＋ 的位置、命中判定
+	 * 全部由它派生（之前是三个各写一份的数，于是 ＋ 的排版上限比展示框窄）。
+	 */
+	private static final int ROW_RIGHT = DUPLICATE_X - ROW_GAP;
 	/** 「添加属性」＋ 的贴图宽度（{@code SCHEDULE_CONDITION_NEW} 是 19×16）。 */
 	private static final int PLUS_SPRITE_W = 19;
 	/**
-	 * 胶囊宽度封顶 —— 上游 {@code renderInput} 也把字段封在 {@code min(getFieldSize(...), 150)}
-	 * （`ScheduleScreen:614`），但**150 放到我们的布局里是错的**：一行是
-	 * 「胶囊… × N ＋ ＋」的流水线，最宽那一路必须正好铺到 {@link #ROW_RIGHT}，
-	 * 否则滚到最右时 ＋ 会被顶出展示框。
-	 *
-	 * <p>所以它是**算出来的**，不是拍的：{@code 26 + W + 缝 + (＋ 位置偏移) + ＋宽 = ROW_RIGHT}
-	 * ⇒ 现在等于 <b>135</b>。改 {@link #DUPLICATE_X} 或 ＋ 贴图宽度，它自动跟着走。
-	 *
-	 * <p>原来的 150 会让"最后那枚胶囊"宽到把 ＋ 顶出裁剪区 —— 用户实测：
-	 * <i>"备注太长会把添加属性的按键挤到外面，并且即使超出去了，没有显示，也可以点击"</i>。
+	 * 行尾「添加属性」＋ 相对行光标的偏移 —— 贴图左边自带 3px 的"连接段"（{@code SCHEDULE_CONDITION_NEW}
+	 * 是 19×16，＋ 号画在贴图内偏右），所以往回让 3px 才能和前一枚胶囊贴齐。
 	 */
-	private static final int CHIP_MAX = ROW_RIGHT - 26 - CHIP_GAP + 3 - PLUS_SPRITE_W;
+	private static final int PLUS_ITEM_DX = -3;
+	/**
+	 * 胶囊宽度封顶 —— 上游 {@code renderInput} 也把字段封在 {@code min(getFieldSize(...), 150)}
+	 * （`ScheduleScreen:614`），但**150 放到我们的布局里是错的**：一行是「胶囊… × N ＋ ＋」的流水线，
+	 * 最宽那一路应当正好铺到 {@link #ROW_RIGHT}。
+	 *
+	 * <p>★ 注意它**不再是"＋ 能不能被够到"的保障**（那是靠滚动多出的一格实现的，见
+	 * {@code maxRowScroll}）—— 它现在纯粹是"一枚胶囊别把整行撑爆"的观感上限，所以是算出来的，
+	 * 不再是手拍值。
+	 */
+	private static final int CHIP_MAX = ROW_RIGHT - 26 - CHIP_GAP - PLUS_ITEM_DX - PLUS_SPRITE_W;
 	/**
 	 * 胶囊区单独裁剪（上游 `ScheduleScreen:457` 的 {@code enableScissor(leftPos+43, …, leftPos+204, …)}）。
 	 *
@@ -1363,6 +1368,12 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			renderChip(graphics, prop.chipIcon(), prop.chip, x, CARD_ROW_Y, x != 26, width);
 			x += width + CHIP_GAP;
 		}
+		// ★ ＋ 就是**行尾的下一项**（用户 2026-10-22：<i>"没有办法直接把属性条目的排列方式直接复制在
+		// 添加属性之上吗，反正它们本身就是相同作用的按钮"</i>）：
+		// 它和胶囊共用同一个光标 x、同一个滚动位姿、同一块裁剪区 ⇒ **不再需要**"是否可见"的专用判定
+		// （旧写法用 addPropVisible 单独算一遍，和排版各说各话，于是出现"在框里却被裁掉"）。
+		// 裁到看不见怎么办？滚过去 —— 见 maxRowScroll() 里那多出来的一格。
+		ModGuiTextures.CONDITION_NEW.render(graphics, x + PLUS_ITEM_DX, CARD_ROW_Y);
 		graphics.pose()
 			.popPose();
 		// 两端淡出（上游 :570-577：先把位姿转 -90°，让 fillGradient 变成左右方向）
@@ -1372,30 +1383,23 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		if (rowScrollable(props)) {
 			int z = 200;
 			hGradient(graphics, 18, 10, CARD_HEADER + 2, CARD_HEIGHT - 2, z, 0x44000000, 0x00000000);
-			// 右端淡出一路铺到**行的右界**（ROW_RIGHT = ≡ 的左沿）：少铺一点就会让"滚到最右"时
-			// 最后一枚胶囊蹭出硬边（旧写法写死 10 宽、止于 179）
+			// 右端淡出一路铺到**行的右界**（{@link #ROW_RIGHT}），滚到最右时不露硬边
 			hGradient(graphics, CARD_WIDTH - 26, ROW_RIGHT - (CARD_WIDTH - 26), CARD_HEADER + 2, CARD_HEIGHT - 2, z,
 				0x00000000, 0x44000000);
 		}
-
-		// ⚠️ ＋ 要**退出滚动位姿之后**、按**可见坐标**画（{@link #plusLocalX}），并且画在淡出之上。
-		// 第一版在滚动位姿里拿"排版坐标"（没减滚动量）判可见性 ⇒ 滚到最右、＋ 明明在视野里，
-		// 判断用的却是一个屏幕外的坐标，于是**没画出来**（用户实测："添加属性的按钮不见了"），
-		// 而命中那一侧用的是可见坐标 —— 于是表现为"有悬停提示、却没有按钮"。
-		int plusX = plusLocalX(x - 26, rowOffset);
-		if (addPropVisible(plusX))
-			ModGuiTextures.CONDITION_NEW.render(graphics, plusX, CARD_ROW_Y);
 	}
 
 	/**
-	 * 行尾「添加属性」＋ 画在哪（**卡片局部**坐标，已含滚动量）—— **绘制与命中共用这一个算式**，
-	 * 免得两边各算一份、出现"看得见却点不到"或"有提示却没画"（后者是用户实测到的）。
+	 * 行尾「添加属性」＋ 在**卡片局部**坐标里的位置（已含滚动量）。
 	 *
-	 * @param cursor 胶囊行的总宽（{@code Σ(胶囊宽 + 缝)}，不含起点 26）
+	 * <p>⚠️ 绘制与命中**必须**共用这一个算式：第一版绘制退化到"排版坐标"、命中用"可见坐标"，
+	 * 于是出现"有悬停提示、却没有按钮"（用户实测）。
+	 *
+	 * @param cursor    胶囊行的总宽（{@code Σ(胶囊宽 + 缝)}，不含起点 26）
 	 * @param rowOffset 当前横向滚动量
 	 */
 	private static int plusLocalX(int cursor, float rowOffset) {
-		return 26 + cursor - (int) rowOffset - 3;
+		return 26 + cursor - (int) rowOffset + PLUS_ITEM_DX;
 	}
 
 	/** 水平渐变（左→右）：原版 {@code fillGradient} 只做上下，这里按 1px 列插值。 */
@@ -1432,27 +1436,23 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * @param plusLocalX ＋ 贴图左沿在**卡片局部**坐标里的 x（画的时候是 {@code x - 3}，
 	 *        判定的时候是 {@code 26 + 已排胶囊总宽 - 当前滚动量}）
 	 */
-	private static boolean addPropVisible(int plusLocalX) {
-		// 与裁剪区同一对边界（裁剪区是窗口坐标，卡片局部的原点是 leftPos+25）——
-		// 胶囊、＋、裁剪、命中共用 ROW_RIGHT 这一个右界，不再各算一份
-		return plusLocalX >= ROW_CLIP_LEFT - 25 && plusLocalX + PLUS_SPRITE_W <= ROW_RIGHT;
-	}
-
 	/**
-	 * 这一行**滚到最右之后**＋ 够不够得到 —— 这是"看不见就靠翻格"的兜底承诺，必须是恒真的。
+	 * 「添加属性」＋ 的贴图与裁剪区**有没有交集** —— 绘制与命中共用这一个判据。
 	 *
-	 * <p>滚到最右时整行的偏移量 = 行宽 - 最后一枚胶囊（{@code maxRowScroll} = 胶囊数 - 1 格），
-	 * 于是 ＋ 落在 {@code 26 + 最后一枚胶囊宽 + 缝} 处 —— 与它是哪一枚胶囊无关，
-	 * 只取决于 {@link #CHIP_MAX}。这就是 {@code CHIP_MAX ≤ 130 + 余量} 的由来（{@code addPropVisible} 必须为真）。
+	 * <p>★ 现在 ＋ 就是行里的一项，会被 {@link #ROW_CLIP_RIGHT} 那块裁剪区正常裁切，
+	 * 所以判据从"整块落在里面"改成"有没有露出来"：露一半就是"露一半也可点"（与画出来的一致）。
+	 * 用户第二十七轮报的是反过来的毛病（<i>"超出去了、没有显示，也可以点击"</i>）——
+	 * 那种情况这里仍然是假，因为整块都在裁剪区右边。
 	 */
-	private static boolean addPropReachable(int lastChipWidth) {
-		return addPropVisible(26 + lastChipWidth + CHIP_GAP - 3);
+	private static boolean addPropVisible(int plusLocalX) {
+		int clipLeft = ROW_CLIP_LEFT - 25; // 裁剪区是窗口坐标，卡片局部的原点是 leftPos+25
+		return plusLocalX < ROW_RIGHT && plusLocalX + PLUS_SPRITE_W > clipLeft;
 	}
 
 	/**
-	 * 「备注」胶囊的宽度上限（自检用）。倒推依据：行的右界是 {@link #ROW_RIGHT}（局部 181），
-	 * 备注胶囊**永远排在最后**（{@code ArmEntryText.entryProps} 的顺序）、后面还要跟 ＋（19 宽），
-	 * 所以 {@code 26 + 上限 + 19 ≤ 181} ⇒ 上限 ≤ 136；这里取 130 留余量。
+	 * 「备注」胶囊的宽度上限（自检用）。备注胶囊**永远排在最后**（{@code ArmEntryText.entryProps}
+	 * 的顺序），所以它和行尾的 ＋ 共享同一段宽度：{@code 26 + 上限 + 缝 + ＋宽 ≤ ROW_RIGHT}；
+	 * 这里取 130（比 {@link #CHIP_MAX} 更保守，留出余量）。
 	 */
 	private static final int NOTE_CHIP_MAX_W = 130;
 
@@ -2821,9 +2821,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return rowScrollOffset(card, index, partial, shownProps(card));
 	}
 
-	/** 横向滚动最大格数（上游：右箭头在 {@code chaseTarget == 列数-1} 时消失）。 */
+	/**
+	 * 横向滚动最大格数 —— <b>比胶囊数多一格</b>。
+	 *
+	 * <p>★ 那一格是给行尾的 ＋ 用的（用户 2026-10-22：<i>"直接把属性条目的排列方式复制在添加属性之上"</i>）：
+	 * ＋ 既然和胶囊排在一条流水线上，就必须能被"滚到眼前"—— 多这一格时整行偏移量涨到
+	 * {@code Σ(胶囊宽 + 缝)}，＋ 正好落到行首（{@code plusLocalX(0, 0)}），整块落在裁剪区里。
+	 * 少这一格就退化成"＋ 永远吊在最后一枚胶囊后面，可能被裁掉一截而没法看清"。
+	 */
 	private int maxRowScroll(List<Prop> props) {
-		return Math.max(0, props.size() - 1);
+		return Math.max(0, props.size());
 	}
 
 	private int maxRowScroll(Card card) {
@@ -4945,13 +4952,19 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	@Nullable
 	private static String rowClipProblem() {
 		if (ROW_CLIP_RIGHT - 25 != ROW_RIGHT)
-			return "胶囊行裁剪右界在局部 x=" + (ROW_CLIP_RIGHT - 25) + "，而行右界（复制 ≡ 的左沿）在 " + ROW_RIGHT;
-		int plusRight = 26 + CHIP_MAX + CHIP_GAP - 3 + PLUS_SPRITE_W;
+			return "胶囊行裁剪右界在局部 x=" + (ROW_CLIP_RIGHT - 25) + "，而行右界在 " + ROW_RIGHT;
+		int plusRight = 26 + CHIP_MAX + CHIP_GAP + PLUS_ITEM_DX + PLUS_SPRITE_W;
 		if (plusRight != ROW_RIGHT)
 			return "最宽的一枚胶囊（" + CHIP_MAX + "）之后，＋ 的右沿在 x=" + plusRight + "，没有正好铺到行右界 "
 				+ ROW_RIGHT + "（差 " + (ROW_RIGHT - plusRight) + "px）";
-		if (!addPropReachable(CHIP_MAX))
-			return "封顶宽度之下 ＋ 够不到（addPropReachable 为假）";
+		if (ROW_RIGHT >= DUPLICATE_X)
+			return "行右界 " + ROW_RIGHT + " 顶到了「复制」≡ 的左沿 " + DUPLICATE_X + "（两者之间要留空隙）";
+		// 滚满时 ＋ 落在行首：必须整块在裁剪区里（maxRowScroll 多出来的那一格就是为它留的）
+		int plusAtMaxScroll = plusLocalX(0, 0);
+		if (!addPropVisible(plusAtMaxScroll) || plusAtMaxScroll + PLUS_SPRITE_W > ROW_RIGHT
+			|| plusAtMaxScroll < ROW_CLIP_LEFT - 25)
+			return "滚到最右时 ＋ 不在裁剪区里（算出来在 x=" + plusAtMaxScroll + "，裁剪区局部 "
+				+ (ROW_CLIP_LEFT - 25) + ".." + ROW_RIGHT + "）";
 		if (ROW_CLIP_LEFT - 25 > 26)
 			return "胶囊行裁剪左界在局部 x=" + (ROW_CLIP_LEFT - 25) + "，比第一枚胶囊的起点 26 还靠右";
 		return null;
@@ -7650,16 +7663,16 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				return "卡片 " + i + " 的上移点不到（期望 up）";
 			if (inside(top + 26) && i < cards.size() - 1 && !expect("down", leftPos + 25 + 200, cardTop + 26))
 				return "卡片 " + i + " 的下移点不到（期望 down）";
-			// 行尾"添加属性"＋：**可见才可点**（绘制与命中同一个判据 addPropVisible）。
-			// 不可见时必须**点不到** —— 用户报的就是"超出去了、没有显示，也可以点击"。
-			int plusX = 26 + rowWidth(card) - 3;
+			// 行尾"添加属性"＋：它就是行里的一项（和胶囊同一套排版/裁剪/命中）。
+			// 这里两件事：① 露出来时必须点得到；② 没露出来时必须点不到（用户报过"看不到却能点"）。
+			int plusX = plusLocalX(rowWidth(card), 0);
 			if (inside(top + CARD_ROW_Y + 8)) {
 				if (addPropVisible(plusX)) {
 					// 点击点取 ＋ 号自己的中心（贴图内第 8..13 列 → 画在 x-3 时中心是 x+8）
 					if (!expect("addprop", leftPos + 25 + plusX + 11, cardTop + CARD_ROW_Y + 8))
 						return "卡片 " + i + " 的添加属性＋点不到（期望 addprop；＋ 画在 x=" + plusX + "）";
 				} else {
-					// 不可见 ⇒ 必须点不到；而且必须能靠翻格够到（否则这个 ＋ 就永远消失了）。
+					// 没露出来 ⇒ 必须点不到；而且必须能靠翻格滚到眼前（maxRowScroll 多出来的那一格）。
 					// ⚠️ 判据只看**这一次**点击的 lastHit：`hits` 是累计列表，拿它 contains 会把
 					//   "前面某张卡的 ＋ 点成功过"当成这里的命中（第一版就是这么误报的）。
 					// 记一个 hits 标记：日志里能看出这一条**真的被走到了**（否则它只是摆设）。
@@ -7668,12 +7681,8 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 					action(null, leftPos + 25 + plusX + 11, cardTop + CARD_ROW_Y + 8, -1);
 					if ("addprop".equals(lastHit))
 						return "卡片 " + i + " 的 ＋ 已经在裁剪区外，却仍然点得到（画在 x=" + plusX + "）";
-					// ⚠️ 任务卡片现在没有任何胶囊属性（循环已删）⇒ 空表也不能在这里越界：
-					//   空表时"最后一枚胶囊的宽"按 0 算（此时 ＋ 永远在裁剪区内，这一支本来就到不了）。
-					List<Prop> lastBasis = shownProps(card);
-					int lastChipWidth = lastBasis.isEmpty() ? 0 : chipWidth(lastBasis.get(lastBasis.size() - 1));
-					if (!addPropReachable(lastChipWidth))
-						return "卡片 " + i + " 的 ＋ 不可见又够不到（滚到最右也没用；画在 x=" + plusX + "）";
+					if (!addPropVisible(plusLocalX(0, 0)))
+						return "卡片 " + i + " 的 ＋ 不可见又滚不到（滚满时算出来在 x=" + plusLocalX(0, 0) + "）";
 				}
 			}
 			// 横向箭头：**绘制位置和判定位置必须是同一对常量**（第一版画在 40/203、判定却在 15/178，
@@ -7705,18 +7714,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (inside(top + CARD_ROW_Y + 8) && !shown.isEmpty()) {
 				if (chipWidth(shown.get(0)) > CHIP_MAX)
 					return "卡片 " + i + " 的胶囊超过封顶宽度(" + CHIP_MAX + ")：" + chipWidth(shown.get(0));
-				// ★ 封顶宽度的**真正判据**：滚到最右时 ＋ 必须够得到（这一条与"哪一枚胶囊"无关）
-				if (!addPropReachable(CHIP_MAX))
-					return "封顶宽度 " + CHIP_MAX + " 之下，滚到最右也够不到 ＋（见 addPropReachable）";
-				// ★ 判据本体的边界（＋ 贴图 19 宽、裁剪区局部 18..179 ⇒ 左沿最多 160）
-			// 边界：右界是展示框右端（≡ 的左沿 181）⇒ ＋ 最右能到 181-19 = 162；
-			// 左边不能越过裁剪左界（局部 18）。数值随 ROW_CLIP_RIGHT 走，不再写死。
-			int lastVisible = (ROW_CLIP_RIGHT - 25) - PLUS_SPRITE_W;
-			if (!addPropVisible(lastVisible) || addPropVisible(lastVisible + 1) || addPropVisible(17))
-				return "addPropVisible 的边界不对（" + lastVisible + " 应当可见、" + (lastVisible + 1) + "/17 应当不可见）";
-				// ★ "滚到最右时 ＋ 一定看得见"——绘制与命中都走 plusLocalX，所以这里算的就是画出来的位置
-				int plusAtMaxScroll = plusLocalX(rowWidth(card), rowWidth(card) - chipWidth(shown.get(shown.size() - 1))
-					- CHIP_GAP);
+				// ★ "滚到最右时 ＋ 一定看得见"：绘制与命中都走 plusLocalX，
+				//   滚满时 cursor - offset == 0 ⇒ ＋ 落在行首（行里的一项，跟胶囊同一条流水线）
+				int plusAtMaxScroll = plusLocalX(0, 0);
 				if (!addPropVisible(plusAtMaxScroll))
 					return "卡片 " + i + " 滚到最右仍看不见 ＋（算出来在 x=" + plusAtMaxScroll + "）";
 				if (!expect("prop:" + shown.get(0).name.getString(), leftPos + 25 + 26 + 20,
