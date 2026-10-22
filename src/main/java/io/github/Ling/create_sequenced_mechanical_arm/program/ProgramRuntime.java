@@ -1045,29 +1045,34 @@ public class ProgramRuntime {
 		//   一次 `getCapability` 付钱 —— 而这段判定是**每 tick** 重跑的。
 		switch (entry.op) {
 			case TAKE -> {
-				IItemHandler handler = arm.peekHandler(offset);
 				if (TargetInteraction.isDepositOnly(level, target))
 					// 判定方式与原版一致（`AllArmInteractionPointTypes.DepositOnlyArmInteractionPoint`：
 					// 漏斗 / 烈焰人 / 营火 / 重生锚 / 粉碎轮），所以这里**不能**再写"（漏斗类）"
 					// —— 打包机曾经被误判成只进不出，就是"有 InvManipulationBehaviour 就算漏斗"的旧实现造成的。
 					return FailText.of("deposit_only");
-				if (handler == null)
+				// ★ 用户 2026-10-21：「取出 / 放入按本体的判断标准」⇒ 槽位与能否取出都由
+				//   {@link TargetInteraction} 按 Create 交互点算（`getSlotCount` / `extract`）。
+				//   ⚠️ 因此这里**不再**要求"通用物品能力"：唱片机 / 营火 / 重生锚这类方块根本没有
+				//   ItemHandler，本体是靠交互点取东西的。
+				IItemHandler handler = arm.peekHandler(offset);
+				if (TargetInteraction.takeSlots(level, target, handler) <= 0)
 					return FailText.of("no_item_handler");
-				int slot = firstNonEmptySlot(handler);
-				if (slot < 0)
-					return FailText.of("target_empty");
 				// ★ 个数模式 = 等于（判据只有 countIsExact() 一处）：**动身之前**就得能凑出恰好 N 个。
 				//   凑不出就**别伸过去** —— 与"臂内已满"同一个道理：不要为一个必然失败的动作空跑一趟。
 				//   而前置检查是**每 tick** 重跑的（PRECHECK_RETRY_TICKS = 0）⇒"等补货"发生在**原位重试**里
 				//   （货一到位下一 tick 就放行），与"失败后默认重试"的语义正好对齐。
 				if (entry.countIsExact()) {
-					int exactSlot = exactTakeSlot(handler, entry.count);
+					int exactSlot = TargetInteraction.findSlot(level, target, handler, entry.count, true);
 					if (exactSlot < 0)
 						return FailText.of("count_short", entry.count);
-					if (!arm.canAccept(handler.extractItem(exactSlot, entry.count, true)))
+					if (!arm.canAccept(TargetInteraction.extract(level, target, exactSlot, entry.count, true)))
 						return FailText.of("arm_full");
-				} else if (!arm.canAccept(handler.extractItem(slot, 1, true))) {
-					return FailText.of("arm_full");
+				} else {
+					int slot = TargetInteraction.findSlot(level, target, handler, 1, false);
+					if (slot < 0)
+						return FailText.of("target_empty");
+					if (!arm.canAccept(TargetInteraction.extract(level, target, slot, 1, true)))
+						return FailText.of("arm_full");
 				}
 			}
 			case DEPOSIT -> {
@@ -1138,27 +1143,6 @@ public class ProgramRuntime {
 		for (int slot = 0; slot < handler.getSlots(); slot++)
 			if (!handler.extractItem(slot, 1, true)
 				.isEmpty())
-				return slot;
-		return -1;
-	}
-
-	/**
-	 * 「等于」模式：<b>找到第一个能给出恰好 {@code count} 个的槽</b>（纯模拟，不做任何真取）。
-	 *
-	 * <p>{@code extractItem(slot, count, true)} 返回的是"这个槽最多能给几个"（不足就是不足），
-	 * 所以 {@code getCount() == count} 恰好就是"这一个槽能凑出 N 个"。
-	 *
-	 * <p>⚠️ 为什么必须**逐个槽**找、而不是"把整箱凑起来够 N 就行"：取出是**一格一摞**的语义
-	 * （原版动力臂一次只从一个槽搬一份），跨槽拼凑会把两摞不同的物品混进同一次"恰好 N 个"里。
-	 * <p>⚠️ 判据与 {@code take()} 里那次真取**必须同源**（前置检查与执行都调这一个方法），
-	 * 各写一遍就会出现"前置检查放行、真取又说不够"的摆动。
-	 *
-	 * @return 能凑出恰好 N 个的第一个槽；都凑不出返回 {@code -1}
-	 */
-	private static int exactTakeSlot(IItemHandler handler, int count) {
-		for (int slot = 0; slot < handler.getSlots(); slot++)
-			if (handler.extractItem(slot, count, true)
-				.getCount() == count)
 				return slot;
 		return -1;
 	}
@@ -1350,8 +1334,14 @@ public class ProgramRuntime {
 	// ————————————————————————— 各操作 —————————————————————————
 
 	private void take(SequencedArmBlockEntity arm, ArmProgramTask task, ArmProgramEntry entry) {
+		Level level = arm.getLevel();
+		// 现在伸向的那一格（世界坐标）。取物**按这一格的本体交互点语义**来，见 TargetInteraction.extract
+		BlockPos target = arm.getBlockPos()
+			.offset(arm.movingOffset);
+		// handler 只当"退回裸能力"的兜底与失败回滚用；能取几格、能不能取由 TargetInteraction 判
 		IItemHandler handler = arm.getMovingHandler();
-		if (handler == null) {
+		int slots = TargetInteraction.takeSlots(level, target, handler);
+		if (slots <= 0) {
 			handleFailure(arm, task, entry, FailText.of("no_item_handler"));
 			return;
 		}
@@ -1362,20 +1352,20 @@ public class ProgramRuntime {
 			// ⚠️ 顺序绝不能反：模拟用 true、真取用 false。
 			// ⚠️ 也绝不能"先真取一部分再判失败"—— 那会把半摞物品丢进臂里，
 			//    玩家看到的就是"报了失败、东西却少了"。
-			int slot = exactTakeSlot(handler, entry.count);
+			int slot = TargetInteraction.findSlot(level, target, handler, entry.count, true);
 			if (slot < 0) {
 				handleFailure(arm, task, entry, FailText.of("count_short", entry.count));
 				return;
 			}
-			if (!arm.canAccept(handler.extractItem(slot, entry.count, true))) {
+			if (!arm.canAccept(TargetInteraction.extract(level, target, slot, entry.count, true))) {
 				handleFailure(arm, task, entry, FailText.of("arm_full"));
 				return;
 			}
-			ItemStack taken = handler.extractItem(slot, entry.count, false);
+			ItemStack taken = TargetInteraction.extract(level, target, slot, entry.count, false);
 			if (taken.getCount() != entry.count) {
 				// 兜底：同一个 tick 里"模拟够数、真取变少"不该发生（服务端单线程）。
 				// 真发生了也**绝不吞物品** —— 放回原槽再走失败重试（塞进臂里再报失败是另一种怪状态）。
-				if (!taken.isEmpty())
+				if (!taken.isEmpty() && handler != null)
 					handler.insertItem(slot, taken, false);
 				handleFailure(arm, task, entry, FailText.of("count_short", entry.count));
 				return;
@@ -1387,8 +1377,8 @@ public class ProgramRuntime {
 			return;
 		}
 		// 「小于等于」（默认 = 取出改造前的行为）：有多少拿多少，上限 count；**不足 N 不算失败**。
-		for (int slot = 0; slot < handler.getSlots(); slot++) {
-			ItemStack available = handler.extractItem(slot, entry.count, true);
+		for (int slot = 0; slot < slots; slot++) {
+			ItemStack available = TargetInteraction.extract(level, target, slot, entry.count, true);
 			if (available.isEmpty())
 				continue;
 			// 取前模拟：臂内放得下才动手（放不下就按"还没成功"重试，等臂内腾出位置）
@@ -1397,7 +1387,7 @@ public class ProgramRuntime {
 				return;
 			}
 			int amount = Math.min(available.getCount(), entry.count);
-			ItemStack taken = handler.extractItem(slot, amount, false);
+			ItemStack taken = TargetInteraction.extract(level, target, slot, amount, false);
 			if (taken.isEmpty()) {
 				handleFailure(arm, task, entry, FailText.of("take_failed"));
 				return;

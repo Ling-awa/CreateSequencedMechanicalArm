@@ -81,6 +81,19 @@ public final class TargetInteraction {
 		return point instanceof AllArmInteractionPointTypes.DepositOnlyArmInteractionPoint;
 	}
 
+	/**
+	 * 往目标里放东西 —— 三条路径，顺序就是本体的顺序：
+	 * <ol>
+	 *   <li><b>漏斗类</b>（有 {@link InvManipulationBehaviour}）：走漏斗自己的行为对象，
+	 *       它会找到背后链接的容器。通用物品能力在漏斗上是<b>不存在</b>的 ——
+	 *       这正是"Deposit 到输入模式漏斗没反应"的根因。原版 {@code FunnelPoint.insert} 就是这条路。</li>
+	 *   <li><b>Create 认得的其余交互点</b>：交给 {@link ArmPointTransfer}，也就是
+	 *       {@link ArmInteractionPoint#insert} —— 烈焰人只收燃料、重生锚只收荧石、堆肥桶只收可堆肥……
+	 *       这些都写在 {@code AllArmInteractionPointTypes} 的子类里，见 {@link ArmPointTransfer} 的类注释。</li>
+	 *   <li><b>其余</b>：通用能力 {@code Capabilities.ItemHandler.BLOCK}（箱子 / 保险箱这类
+	 *       本体**不认**的容器，我们仍然允许）。</li>
+	 * </ol>
+	 */
 	public static Insert insert(Level level, BlockPos pos, ItemStack stack, boolean simulate) {
 		if (level == null)
 			return new Insert(stack, "世界未加载");
@@ -121,10 +134,88 @@ public final class TargetInteraction {
 			return new Insert(remainder, null);
 		}
 
+		// ★ 目标如果是 Create 认得的交互点，就交给**它自己的 insert**（用户 2026-10-21：按本体的判断标准）。
+		//   漏斗在**上面那一支**已经处理掉了（我们额外做了模式 / 过滤器 / 红石的可诊断拒绝），这里只管其余类型。
+		ArmInteractionPoint point = ArmPointTransfer.pointAt(level, pos);
+		if (point != null) {
+			ItemStack viaPoint = ArmPointTransfer.insert(point, level, stack, simulate);
+			// viaPoint == null ⇒ 这个点我们用不了（第三方点抛错），退回裸能力，而不是当成"放不下"
+			if (viaPoint != null)
+				return new Insert(viaPoint, null);
+		}
+
 		IItemHandler handler = handler(level, pos);
 		if (handler == null)
 			return new Insert(stack, "目标没有物品能力");
 		return new Insert(ItemHandlerHelper.insertItem(handler, stack, simulate), null);
+	}
+
+	/**
+	 * 从目标<b>取出</b>物品 —— 与 {@link #insert} 对称：有 Create 交互点就按本体语义（{@code extract}），
+	 * 否则退回裸能力。
+	 *
+	 * <p>为什么取出也必须走本体：{@code DepositOnlyArmInteractionPoint} 的 {@code extract} 恒返回空、
+	 * {@code JukeboxPoint} 只吐唱片、{@code CrafterPoint} 只从合成结果那一格取 —— 这些都不在通用物品能力里。
+	 */
+	public static ItemStack extract(Level level, BlockPos pos, int slot, int amount, boolean simulate) {
+		if (level == null)
+			return ItemStack.EMPTY;
+		ArmInteractionPoint point = ArmPointTransfer.pointAt(level, pos);
+		if (point != null) {
+			ItemStack viaPoint = ArmPointTransfer.extract(point, level, slot, amount, simulate);
+			if (viaPoint != null)
+				return viaPoint;
+		}
+		IItemHandler handler = handler(level, pos);
+		return handler == null ? ItemStack.EMPTY : handler.extractItem(slot, amount, simulate);
+	}
+
+	/**
+	 * 「取出」能扫的格数：交互点优先（本体的 {@code getSlotCount}），否则退回通用能力的槽数。
+	 *
+	 * <p>返回 0 表示<b>这一格根本没有可取的物品面</b>（既不是交互点、也没有物品能力）。
+	 */
+	public static int takeSlots(Level level, BlockPos pos, @Nullable IItemHandler fallback) {
+		ArmInteractionPoint point = ArmPointTransfer.pointAt(level, pos);
+		if (point != null) {
+			int slots = ArmPointTransfer.slots(point, level);
+			if (slots > 0)
+				return slots;
+		}
+		return fallback == null ? 0 : fallback.getSlots();
+	}
+
+	/**
+	 * 找一格能取的东西 —— 前置检查与真正执行<b>共用这一个判据</b>（否则会出现"检查放行、真取又不够"的摆动）。
+	 *
+	 * @param count 要取几个
+	 * @param exact {@code true} = 这一格必须能给出<b>恰好</b> {@code count} 个；
+	 *              {@code false} = 只要非空
+	 * @return 能用的槽号；没有就 {@code -1}
+	 */
+	public static int findSlot(Level level, BlockPos pos, @Nullable IItemHandler fallback, int count, boolean exact) {
+		ArmInteractionPoint point = ArmPointTransfer.pointAt(level, pos);
+		if (point != null) {
+			int slots = ArmPointTransfer.slots(point, level);
+			if (slots > 0) {
+				for (int slot = 0; slot < slots; slot++) {
+					ItemStack probe = ArmPointTransfer.extract(point, level, slot, count, true);
+					if (probe == null)
+						break; // 这个点我们用不了 ⇒ 退回裸能力
+					if (exact ? probe.getCount() == count : !probe.isEmpty())
+						return slot;
+				}
+				return -1;
+			}
+		}
+		if (fallback == null)
+			return -1;
+		for (int slot = 0; slot < fallback.getSlots(); slot++) {
+			ItemStack probe = fallback.extractItem(slot, count, true);
+			if (exact ? probe.getCount() == count : !probe.isEmpty())
+				return slot;
+		}
+		return -1;
 	}
 
 }

@@ -201,6 +201,7 @@ public class SequencedArmSelfTest {
 		checkEntryPredicates();
 		checkSignalSendPreset();
 		checkArmPointClassification(server);
+		checkPointTransferSemantics(server);
 		checkFunnelTransferNotice(server);
 		checkTakeGateEndToEnd(server);
 		checkPrecheckRetryIsPerTick(server);
@@ -679,6 +680,81 @@ public class SequencedArmSelfTest {
 			if (funnelProbe.hasCapability())
 				LOGGER.warn("[selftest] 漏斗竟然有通用物品能力（上游变了？）—— 两条路径的优先级需要复核");
 		}
+	}
+
+	/**
+	 * 「取出 / 放入」是不是真的按<b>本体的判断逻辑</b>在搬（用户 2026-10-21 的口径：
+	 * <i>"比如给烈焰人燃烧室添加燃料（如果没达到可以添加的标准就算失败）、给下界重生锚加荧石……
+	 * 就按照本体的判断逻辑来"</i>）。
+	 *
+	 * <p>判据用<b>下界重生锚 + 荧石</b>（本体的 {@code RespawnAnchorPoint}）：
+	 * <ul>
+	 *   <li>荧石：<b>放得进去</b>（本体 {@code insert} 扣掉 1 个并 {@code RespawnAnchorBlock.charge}）
+	 *       —— 重生锚<b>没有通用物品能力</b>，旧路径（裸 {@code Capabilities.ItemHandler.BLOCK}）
+	 *       会报"目标没有物品能力"，所以这一条只有在走本体交互点时才会真；</li>
+	 *   <li>铁锭：<b>被拒</b>（本体第一句就是 {@code stack.is(Items.GLOWSTONE)}）；</li>
+	 *   <li>普通箱子仍然能放铁锭 —— 证明"本体不认的容器"那条退路没被这次改动掐掉；</li>
+	 *   <li>唱片机：放进去的唱片还能<b>取回来</b>（{@code extract} 的点分支的冒烟检查）。</li>
+	 * </ul>
+	 *
+	 * <p>⚠️ 为什么不用唱片机当"放入"的判据（第一版就是它，反证没变红）：唱片机**有**通用物品能力，
+	 * 而原版箱子语义本身也只收唱片 —— 旧路径同样"放得进唱片、拒收铁锭"，这个靶子<b>没有判别力</b>。
+	 *
+	 * <p>反证：把 {@code TargetInteraction.insert} 里 {@code ArmPointTransfer} 那一段关掉 ⇒
+	 * "荧石可放"立刻变红。
+	 */
+	private static void checkPointTransferSemantics(MinecraftServer server) {
+		ServerLevel level = server.overworld();
+		BlockPos spawn = level.getSharedSpawnPos();
+		BlockPos anchorPos = new BlockPos(spawn.getX() + 16, 200, spawn.getZ() + 16);
+		BlockPos chestPos = new BlockPos(spawn.getX() + 18, 200, spawn.getZ() + 16);
+		BlockPos jukeboxPos = new BlockPos(spawn.getX() + 16, 200, spawn.getZ() + 18);
+		ItemStack glowstone = new ItemStack(Items.GLOWSTONE);
+		ItemStack iron = new ItemStack(Items.IRON_INGOT);
+		ItemStack disc = new ItemStack(Items.MUSIC_DISC_CAT);
+		BlockState oldAnchor = level.getBlockState(anchorPos);
+		BlockState oldChest = level.getBlockState(chestPos);
+		BlockState oldJukebox = level.getBlockState(jukeboxPos);
+		boolean glowstoneAccepted = false;
+		boolean ironRefused = false;
+		boolean chestStillWorks = false;
+		boolean discTakenBack = false;
+		String detail;
+		try {
+			level.setBlockAndUpdate(anchorPos, Blocks.RESPAWN_ANCHOR.defaultBlockState());
+			level.setBlockAndUpdate(chestPos, Blocks.CHEST.defaultBlockState());
+			level.setBlockAndUpdate(jukeboxPos, Blocks.JUKEBOX.defaultBlockState());
+			// ① 荧石：只有走本体交互点才进得去（重生锚没有通用物品能力）
+			TargetInteraction.Insert probe = TargetInteraction.insert(level, anchorPos, glowstone.copy(), true);
+			glowstoneAccepted = probe.remainder()
+				.isEmpty() && probe.blockedReason() == null;
+			// ② 铁锭：本体 RespawnAnchorPoint 第一句就拒收
+			TargetInteraction.Insert reject = TargetInteraction.insert(level, anchorPos, iron.copy(), true);
+			ironRefused = reject.remainder()
+				.getCount() == 1;
+			// ③ 本体不认的容器（箱子）仍然走裸能力：这条退路不许被掐掉
+			TargetInteraction.Insert chestProbe = TargetInteraction.insert(level, chestPos, iron.copy(), true);
+			chestStillWorks = chestProbe.remainder()
+				.isEmpty();
+			// ④ 取出那一侧：唱片机放进再取回（走的也是本体 insert / extract）
+			TargetInteraction.insert(level, jukeboxPos, disc.copy(), false);
+			ItemStack back = TargetInteraction.extract(level, jukeboxPos, 0, 1, false);
+			discTakenBack = ItemStack.isSameItem(back, disc) && back.getCount() == 1;
+			detail = "荧石可放=" + glowstoneAccepted + " 铁锭被拒=" + ironRefused + " 普通箱子仍可放=" + chestStillWorks
+				+ " 唱片可取回=" + discTakenBack;
+		} catch (Throwable t) {
+			detail = "异常 " + t;
+		} finally {
+			level.setBlockAndUpdate(anchorPos, oldAnchor);
+			level.setBlockAndUpdate(chestPos, oldChest);
+			level.setBlockAndUpdate(jukeboxPos, oldJukebox);
+		}
+		LOGGER.info("[selftest] 交互点搬运语义（照本体）: {}", detail);
+		if (!glowstoneAccepted || !ironRefused || !chestStillWorks || !discTakenBack)
+			LOGGER.error("[selftest] 「取出 / 放入」没有按本体的交互点判据走（{}）—— 三种可能："
+				+ "① TargetInteraction 里 ArmPointTransfer 那段没接上（荧石放不进重生锚）；"
+				+ "② 接上了但没走本体的 insert（铁锭也能放进重生锚）；"
+				+ "③ extract 的点分支没接上（唱片取不回）", detail);
 	}
 
 	/**
