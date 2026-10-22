@@ -177,31 +177,41 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	/** 胶囊之间的小缝（时刻表列间距是 10；我们一行里用 4）。 */
 	private static final int CHIP_GAP = 4;
 	/**
+	 * 胶囊行的**右端**（卡片局部坐标）—— 用户 2026-10-22 画图里的<b>蓝线</b>：
+	 * 属性展示框真正的右端，也就是「复制」≡ 的左沿。
+	 *
+	 * <p>★ 它现在是**胶囊 / ＋ / 裁剪区 / 命中判定共用的唯一右界**。之前这里是三个各写一份的数：
+	 * 裁剪写死 204（局部 179）、{@link #CHIP_MAX} 又倒推出"＋ 最多到 179"、≡ 单独放在 181 ——
+	 * 于是 ＋ 的排版上限比展示框窄 2px，用户看到的就是"＋ 以黄线（179）为最右端"。
+	 */
+	private static final int ROW_RIGHT = DUPLICATE_X;
+	/** 「添加属性」＋ 的贴图宽度（{@code SCHEDULE_CONDITION_NEW} 是 19×16）。 */
+	private static final int PLUS_SPRITE_W = 19;
+	/**
 	 * 胶囊宽度封顶 —— 上游 {@code renderInput} 也把字段封在 {@code min(getFieldSize(...), 150)}
-	 * （`ScheduleScreen:614`），但**150 放到我们的布局里是错的**：胶囊区裁剪到展示框右端
-	 * <b>局部 181</b>（见 {@link #ROW_CLIP_RIGHT}），行尾的「添加属性」＋ 贴图 19 宽、画在"行末 - 3"，
-	 * 所以最宽的一枚胶囊必须满足 {@code 26 + W + 4 + 19 ≤ 181} ⇒ {@code W ≤ 132}。封顶取 <b>133</b>
-	 * （最宽那一路恰好 179，仍在框内 2px 余量）：这样即使这一行滚到最右，＋ 也**一定**完整落在裁剪区里
-	 * （{@code addPropReachable} 把它钉住了）。
+	 * （`ScheduleScreen:614`），但**150 放到我们的布局里是错的**：一行是
+	 * 「胶囊… × N ＋ ＋」的流水线，最宽那一路必须正好铺到 {@link #ROW_RIGHT}，
+	 * 否则滚到最右时 ＋ 会被顶出展示框。
+	 *
+	 * <p>所以它是**算出来的**，不是拍的：{@code 26 + W + 缝 + (＋ 位置偏移) + ＋宽 = ROW_RIGHT}
+	 * ⇒ 现在等于 <b>135</b>。改 {@link #DUPLICATE_X} 或 ＋ 贴图宽度，它自动跟着走。
 	 *
 	 * <p>原来的 150 会让"最后那枚胶囊"宽到把 ＋ 顶出裁剪区 —— 用户实测：
 	 * <i>"备注太长会把添加属性的按键挤到外面，并且即使超出去了，没有显示，也可以点击"</i>。
 	 */
-	private static final int CHIP_MAX = 133;
+	private static final int CHIP_MAX = ROW_RIGHT - 26 - CHIP_GAP + 3 - PLUS_SPRITE_W;
 	/**
 	 * 胶囊区单独裁剪（上游 `ScheduleScreen:457` 的 {@code enableScissor(leftPos+43, …, leftPos+204, …)}）。
 	 *
 	 * <p>⚠️ <b>右界不是 204</b>（用户 2026-10-22 画图纠正）：卡片局部坐标里「属性展示框」的右端
-	 * ＝「复制」≡ 的左沿 <b>181</b>（{@link #DUPLICATE_X}），而 204 对应局部 <b>179</b> ——
-	 * 比展示框早 2px。于是行尾的「添加属性」＋ 只要恰好跨在 179..181 之间，
-	 * 右端就会被裁掉一截：<b>它明明在展示框里，却只画出来一部分</b>（用户截图里黄色竖线是旧裁剪位置、
-	 * 蓝色竖线才是展示框右端）。
+	 * ＝「复制」≡ 的左沿（{@link #ROW_RIGHT}，用户图里的蓝线），而 204 对应局部 <b>179</b> ——
+	 * 比展示框早 2px，行尾的「添加属性」＋ 会被提前裁掉。
 	 *
-	 * <p>所以这里直接写成"25 + ≡ 的左沿"：裁剪边界与展示框边界从此是同一个数，
-	 * 自检 {@code rowClipProblem()} 把这条钉住（改一个不改另一个立刻红）。
+	 * <p>★ 裁剪区、胶囊宽度上限、＋ 的可见性判定、命中判定现在**全都用 {@link #ROW_RIGHT}**：
+	 * 胶囊和 ＋ 是同一行流水线里的东西，右端只有一个。
 	 */
 	private static final int ROW_CLIP_LEFT = 43;
-	private static final int ROW_CLIP_RIGHT = 25 + DUPLICATE_X;
+	private static final int ROW_CLIP_RIGHT = 25 + ROW_RIGHT;
 	/** 编辑器第二行（"值"那一行）：上游把整条线画在 {@code topPos+87}（`ScheduleScreen:1066-1069`）。 */
 	private static final int ROW2_Y = 87;
 	/**
@@ -1362,9 +1372,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		if (rowScrollable(props)) {
 			int z = 200;
 			hGradient(graphics, 18, 10, CARD_HEADER + 2, CARD_HEIGHT - 2, z, 0x44000000, 0x00000000);
-			// 右端淡出一路铺到**展示框右沿**（≡ 的左沿）：少铺 2px 就会让"滚到最右"时最后一枚胶囊
-			// 刚好露一截硬边（旧写法写死 10 宽、止于 179）
-			hGradient(graphics, CARD_WIDTH - 26, DUPLICATE_X - (CARD_WIDTH - 26), CARD_HEADER + 2, CARD_HEIGHT - 2, z,
+			// 右端淡出一路铺到**行的右界**（ROW_RIGHT = ≡ 的左沿）：少铺一点就会让"滚到最右"时
+			// 最后一枚胶囊蹭出硬边（旧写法写死 10 宽、止于 179）
+			hGradient(graphics, CARD_WIDTH - 26, ROW_RIGHT - (CARD_WIDTH - 26), CARD_HEADER + 2, CARD_HEIGHT - 2, z,
 				0x00000000, 0x44000000);
 		}
 
@@ -1423,9 +1433,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 *        判定的时候是 {@code 26 + 已排胶囊总宽 - 当前滚动量}）
 	 */
 	private static boolean addPropVisible(int plusLocalX) {
-		int clipLeft = ROW_CLIP_LEFT - 25; // 裁剪区是窗口坐标，卡片局部的原点是 leftPos+25
-		int clipRight = ROW_CLIP_RIGHT - 25;
-		return plusLocalX >= clipLeft && plusLocalX + PLUS_SPRITE_W <= clipRight;
+		// 与裁剪区同一对边界（裁剪区是窗口坐标，卡片局部的原点是 leftPos+25）——
+		// 胶囊、＋、裁剪、命中共用 ROW_RIGHT 这一个右界，不再各算一份
+		return plusLocalX >= ROW_CLIP_LEFT - 25 && plusLocalX + PLUS_SPRITE_W <= ROW_RIGHT;
 	}
 
 	/**
@@ -1439,14 +1449,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		return addPropVisible(26 + lastChipWidth + CHIP_GAP - 3);
 	}
 
-	/** 「添加属性」＋ 的贴图宽度（{@code SCHEDULE_CONDITION_NEW} 是 19×16）。 */
-	private static final int PLUS_SPRITE_W = 19;
-
 	/**
-	 * 「备注」胶囊的宽度上限（自检用）。倒推依据：裁剪区右边界局部 <b>181</b>（＝展示框右端，
-	 * 见 {@link #ROW_CLIP_RIGHT}），＋ 贴图 19 宽、画在"行末-3"，而备注胶囊**永远排在最后**
-	 * （{@code ArmEntryText.entryProps} 的顺序），所以 {@code 26 + 上限 + 19 ≤ 181} ⇒ 上限 ≤ 136；
-	 * 这里取 130 留余量。
+	 * 「备注」胶囊的宽度上限（自检用）。倒推依据：行的右界是 {@link #ROW_RIGHT}（局部 181），
+	 * 备注胶囊**永远排在最后**（{@code ArmEntryText.entryProps} 的顺序）、后面还要跟 ＋（19 宽），
+	 * 所以 {@code 26 + 上限 + 19 ≤ 181} ⇒ 上限 ≤ 136；这里取 130 留余量。
 	 */
 	private static final int NOTE_CHIP_MAX_W = 130;
 
@@ -4927,23 +4933,25 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
-	 * 自检：胶囊行的<b>裁剪右界必须正好是「属性展示框」的右端</b>（＝「复制」≡ 的左沿）。
+	 * 自检：<b>胶囊和 ＋ 是同一行流水线里的东西，右端只有一个</b>（{@link #ROW_RIGHT}）。
 	 *
-	 * <p>用户 2026-10-22 画图指出的那个：裁剪原来写死 204（局部 179），而展示框到 181 ——
-	 * 行尾的「添加属性」＋ 只要跨在 179..181 之间，右端就被裁掉一截，
-	 * <b>明明在展示框里却只画出一部分</b>。
+	 * <p>用户 2026-10-22 画图指出的那个：裁剪原来写死 204（局部 179）、而 {@link #CHIP_MAX} 又倒推出
+	 * "＋ 最多到 179"，两个数各自写死 ⇒ ＋ 的排版上限比展示框窄，看着就是"以黄线为最右端"。
+	 * 现在三者同源，这条断言把"同源"钉住。
 	 *
-	 * <p>反证：把 {@link #ROW_CLIP_RIGHT} 改回 {@code 204} ⇒ 第一条立刻红。
+	 * <p>反证：把 {@link #ROW_CLIP_RIGHT} 改回 {@code 204} ⇒ 第一条红；
+	 * 把 {@link #CHIP_MAX} 改回 {@code 133} ⇒ 第二条红。
 	 */
 	@Nullable
 	private static String rowClipProblem() {
-		if (ROW_CLIP_RIGHT - 25 != DUPLICATE_X)
-			return "胶囊行裁剪右界在局部 x=" + (ROW_CLIP_RIGHT - 25) + "，而展示框右端（复制 ≡ 的左沿）在 "
-				+ DUPLICATE_X + " —— 落在两者之间的 ＋ 会被裁掉一截";
+		if (ROW_CLIP_RIGHT - 25 != ROW_RIGHT)
+			return "胶囊行裁剪右界在局部 x=" + (ROW_CLIP_RIGHT - 25) + "，而行右界（复制 ≡ 的左沿）在 " + ROW_RIGHT;
 		int plusRight = 26 + CHIP_MAX + CHIP_GAP - 3 + PLUS_SPRITE_W;
-		if (plusRight > DUPLICATE_X)
-			return "最宽的一枚胶囊（" + CHIP_MAX + "）之后，＋ 的右沿到 x=" + plusRight + "，越过了展示框右端 "
-				+ DUPLICATE_X;
+		if (plusRight != ROW_RIGHT)
+			return "最宽的一枚胶囊（" + CHIP_MAX + "）之后，＋ 的右沿在 x=" + plusRight + "，没有正好铺到行右界 "
+				+ ROW_RIGHT + "（差 " + (ROW_RIGHT - plusRight) + "px）";
+		if (!addPropReachable(CHIP_MAX))
+			return "封顶宽度之下 ＋ 够不到（addPropReachable 为假）";
 		if (ROW_CLIP_LEFT - 25 > 26)
 			return "胶囊行裁剪左界在局部 x=" + (ROW_CLIP_LEFT - 25) + "，比第一枚胶囊的起点 26 还靠右";
 		return null;
