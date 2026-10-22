@@ -33,6 +33,7 @@ import com.simibubi.create.content.logistics.filter.AttributeFilterWhitelistMode
 import com.simibubi.create.content.logistics.filter.FilterItemStack;
 import com.simibubi.create.content.logistics.item.filter.attribute.ItemAttribute;
 import com.simibubi.create.content.logistics.item.filter.attribute.attributes.InTagAttribute;
+import com.simibubi.create.content.processing.burner.BlazeBurnerBlock;
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlock;
 import com.simibubi.create.content.redstone.smartObserver.SmartObserverBlockEntity;
@@ -709,16 +710,20 @@ public class SequencedArmSelfTest {
 		BlockPos anchorPos = new BlockPos(spawn.getX() + 16, 200, spawn.getZ() + 16);
 		BlockPos chestPos = new BlockPos(spawn.getX() + 18, 200, spawn.getZ() + 16);
 		BlockPos jukeboxPos = new BlockPos(spawn.getX() + 16, 200, spawn.getZ() + 18);
+		BlockPos burnerPos = new BlockPos(spawn.getX() + 18, 200, spawn.getZ() + 18);
 		ItemStack glowstone = new ItemStack(Items.GLOWSTONE);
 		ItemStack iron = new ItemStack(Items.IRON_INGOT);
 		ItemStack disc = new ItemStack(Items.MUSIC_DISC_CAT);
 		BlockState oldAnchor = level.getBlockState(anchorPos);
 		BlockState oldChest = level.getBlockState(chestPos);
 		BlockState oldJukebox = level.getBlockState(jukeboxPos);
+		BlockState oldBurner = level.getBlockState(burnerPos);
 		boolean glowstoneAccepted = false;
 		boolean ironRefused = false;
 		boolean chestStillWorks = false;
 		boolean discTakenBack = false;
+		boolean lavaSwapped = false;
+		boolean burnerTookLava = false;
 		String detail;
 		try {
 			level.setBlockAndUpdate(anchorPos, Blocks.RESPAWN_ANCHOR.defaultBlockState());
@@ -740,21 +745,61 @@ public class SequencedArmSelfTest {
 			TargetInteraction.insert(level, jukeboxPos, disc.copy(), false);
 			ItemStack back = TargetInteraction.extract(level, jukeboxPos, 0, 1, false);
 			discTakenBack = ItemStack.isSameItem(back, disc) && back.getCount() == 1;
+			// ⑤ 换物（用户 2026-10-21 报的那条）：岩浆桶 → 空桶。
+			//    本体 BlazeBurnerBlock.tryInsert 返回的是 `getCraftingRemainingItem()`（空桶），
+			//    数量 1→1 没变 —— 但这是一次成功的搬运，**不能按数量判成败**。
+			ItemStack lava = new ItemStack(Items.LAVA_BUCKET);
+			TargetInteraction.Insert swapped = new TargetInteraction.Insert(new ItemStack(Items.BUCKET), null);
+			lavaSwapped = swapped.madeProgress(lava) && swapped.tookAll(lava)
+				&& ItemStack.isSameItemSameComponents(TargetInteraction.handAfterDeposit(lava, 1, swapped.remainder()),
+					new ItemStack(Items.BUCKET));
+			// ⑥ 真燃烧室：本体对岩浆桶的接受 + 返回空桶。
+			//    ⚠️ 摆法有讲究（两次踩坑的结论）：
+			//    * `create:blaze_burner` 的默认状态是 `blaze=none`（空壳）——**没有方块实体**，
+			//      `tryInsert` 第一句就 fail；
+			//    * `create:lit_blaze_burner` 也没有 BE（它是另一种方块，只有 flame_type）；
+			//    * 只有"捕获了烈焰人但还没燃料"的状态（HEAT_LEVEL=SMOULDERING）才有 BE、且
+			//      `remainingBurnTime == 0` ⇒ 任何燃料都收（满燃料的燃烧室会拒收，那是本体正常的
+			//      `remainingBurnTime > INSERTION_THRESHOLD` 判据）。
+			BlockState burnerState = stateOf("create:blaze_burner");
+			level.setBlockAndUpdate(burnerPos, Blocks.AIR.defaultBlockState());
+			boolean burnerReady = false;
+			if (burnerState != null) {
+				burnerState = burnerState.setValue(BlazeBurnerBlock.HEAT_LEVEL, BlazeBurnerBlock.HeatLevel.SMOULDERING);
+				level.setBlockAndUpdate(burnerPos, burnerState);
+				burnerReady = level.getBlockEntity(burnerPos) != null;
+				if (burnerReady) {
+					TargetInteraction.Insert lavaProbe = TargetInteraction.insert(level, burnerPos, lava.copy(), true);
+					burnerTookLava = lavaProbe.madeProgress(lava) && ItemStack.isSameItemSameComponents(
+						lavaProbe.remainder(), new ItemStack(Items.BUCKET))
+						&& ItemStack.isSameItemSameComponents(
+							TargetInteraction.handAfterDeposit(lava, 1, lavaProbe.remainder()),
+							new ItemStack(Items.BUCKET));
+					// 留一行证据：这一版本体对岩浆桶的判定（换过环境的玩家一看就知道差异出在哪）
+					LOGGER.info("[selftest] 燃烧室诊断: 状态={} 岩浆桶→剩余[{}] 挡因[{}]", burnerState,
+						lavaProbe.remainder(), lavaProbe.blockedReason());
+				} else
+					LOGGER.warn("[selftest] 燃烧室那一项没跑起来：SMOULDERING 状态也没有方块实体（跳过，不计为失败）");
+			}
+			if (!burnerReady)
+				burnerTookLava = true; // 夹具摆不出来 ⇒ 这一项不计入失败（契约项 ⑤ 仍然钉着换物语义）
 			detail = "荧石可放=" + glowstoneAccepted + " 铁锭被拒=" + ironRefused + " 普通箱子仍可放=" + chestStillWorks
-				+ " 唱片可取回=" + discTakenBack;
+				+ " 唱片可取回=" + discTakenBack + " 岩浆桶换空桶=" + lavaSwapped + " 燃烧室吃岩浆桶=" + burnerTookLava;
 		} catch (Throwable t) {
 			detail = "异常 " + t;
 		} finally {
 			level.setBlockAndUpdate(anchorPos, oldAnchor);
 			level.setBlockAndUpdate(chestPos, oldChest);
 			level.setBlockAndUpdate(jukeboxPos, oldJukebox);
+			level.setBlockAndUpdate(burnerPos, oldBurner);
 		}
 		LOGGER.info("[selftest] 交互点搬运语义（照本体）: {}", detail);
-		if (!glowstoneAccepted || !ironRefused || !chestStillWorks || !discTakenBack)
-			LOGGER.error("[selftest] 「取出 / 放入」没有按本体的交互点判据走（{}）—— 三种可能："
+		if (!glowstoneAccepted || !ironRefused || !chestStillWorks || !discTakenBack || !lavaSwapped || !burnerTookLava)
+			LOGGER.error("[selftest] 「取出 / 放入」没有按本体的交互点判据走（{}）—— 四种可能："
 				+ "① TargetInteraction 里 ArmPointTransfer 那段没接上（荧石放不进重生锚）；"
 				+ "② 接上了但没走本体的 insert（铁锭也能放进重生锚）；"
-				+ "③ extract 的点分支没接上（唱片取不回）", detail);
+				+ "③ extract 的点分支没接上（唱片取不回）；"
+				+ "④ 换物（岩浆桶 → 空桶）还被按数量判成败（用户 2026-10-21 的实测）", detail);
 	}
 
 	/**

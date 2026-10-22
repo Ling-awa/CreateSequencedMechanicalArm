@@ -47,9 +47,56 @@ public final class TargetInteraction {
 	/** 插入结果：剩余物品 + 被挡下时的具体原因（{@code null} 表示不是"被挡"，可能是真的放不下）。 */
 	public record Insert(ItemStack remainder, @Nullable String blockedReason) {
 
+		/**
+		 * 有没有进展（"至少进去一点"）。
+		 *
+		 * <p>⚠️ <b>不能只看数量</b>（用户 2026-10-21 实测："动力臂可以用熔岩桶为烈焰人添加燃料，
+		 * 留下一个空桶在手上。我们的臂无法用熔岩桶为烈焰人添加燃料"）：
+		 * 本体 {@code BlazeBurnerBlock.tryInsert} 对岩浆桶返回的是
+		 * {@code stack.getCraftingRemainingItem()} —— <b>空桶</b>，数量 1→1 没变，
+		 * 但那是一次货真价实的搬运。按数量判会把这次成功读成"目标放不下"。
+		 */
 		public boolean madeProgress(ItemStack original) {
-			return remainder.getCount() < original.getCount();
+			if (remainder.isEmpty())
+				return original.getCount() > 0;
+			if (remainder.getCount() < original.getCount())
+				return true;
+			// 换物（递出去的那摞一个不剩，回来的是容器）⇒ 同样算进展
+			return !ItemStack.isSameItemSameComponents(remainder, original);
 		}
+
+		/**
+		 * 递出去的这一摞**全部**进去了吗 —— 「等于 N 个」的判据。
+		 *
+		 * <p>同种物品看数量（还有剩就是没全进去）；<b>换了物品</b>（岩浆桶 → 空桶）算全进去了，
+		 * 因为回来的不是"没塞完的货"，而是容器。
+		 */
+		public boolean tookAll(ItemStack offered) {
+			if (remainder.isEmpty())
+				return true;
+			return !ItemStack.isSameItemSameComponents(remainder, offered);
+		}
+	}
+
+	/**
+	 * 放入之后<b>手上</b>该剩什么（纯函数，不碰库存）—— 三条线索：这次搬了几个、回来的是什么、手上原本有几个。
+	 *
+	 * <p>为什么不写在一处算式里：换物（岩浆桶 → 空桶）会让"数量"失去意义，合并规则必须按
+	 * <b>是不是同种物品</b>分三支，见下面的注释。
+	 *
+	 * @return {@code null} = 单个手上槽放不下（回来的容器与"没参与的那一截"不是同种物品）——
+	 *         调用方应把容器塞进臂内库存，塞不下就在**真搬之前**失败
+	 */
+	@Nullable
+	public static ItemStack handAfterDeposit(ItemStack held, int amount, ItemStack remainder) {
+		int leftOver = held.getCount() - amount; // 没参与这次放入的那一截
+		if (leftOver <= 0)
+			return remainder; // 手上全参与了 ⇒ 带回容器（空桶）或空
+		if (remainder.isEmpty())
+			return held.copyWithCount(leftOver); // 没有容器 ⇒ 只剩没参与的那一截
+		if (ItemStack.isSameItemSameComponents(remainder, held))
+			return held.copyWithCount(leftOver + remainder.getCount()); // 同种物品：并回一摞
+		return null; // 换物 + 手上还有剩：容器与散件不同种，一个槽放不下
 	}
 
 	@Nullable

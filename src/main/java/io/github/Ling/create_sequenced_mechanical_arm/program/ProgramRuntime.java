@@ -1082,24 +1082,18 @@ public class ProgramRuntime {
 				// ★ 个数模式 = 等于：动身之前"手上够 N 个"与"目标吃得下恰好 N 个"**两条**都要成立。
 				//   报因必须能分辨是哪一条（"手上不足"与"目标放不下"是两种完全不同的补救办法）。
 				//   ATMOST 照旧只看"整摞能不能进去一点"（有多少放多少，不足也不失败）。
-				if (entry.countIsExact()) {
-					if (held.getCount() < entry.count)
-						return FailText.of("hand_short", entry.count, held.getCount());
-					TargetInteraction.Insert exactProbe = TargetInteraction.insert(level, target,
-						held.copyWithCount(entry.count), true);
-					if (exactProbe.blockedReason() != null)
-						return FailText.of("target_refused", exactProbe.blockedReason());
-					if (!exactProbe.remainder()
-						.isEmpty())
-						return FailText.of("target_full", entry.count);
-				} else {
-					// 用 TargetInteraction 而不是裸能力：漏斗没有通用物品能力，走它自己的行为对象
-					TargetInteraction.Insert probe = TargetInteraction.insert(level, target, held.copy(), true);
-					if (probe.blockedReason() != null)
-						return FailText.of("target_refused", probe.blockedReason());
-					if (!probe.madeProgress(held))
-						return FailText.of("target_full", held.getCount());
-				}
+				// ⚠️ 判据都走 TargetInteraction.Insert 的那两个方法：**不能按数量判**，
+				//   本体对岩浆桶这类"换物"搬运返回的是容器（空桶），数量不变也是成功
+				//   （用户 2026-10-21 实测："动力臂可以用熔岩桶为烈焰人添加燃料，留下一个空桶在手上"）。
+				int amount = entry.countIsExact() ? entry.count : Math.min(held.getCount(), entry.count);
+				if (entry.countIsExact() && held.getCount() < entry.count)
+					return FailText.of("hand_short", entry.count, held.getCount());
+				ItemStack offered = held.copyWithCount(amount);
+				TargetInteraction.Insert probe = TargetInteraction.insert(level, target, offered.copy(), true);
+				if (probe.blockedReason() != null)
+					return FailText.of("target_refused", probe.blockedReason());
+				if (entry.countIsExact() ? !probe.tookAll(offered) : !probe.madeProgress(offered))
+					return FailText.of("target_full", amount);
 			}
 			case UNLOAD -> {
 				if (arm.getOverflow()
@@ -1433,47 +1427,48 @@ public class ProgramRuntime {
 				return;
 			}
 			amount = entry.count;
-			// 先模拟"目标能不能吃下恰好 N 个"：模拟后还有剩 = 放不下 ⇒ 失败，**一个都不真塞**
-			TargetInteraction.Insert probe = TargetInteraction.insert(arm.getLevel(), target,
-				held.copyWithCount(amount), true);
-			if (probe.blockedReason() != null) {
-				handleFailure(arm, task, entry, FailText.of("target_refused", probe.blockedReason()));
-				return;
-			}
-			if (!probe.remainder()
-				.isEmpty()) {
-				handleFailure(arm, task, entry, FailText.of("target_full", amount));
-				return;
-			}
 		} else {
 			amount = Math.min(held.getCount(), entry.count);
 		}
-		TargetInteraction.Insert result = TargetInteraction.insert(arm.getLevel(), target,
-			held.copyWithCount(amount), false);
-		int leftOver = held.getCount() - amount; // 没参与这次放入的那一截
-		ItemStack remainder = result.remainder();
-		int inserted = amount - remainder.getCount();
-		// 手上回收 = 没塞进去的那几个 + 没参与的那一截（**别丢东西**）
-		ItemStack back;
-		if (leftOver <= 0)
-			back = remainder;
-		else if (remainder.isEmpty())
-			back = held.copyWithCount(leftOver);
-		else
-			back = remainder.copyWithCount(remainder.getCount() + leftOver);
-		arm.setHeldItem(back);
-		if (inserted <= 0) {
-			// 一个都没进去 = 失败。⚠️ 比较基准是**这次搬的 amount**，不是整摞 —— 照抄旧条件
-			// （`remainder.getCount() == held.getCount()`）在只搬 amount 个之后会永远判成功（amount == 1 时
-			// remainder 与 held 的数量本来就不等）或永远判失败（leftOver > 0 时基准变了）。
-			handleFailure(arm, task, entry,
-				result.blockedReason() != null ? FailText.of("target_refused", result.blockedReason())
-					: FailText.of("target_full", amount));
+		ItemStack offered = held.copyWithCount(amount);
+		// ★ 先模拟一次，拿三件事：被挡原因 / 是否全进去 / **换物后的容器**。
+		//   换物是这里的关键（用户 2026-10-21）：本体对岩浆桶返回的是空桶（crafting remainder），
+		//   数量没变但确实搬成功了 —— 只能按"是不是同种物品"判，不能按数量判。
+		TargetInteraction.Insert probe = TargetInteraction.insert(arm.getLevel(), target, offered.copy(), true);
+		if (probe.blockedReason() != null) {
+			handleFailure(arm, task, entry, FailText.of("target_refused", probe.blockedReason()));
 			return;
 		}
-		// 「等于」要求 N 个**全部**进去：真塞之后还剩下就说明没达成（上面已把剩余还回手上，不丢货）
-		if (exact && inserted < amount) {
-			handleFailure(arm, task, entry, FailText.of("target_partial", amount, inserted));
+		if (exact ? !probe.tookAll(offered) : !probe.madeProgress(offered)) {
+			handleFailure(arm, task, entry,
+				exact ? FailText.of("target_full", amount) : FailText.of("target_full", offered.getCount()));
+			return;
+		}
+		// ★ 回收预判：容器（空桶）与"没参与的那一截"都要有地方放，否则**真搬之前**就失败（别先搬了再犯难）
+		ItemStack plannedHand = TargetInteraction.handAfterDeposit(held, amount, probe.remainder());
+		if (plannedHand == null && !arm.canAccept(probe.remainder())) {
+			handleFailure(arm, task, entry, FailText.of("arm_full"));
+			return;
+		}
+		TargetInteraction.Insert result = TargetInteraction.insert(arm.getLevel(), target, offered.copy(), false);
+		ItemStack remainder = result.remainder();
+		if (result.blockedReason() != null) {
+			handleFailure(arm, task, entry, FailText.of("target_refused", result.blockedReason()));
+			return;
+		}
+		ItemStack back = TargetInteraction.handAfterDeposit(held, amount, remainder);
+		if (back == null) {
+			// 换物 + 手上还剩燃料：容器（空桶）塞进臂内库存，手上留燃料
+			arm.insertIntoInventory(remainder);
+			back = held.copyWithCount(held.getCount() - amount);
+		}
+		arm.setHeldItem(back);
+		if (exact ? !result.tookAll(offered) : !result.madeProgress(offered)) {
+			// 「等于」要求 N 个**全部**进去；「小于等于」要求至少进去一点。
+			// ⚠️ 判据不是"数量变没变"（见 TargetInteraction.Insert.madeProgress 里那条用户实测）
+			int taken = result.tookAll(offered) ? amount : amount - remainder.getCount();
+			handleFailure(arm, task, entry,
+				taken <= 0 ? FailText.of("target_full", amount) : FailText.of("target_partial", amount, taken));
 			return;
 		}
 		succeed(arm, task, entry);
