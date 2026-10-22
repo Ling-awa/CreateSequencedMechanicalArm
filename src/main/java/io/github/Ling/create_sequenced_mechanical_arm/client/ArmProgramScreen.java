@@ -178,18 +178,30 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int CHIP_GAP = 4;
 	/**
 	 * 胶囊宽度封顶 —— 上游 {@code renderInput} 也把字段封在 {@code min(getFieldSize(...), 150)}
-	 * （`ScheduleScreen:614`），但**150 放到我们的布局里是错的**：胶囊区裁剪到 GUI 204（局部 179），
-	 * 行尾的「添加属性」＋ 贴图 19 宽、画在"行末 - 3"，所以最宽的一枚胶囊必须满足
-	 * {@code 26 + W + 4 + 19 ≤ 179} ⇒ {@code W ≤ 130}。封顶取 <b>133</b>（再留 3px 余量）：
-	 * 这样即使这一行滚到最右，＋ 也**一定**完整落在裁剪区里（{@code addPropReachable} 把它钉住了）。
+	 * （`ScheduleScreen:614`），但**150 放到我们的布局里是错的**：胶囊区裁剪到展示框右端
+	 * <b>局部 181</b>（见 {@link #ROW_CLIP_RIGHT}），行尾的「添加属性」＋ 贴图 19 宽、画在"行末 - 3"，
+	 * 所以最宽的一枚胶囊必须满足 {@code 26 + W + 4 + 19 ≤ 181} ⇒ {@code W ≤ 132}。封顶取 <b>133</b>
+	 * （最宽那一路恰好 179，仍在框内 2px 余量）：这样即使这一行滚到最右，＋ 也**一定**完整落在裁剪区里
+	 * （{@code addPropReachable} 把它钉住了）。
 	 *
 	 * <p>原来的 150 会让"最后那枚胶囊"宽到把 ＋ 顶出裁剪区 —— 用户实测：
 	 * <i>"备注太长会把添加属性的按键挤到外面，并且即使超出去了，没有显示，也可以点击"</i>。
 	 */
 	private static final int CHIP_MAX = 133;
-	/** 胶囊区单独裁剪（上游 `ScheduleScreen:457` 的 {@code enableScissor(leftPos+43, …, leftPos+204, …)}）。 */
+	/**
+	 * 胶囊区单独裁剪（上游 `ScheduleScreen:457` 的 {@code enableScissor(leftPos+43, …, leftPos+204, …)}）。
+	 *
+	 * <p>⚠️ <b>右界不是 204</b>（用户 2026-10-22 画图纠正）：卡片局部坐标里「属性展示框」的右端
+	 * ＝「复制」≡ 的左沿 <b>181</b>（{@link #DUPLICATE_X}），而 204 对应局部 <b>179</b> ——
+	 * 比展示框早 2px。于是行尾的「添加属性」＋ 只要恰好跨在 179..181 之间，
+	 * 右端就会被裁掉一截：<b>它明明在展示框里，却只画出来一部分</b>（用户截图里黄色竖线是旧裁剪位置、
+	 * 蓝色竖线才是展示框右端）。
+	 *
+	 * <p>所以这里直接写成"25 + ≡ 的左沿"：裁剪边界与展示框边界从此是同一个数，
+	 * 自检 {@code rowClipProblem()} 把这条钉住（改一个不改另一个立刻红）。
+	 */
 	private static final int ROW_CLIP_LEFT = 43;
-	private static final int ROW_CLIP_RIGHT = 204;
+	private static final int ROW_CLIP_RIGHT = 25 + DUPLICATE_X;
 	/** 编辑器第二行（"值"那一行）：上游把整条线画在 {@code topPos+87}（`ScheduleScreen:1066-1069`）。 */
 	private static final int ROW2_Y = 87;
 	/**
@@ -1350,7 +1362,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 		if (rowScrollable(props)) {
 			int z = 200;
 			hGradient(graphics, 18, 10, CARD_HEADER + 2, CARD_HEIGHT - 2, z, 0x44000000, 0x00000000);
-			hGradient(graphics, CARD_WIDTH - 26, 10, CARD_HEADER + 2, CARD_HEIGHT - 2, z, 0x00000000, 0x44000000);
+			// 右端淡出一路铺到**展示框右沿**（≡ 的左沿）：少铺 2px 就会让"滚到最右"时最后一枚胶囊
+			// 刚好露一截硬边（旧写法写死 10 宽、止于 179）
+			hGradient(graphics, CARD_WIDTH - 26, DUPLICATE_X - (CARD_WIDTH - 26), CARD_HEADER + 2, CARD_HEIGHT - 2, z,
+				0x00000000, 0x44000000);
 		}
 
 		// ⚠️ ＋ 要**退出滚动位姿之后**、按**可见坐标**画（{@link #plusLocalX}），并且画在淡出之上。
@@ -1428,9 +1443,10 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	private static final int PLUS_SPRITE_W = 19;
 
 	/**
-	 * 「备注」胶囊的宽度上限（自检用）。倒推依据：裁剪区右边界局部 179，＋ 贴图 19 宽、画在"行末-3"，
-	 * 而备注胶囊**永远排在最后**（{@code ArmEntryText.entryProps} 的顺序），所以
-	 * {@code 26 + 上限 + 19 ≤ 179} ⇒ 上限 ≤ 134；这里取 130 留 4px 余量。
+	 * 「备注」胶囊的宽度上限（自检用）。倒推依据：裁剪区右边界局部 <b>181</b>（＝展示框右端，
+	 * 见 {@link #ROW_CLIP_RIGHT}），＋ 贴图 19 宽、画在"行末-3"，而备注胶囊**永远排在最后**
+	 * （{@code ArmEntryText.entryProps} 的顺序），所以 {@code 26 + 上限 + 19 ≤ 181} ⇒ 上限 ≤ 136；
+	 * 这里取 130 留余量。
 	 */
 	private static final int NOTE_CHIP_MAX_W = 130;
 
@@ -4911,6 +4927,29 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	}
 
 	/**
+	 * 自检：胶囊行的<b>裁剪右界必须正好是「属性展示框」的右端</b>（＝「复制」≡ 的左沿）。
+	 *
+	 * <p>用户 2026-10-22 画图指出的那个：裁剪原来写死 204（局部 179），而展示框到 181 ——
+	 * 行尾的「添加属性」＋ 只要跨在 179..181 之间，右端就被裁掉一截，
+	 * <b>明明在展示框里却只画出一部分</b>。
+	 *
+	 * <p>反证：把 {@link #ROW_CLIP_RIGHT} 改回 {@code 204} ⇒ 第一条立刻红。
+	 */
+	@Nullable
+	private static String rowClipProblem() {
+		if (ROW_CLIP_RIGHT - 25 != DUPLICATE_X)
+			return "胶囊行裁剪右界在局部 x=" + (ROW_CLIP_RIGHT - 25) + "，而展示框右端（复制 ≡ 的左沿）在 "
+				+ DUPLICATE_X + " —— 落在两者之间的 ＋ 会被裁掉一截";
+		int plusRight = 26 + CHIP_MAX + CHIP_GAP - 3 + PLUS_SPRITE_W;
+		if (plusRight > DUPLICATE_X)
+			return "最宽的一枚胶囊（" + CHIP_MAX + "）之后，＋ 的右沿到 x=" + plusRight + "，越过了展示框右端 "
+				+ DUPLICATE_X;
+		if (ROW_CLIP_LEFT - 25 > 26)
+			return "胶囊行裁剪左界在局部 x=" + (ROW_CLIP_LEFT - 25) + "，比第一枚胶囊的起点 26 还靠右";
+		return null;
+	}
+
+	/**
 	 * 自检：**空卡进任务时自动建一个默认任务**（用户 2026-10-20）。
 	 *
 	 * <p>以前这里只弹一句「还没有任务」，玩家还得自己回任务页点 ＋；现在与"录入时自动建主任务"同一个兜底：
@@ -5326,6 +5365,9 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 			if (deadTarget != null && problem == null)
 				problem = "失效落点 / 反向引用: " + deadTarget;
 			// ★ 超出动力臂活动范围的坐标：坐标框要变红（原版聊天错误提示那种红），悬停再补一句
+			String rowClip = rowClipProblem();
+			if (rowClip != null && problem == null)
+				problem = "胶囊行裁剪: " + rowClip;
 			String coordsRange = screen.coordsRangeProblem(mc);
 			if (coordsRange != null && problem == null)
 				problem = "坐标超范围提示: " + coordsRange;
@@ -7659,8 +7701,11 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 				if (!addPropReachable(CHIP_MAX))
 					return "封顶宽度 " + CHIP_MAX + " 之下，滚到最右也够不到 ＋（见 addPropReachable）";
 				// ★ 判据本体的边界（＋ 贴图 19 宽、裁剪区局部 18..179 ⇒ 左沿最多 160）
-				if (!addPropVisible(160) || addPropVisible(161) || addPropVisible(17))
-					return "addPropVisible 的边界不对（160 应当可见、161/17 应当不可见）";
+			// 边界：右界是展示框右端（≡ 的左沿 181）⇒ ＋ 最右能到 181-19 = 162；
+			// 左边不能越过裁剪左界（局部 18）。数值随 ROW_CLIP_RIGHT 走，不再写死。
+			int lastVisible = (ROW_CLIP_RIGHT - 25) - PLUS_SPRITE_W;
+			if (!addPropVisible(lastVisible) || addPropVisible(lastVisible + 1) || addPropVisible(17))
+				return "addPropVisible 的边界不对（" + lastVisible + " 应当可见、" + (lastVisible + 1) + "/17 应当不可见）";
 				// ★ "滚到最右时 ＋ 一定看得见"——绘制与命中都走 plusLocalX，所以这里算的就是画出来的位置
 				int plusAtMaxScroll = plusLocalX(rowWidth(card), rowWidth(card) - chipWidth(shown.get(shown.size() - 1))
 					- CHIP_GAP);
