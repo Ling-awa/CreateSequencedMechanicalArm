@@ -180,7 +180,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 行右界与「复制」≡ 之间**留出的空隙**（用户 2026-10-22：<i>"框的右端（蓝线）不应该贴着 ≡ 的左边，
 	 * 二者之间本来就有空隙"</i>）。≡ 从 {@link #DUPLICATE_X} 开始，行内容到这里为止。
 	 */
-	private static final int ROW_GAP = 4;
+	private static final int ROW_GAP = 2;
 	/**
 	 * 胶囊行的**右端**（卡片局部坐标）—— 用户图里的<b>蓝线</b>：属性展示框真正的右端。
 	 *
@@ -1594,7 +1594,7 @@ public class ArmProgramScreen extends AbstractSimiContainerScreen<ArmProgramMenu
 	 * 两段文字本身仍然只有一处来源（{@link ArmEntryText#signalTailText} /
 	 * {@link ArmEntryText#signalRangeText}），这里只负责把它们接起来。
 	 *
-	 * <p>顺序与卡片第一行（{@link ArmEntryText#base}）一致：先时长 / 等断电，再距离。
+	 * <p>顺序与卡片第一行（{@link ArmEntryText#base(ArmProgramEntry)}）一致：先时长 / 等断电，再距离。
 	 */
 	private String signalChipTail(ArmProgramEntry entry) {
 		String tail = ArmEntryText.signalTailText(entry)
